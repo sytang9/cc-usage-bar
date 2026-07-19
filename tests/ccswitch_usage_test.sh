@@ -673,6 +673,70 @@ main() {
     rm -rf "$home" "$ctl"
   }
 
+  # =========================================================================
+  # Case 12: a 401 on a NON-expired token triggers a refresh + retry. The
+  # access token looks valid (future expiry) so the time-based refresh never
+  # fires, but the server rejects it (401). The tool should refresh once and
+  # retry: the row renders and the snapshot's access token is updated.
+  # =========================================================================
+  {
+    local home ctl
+    home="$(new_home)"
+    ctl="$(new_ctl)"
+
+    write_claude_json "$home"
+    write_account_credentials "$home" "acct_stale" "REFRESH_STALE" "TOK_STALE" "$(future_ms)"
+
+    set_usage_response "$ctl" "TOK_STALE" 401 '{"error":"unauthorized"}'
+    set_token_response "$ctl" "REFRESH_STALE" 200 "$(refresh_success_body TOK_FRESH)"
+    set_usage_response "$ctl" "TOK_FRESH" 200 "$(usage_body 30 40)"
+
+    run_cc "$home" "$ctl" "" --no-switch
+
+    local sline newtok
+    sline="$(printf '%s' "$OUT" | grep 'acct_stale')"
+    newtok="$(jq -r '.claudeAiOauth.accessToken' "$home/.claude/accounts/acct_stale/credentials.json" 2>/dev/null)"
+
+    if [[ "$EXIT_CODE" -eq 0 ]] \
+      && printf '%s' "$sline" | grep -q '30%' \
+      && printf '%s' "$sline" | grep -q '40%' \
+      && [[ "$newtok" == "TOK_FRESH" ]]; then
+      pass "case12 401 on non-expired token refreshes + retries; row renders, snapshot token updated"
+    else
+      fail "case12 (exit=$EXIT_CODE newtok=$newtok): $OUT"
+    fi
+
+    rm -rf "$home" "$ctl"
+  }
+
+  # =========================================================================
+  # Case 12b: a 401 whose refresh ALSO fails -> re-login (not a silent dash).
+  # =========================================================================
+  {
+    local home ctl
+    home="$(new_home)"
+    ctl="$(new_ctl)"
+
+    write_claude_json "$home"
+    write_account_credentials "$home" "acct_dead" "REFRESH_DEAD" "TOK_DEAD" "$(future_ms)"
+
+    set_usage_response "$ctl" "TOK_DEAD" 401 '{"error":"unauthorized"}'
+    set_token_response "$ctl" "REFRESH_DEAD" 400 '{"error":"invalid_grant"}'
+
+    run_cc "$home" "$ctl" "" --no-switch
+
+    local dline
+    dline="$(printf '%s' "$OUT" | grep 'acct_dead')"
+
+    if [[ "$EXIT_CODE" -eq 0 ]] && printf '%s' "$dline" | grep -q 're-login'; then
+      pass "case12b 401 with a failed refresh shows re-login"
+    else
+      fail "case12b (exit=$EXIT_CODE): $OUT"
+    fi
+
+    rm -rf "$home" "$ctl"
+  }
+
   rm -rf "$STUB_BIN" "$ALL_OUTPUT_LOG" "$ALL_ARGV_LOG"
 
   echo

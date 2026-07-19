@@ -137,6 +137,10 @@ window's reset countdown, so you can decide where to switch before you do it:
   that is idle on 5h but maxed for the week is never flagged as free.
 - `RESET(5h)` shows `—` when 5-hour usage is 0% (the API reports no active
   window to reset yet) — the row still shows real weekly numbers.
+- If an account's stored access token is rejected (expired, or revoked/rotated
+  by a real Claude Code session), the monitor refreshes it automatically and
+  retries. Only if the refresh itself fails does the row show `re-login` — then
+  run `ccswitch <label>` (or log in again) to re-enroll that account.
 - After the table it prompts for a label to switch to (Enter cancels).
 
 Flags:

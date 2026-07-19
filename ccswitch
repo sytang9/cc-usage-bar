@@ -535,10 +535,17 @@ fetch_and_cache_usage() {
   cached_5reset="$(echo "$cache" | jq -r '.five_hour_reset_epoch // empty')"
   cached_7reset="$(echo "$cache" | jq -r '.seven_day_reset_epoch // empty')"
 
+  # The 5th output field is the LIVE HTTP status (empty when served from cache
+  # or a backoff window, "429" when rate-limited, else the raw status). The
+  # caller uses it to distinguish an auth failure (401/403) -- which warrants a
+  # token refresh + retry -- from other failures. It cannot be a global: this
+  # function runs inside $(...), a subshell, so a global set here would not
+  # survive. It rides back as data instead.
+
   # A 429 backoff window is honored even with --refresh: hammering an
   # endpoint that just rate-limited us is never the right override.
   if [[ -n "$rate_limited_until" ]] && (( now < rate_limited_until )); then
-    [[ -n "$cached_5h" ]] && echo "${cached_5h}|${cached_7d}|${cached_5reset}|${cached_7reset}" || echo "|||"
+    [[ -n "$cached_5h" ]] && echo "${cached_5h}|${cached_7d}|${cached_5reset}|${cached_7reset}|" || echo "||||"
     return 0
   fi
 
@@ -546,7 +553,7 @@ fetch_and_cache_usage() {
     && [[ -n "$fetched_at" ]] \
     && (( now - fetched_at < USAGE_CACHE_TTL_SECONDS )) \
     && [[ -n "$cached_5h" ]]; then
-    echo "${cached_5h}|${cached_7d}|${cached_5reset}|${cached_7reset}"
+    echo "${cached_5h}|${cached_7d}|${cached_5reset}|${cached_7reset}|"
     return 0
   fi
 
@@ -558,18 +565,18 @@ fetch_and_cache_usage() {
     local new_cache
     new_cache="$(echo "$cache" | jq --argjson rl "$((now + USAGE_RATE_LIMIT_BACKOFF_SECONDS))" '.rate_limited_until = $rl')"
     write_usage_cache "$label" "$new_cache"
-    [[ -n "$cached_5h" ]] && echo "${cached_5h}|${cached_7d}|${cached_5reset}|${cached_7reset}" || echo "|||"
+    [[ -n "$cached_5h" ]] && echo "${cached_5h}|${cached_7d}|${cached_5reset}|${cached_7reset}|429" || echo "||||429"
     return 0
   fi
 
   if ! [[ "$HTTP_STATUS" =~ ^2[0-9][0-9]$ ]]; then
-    echo "|||"
+    echo "||||${HTTP_STATUS}"
     return 0
   fi
 
   local parsed
   if ! parsed="$(parse_usage "$HTTP_BODY")"; then
-    echo "|||"
+    echo "||||${HTTP_STATUS}"
     return 0
   fi
 
@@ -580,7 +587,7 @@ fetch_and_cache_usage() {
     '{fetched_at: $fa, five_hour_pct: $p5, seven_day_pct: $p7, five_hour_reset_epoch: $pr5, seven_day_reset_epoch: $pr7, rate_limited_until: null}')"
   write_usage_cache "$label" "$new_cache"
 
-  echo "${p5}|${p7}|${p5reset}|${p7reset}"
+  echo "${p5}|${p7}|${p5reset}|${p7reset}|${HTTP_STATUS}"
 }
 
 # --- meter rendering (mirrors statusline-usage.sh's aesthetic: eighth-block
@@ -693,10 +700,12 @@ build_usage_row() {
     return 0
   fi
 
+  local did_refresh=0
   if [[ -z "$access" ]] || is_token_expired "$exp"; then
     local refreshed
     if refreshed="$(attempt_refresh "$label" "$refresh")"; then
       access="$refreshed"
+      did_refresh=1
     else
       echo "${label}|${marker}|relogin||||"
       return 0
@@ -708,8 +717,25 @@ build_usage_row() {
     return 0
   fi
 
-  local p5 p7 p5reset p7reset
-  IFS='|' read -r p5 p7 p5reset p7reset <<<"$(fetch_and_cache_usage "$label" "$access" "$USAGE_BYPASS_CACHE")"
+  local p5 p7 p5reset p7reset httpstatus
+  IFS='|' read -r p5 p7 p5reset p7reset httpstatus <<<"$(fetch_and_cache_usage "$label" "$access" "$USAGE_BYPASS_CACHE")"
+
+  # Auth failure on a token we did NOT already refresh: the access token was
+  # rejected (e.g. revoked or rotated by a real Claude Code session) even
+  # though it had not time-expired, so is_token_expired never triggered a
+  # refresh above. Refresh once and retry the fetch. If the refresh itself
+  # fails, the account genuinely needs a re-login.
+  if [[ -z "$p5" ]] && [[ "$did_refresh" == "0" ]] \
+    && { [[ "$httpstatus" == "401" ]] || [[ "$httpstatus" == "403" ]]; } \
+    && [[ -n "$refresh" ]]; then
+    local retried
+    if retried="$(attempt_refresh "$label" "$refresh")"; then
+      IFS='|' read -r p5 p7 p5reset p7reset httpstatus <<<"$(fetch_and_cache_usage "$label" "$retried" 1)"
+    else
+      echo "${label}|${marker}|relogin||||"
+      return 0
+    fi
+  fi
 
   if [[ -z "$p5" ]]; then
     echo "${label}|${marker}|dash||||"
