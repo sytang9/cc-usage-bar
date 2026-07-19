@@ -291,6 +291,27 @@ EOF
     fail "case10 path traversal not fully blocked (save_exit=$save_traversal_exit delete_exit=$delete_traversal_exit)"
   fi
 
+  # case11: help / -h / --help print the guide; 'help' is reserved as a label
+  run_cc "$home_dir" "" help
+  local help_out="$OUT" help_exit="$EXIT_CODE"
+  run_cc "$home_dir" "" -h
+  local h_out="$OUT"
+  run_cc "$home_dir" "" --help
+  local hh_out="$OUT"
+  run_cc "$home_dir" "" save help
+  local save_help_exit="$EXIT_CODE"
+  if [[ "$help_exit" -eq 0 ]] \
+    && grep -q "COMMANDS" <<<"$help_out" \
+    && grep -q "ccswitch save <label>" <<<"$help_out" \
+    && grep -q "GETTING STARTED" <<<"$help_out" \
+    && grep -q "COMMANDS" <<<"$h_out" \
+    && grep -q "COMMANDS" <<<"$hh_out" \
+    && [[ "$save_help_exit" -ne 0 ]]; then
+    pass "case11 help/-h/--help print guide; 'help' rejected as a label"
+  else
+    fail "case11 help command (help_exit=$help_exit save_help_exit=$save_help_exit)"
+  fi
+
   rm -rf "$home_dir" "$ALL_OUTPUT_LOG"
 
   echo

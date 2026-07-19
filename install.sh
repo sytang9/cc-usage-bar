@@ -11,6 +11,8 @@ set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CLAUDE_DIR="$HOME/.claude"
 SETTINGS_FILE="$CLAUDE_DIR/settings.json"
+# Where the `ccswitch` command is put on PATH (XDG user bin dir).
+BIN_DIR="$HOME/.local/bin"
 
 # Exact statusLine value the task requires — kept as one literal so the
 # printed snippet and the value written into settings.json can never drift
@@ -55,6 +57,27 @@ install_scripts() {
   chmod +x "$CLAUDE_DIR/statusline-usage.sh" "$CLAUDE_DIR/ccswitch"
   echo "Installed: $CLAUDE_DIR/statusline-usage.sh"
   echo "Installed: $CLAUDE_DIR/ccswitch"
+}
+
+# link_ccswitch_on_path: make bare `ccswitch` runnable by symlinking it into
+# $BIN_DIR (~/.local/bin). Idempotent (ln -sf). Warns, with the exact export
+# line, if that dir is not on PATH. The statusLine script is NOT linked -- it
+# is invoked by full path from settings.json, not typed as a command.
+link_ccswitch_on_path() {
+  mkdir -p "$BIN_DIR"
+  ln -sf "$CLAUDE_DIR/ccswitch" "$BIN_DIR/ccswitch"
+  echo "Linked: $BIN_DIR/ccswitch -> $CLAUDE_DIR/ccswitch"
+  case ":${PATH:-}:" in
+    *":$BIN_DIR:"*)
+      echo "You can now run: ccswitch help"
+      ;;
+    *)
+      echo "Note: $BIN_DIR is not on your PATH. Add this line to your shell rc"
+      echo "(e.g. ~/.bashrc or ~/.zshrc), then restart your shell:"
+      echo "  export PATH=\"\$HOME/.local/bin:\$PATH\""
+      echo "Until then, run it by full path: $BIN_DIR/ccswitch help"
+      ;;
+  esac
 }
 
 # configure_settings: merge the statusLine key into settings.json without
@@ -131,6 +154,7 @@ main() {
   check_curl
 
   install_scripts
+  link_ccswitch_on_path
   configure_settings
 
   echo

@@ -50,7 +50,7 @@ USAGE_CACHE_TTL_SECONDS=600
 USAGE_RATE_LIMIT_BACKOFF_SECONDS=120
 USAGE_METER_WIDTH=12
 
-RESERVED_WORDS=(save delete list usage)
+RESERVED_WORDS=(save delete list usage help)
 # Whitelist charset for labels. Deliberately strict: this is what stands
 # between a label and a raw filesystem path ($ACCOUNTS_DIR/$label), so it
 # must reject '/' and '.' outright rather than trying to blocklist "..".
@@ -793,21 +793,39 @@ cmd_usage() {
 
 usage_text() {
   cat <<'EOF'
-ccswitch: save, list, switch between, and delete Claude Code accounts.
+ccswitch - save, list, switch between, and monitor Claude Code accounts.
 
-Usage:
-  ccswitch                     list saved accounts (same as `list`)
-  ccswitch list                list saved accounts, '*' marks the active one
-  ccswitch save <label>        snapshot the currently active account
-  ccswitch delete <label>      remove a saved account (prompts to confirm)
-  ccswitch <label> [--relaunch]
-                                switch to a saved account; --relaunch execs
-                                the claude CLI afterward (override with
-                                CCSWITCH_CLAUDE_CMD)
-  ccswitch usage [--no-switch] [--refresh] [--relaunch]
-                                show 5h/week usage for every saved account,
-                                then optionally prompt to switch; --refresh
-                                bypasses the usage cache
+COMMANDS
+  ccswitch                     list saved accounts ('*' marks the active one)
+  ccswitch list                same as above
+  ccswitch save <label>        snapshot the CURRENTLY active account as <label>
+  ccswitch <label>             switch to a saved account (then restart Claude Code)
+  ccswitch <label> --relaunch  switch, then exec the claude CLI right away
+  ccswitch delete <label>      remove a saved account (asks to confirm)
+  ccswitch usage               show 5h/week usage for every saved account,
+                               then optionally prompt which one to switch to
+  ccswitch help                show this help (also -h, --help)
+
+usage FLAGS
+  --no-switch   just print the table, do not prompt to switch
+  --refresh     bypass the 10-minute usage cache and re-poll now
+  --relaunch    after switching from the prompt, exec the claude CLI
+
+LABELS
+  Any name of letters, digits, '_' or '-' (e.g. work, personal, claude001).
+
+GETTING STARTED (enroll each account once)
+  1. Log into an account normally in Claude Code, then:  ccswitch save work
+  2. Log into another account (claude -> /login), then:  ccswitch save personal
+  3. From then on:  ccswitch            (see them + who is active)
+                    ccswitch personal   (switch; restart Claude Code to apply)
+                    ccswitch usage       (compare headroom, pick where to go)
+
+NOTES
+  Switching swaps stored credentials, so a running Claude Code must be
+  restarted to pick up the change (--relaunch / the `ccw` shell function do
+  this for you). Tip: `ccw <label>` = switch + relaunch in one step.
+  Tokens never leave your machine; saved accounts live under ~/.claude/accounts/.
 EOF
 }
 
@@ -830,7 +848,7 @@ main() {
       shift
       cmd_usage "$@"
       ;;
-    -h | --help)
+    help | -h | --help)
       usage_text
       ;;
     -*)

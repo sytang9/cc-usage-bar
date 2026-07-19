@@ -152,7 +152,7 @@ main() {
   local home5 fake_bin tool tool_path
   home5="$(make_sandbox)"
   fake_bin="$(mktemp -d "${TMPDIR:-/tmp}/cc-usage-bar-install-test-bin.XXXXXX")"
-  for tool in bash mkdir cp chmod mktemp mv grep cat dirname; do
+  for tool in bash mkdir cp chmod mktemp mv grep cat dirname ln readlink; do
     tool_path="$(command -v "$tool" 2>/dev/null || true)"
     [[ -n "$tool_path" ]] && ln -sf "$tool_path" "$fake_bin/$tool"
   done
@@ -174,7 +174,7 @@ main() {
   local home6 fake_bin2
   home6="$(make_sandbox)"
   fake_bin2="$(mktemp -d "${TMPDIR:-/tmp}/cc-usage-bar-install-test-bin2.XXXXXX")"
-  for tool in bash mkdir cp chmod mktemp mv grep cat dirname jq; do
+  for tool in bash mkdir cp chmod mktemp mv grep cat dirname ln readlink jq; do
     tool_path="$(command -v "$tool" 2>/dev/null || true)"
     [[ -n "$tool_path" ]] && ln -sf "$tool_path" "$fake_bin2/$tool"
   done
@@ -191,6 +191,29 @@ main() {
   fi
 
   rm -rf "$home6" "$fake_bin2"
+
+  # --- Case 9: ccswitch is symlinked onto PATH (~/.local/bin), idempotently ---
+  local home7
+  home7="$(make_sandbox)"
+  run_install "$home7" "n"
+  local link7="$home7/.local/bin/ccswitch"
+  if [[ "$EXIT_CODE" -eq 0 ]] \
+    && [[ -L "$link7" ]] \
+    && [[ "$(readlink "$link7")" == "$home7/.claude/ccswitch" ]] \
+    && [[ -x "$link7" ]]; then
+    pass "case9 ccswitch symlinked into ~/.local/bin -> installed script"
+  else
+    fail "case9 ccswitch not symlinked onto PATH (exit=$EXIT_CODE, link=$([[ -L "$link7" ]] && echo yes || echo no)): $OUT"
+  fi
+
+  run_install "$home7" "n"
+  if [[ -L "$link7" ]] && [[ "$(readlink "$link7")" == "$home7/.claude/ccswitch" ]]; then
+    pass "case9b re-run keeps a single valid ccswitch symlink (idempotent)"
+  else
+    fail "case9b symlink broken on re-run"
+  fi
+
+  rm -rf "$home7"
 
   echo
   echo "----------------------------------------"

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Test harness for statusline-usage.sh
+# Test harness for statusline-usage.sh (2-row capsule/test-tube bar design)
 # Self-contained bash; no external test framework. Sandboxes HOME per case.
 set -uo pipefail
 
@@ -7,6 +7,10 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 TARGET="$REPO_DIR/statusline-usage.sh"
 FIXTURES="$SCRIPT_DIR/fixtures"
+
+# Capsule wall-cap glyphs (see statusline-usage.sh GLYPH_WALL_L/GLYPH_WALL_R).
+WALL_L="▕"
+WALL_R="▏"
 
 FAIL_COUNT=0
 PASS_COUNT=0
@@ -34,7 +38,7 @@ run_script() {
   EXIT_CODE=$?
 }
 
-# --- Case 1: normal.json with full account identity -----------------------
+# --- Case 1: normal.json with full account identity -> 2-row capsule bar --
 case1() {
   local home_dir
   home_dir="$(make_sandbox)"
@@ -47,14 +51,19 @@ case1() {
   line_count="$(printf '%s\n' "$OUT" | wc -l)"
 
   if [[ "$EXIT_CODE" -eq 0 ]] \
-    && printf '%s' "$OUT" | grep -q "62" \
-    && printf '%s' "$OUT" | grep -q "31" \
+    && [[ "$line_count" -eq 2 ]] \
     && printf '%s' "$OUT" | grep -q "test-user@example.com" \
     && printf '%s' "$OUT" | grep -q "Opus" \
-    && [[ "$line_count" -eq 3 ]]; then
-    pass "case1 normal output has pcts, email, model, 3 lines"
+    && printf '%s' "$OUT" | grep -qF "$WALL_L" \
+    && printf '%s' "$OUT" | grep -qF "$WALL_R" \
+    && printf '%s' "$OUT" | grep -q "5H" \
+    && printf '%s' "$OUT" | grep -q "WK" \
+    && printf '%s' "$OUT" | grep -q "CTX" \
+    && printf '%s' "$OUT" | grep -q "62" \
+    && printf '%s' "$OUT" | grep -q "31"; then
+    pass "case1 normal output is exactly 2 rows with capsules, labels, pcts, identity"
   else
-    fail "case1 normal output (exit=$EXIT_CODE lines=$line_count): $OUT"
+    fail "case1 normal output (exit=$EXIT_CODE lines=$line_count): $(printf '%s' "$OUT" | cat -v)"
   fi
 
   rm -rf "$home_dir"
@@ -76,7 +85,7 @@ case2() {
   rm -rf "$home_dir"
 }
 
-# --- Case 3: null_limits.json -> waiting message, exit 0, non-empty -------
+# --- Case 3: null_limits.json -> "—" placeholder, exit 0, non-empty -------
 case3() {
   local home_dir
   home_dir="$(make_sandbox)"
@@ -84,11 +93,13 @@ case3() {
   run_script "$home_dir" "$FIXTURES/null_limits.json"
 
   if [[ "$EXIT_CODE" -eq 0 ]] \
-    && printf '%s' "$OUT" | grep -q "waiting for first API call" \
+    && printf '%s' "$OUT" | grep -q "5H" \
+    && printf '%s' "$OUT" | grep -q "WK" \
+    && printf '%s' "$OUT" | grep -q "—" \
     && [[ -n "$OUT" ]]; then
-    pass "case3 null rate_limits shows waiting message, exit 0, non-empty"
+    pass "case3 null rate_limits shows — placeholder for 5H/WK, exit 0, non-empty"
   else
-    fail "case3 null rate_limits (exit=$EXIT_CODE): $OUT"
+    fail "case3 null rate_limits (exit=$EXIT_CODE): $(printf '%s' "$OUT" | cat -v)"
   fi
 
   rm -rf "$home_dir"
@@ -108,7 +119,7 @@ case4() {
     && [[ -n "$OUT" ]]; then
     pass "case4 missing oauthAccount omits email, still prints rows"
   else
-    fail "case4 missing oauthAccount (exit=$EXIT_CODE): $OUT"
+    fail "case4 missing oauthAccount (exit=$EXIT_CODE): $(printf '%s' "$OUT" | cat -v)"
   fi
 
   rm -rf "$home_dir"
@@ -129,7 +140,7 @@ case5() {
   if [[ "$EXIT_CODE" -eq 0 ]] && ! printf '%s' "$OUT" | grep -q "$fake_token"; then
     pass "case5 fake token never appears in output"
   else
-    fail "case5 secret leak detected (exit=$EXIT_CODE): $OUT"
+    fail "case5 secret leak detected (exit=$EXIT_CODE): $(printf '%s' "$OUT" | cat -v)"
   fi
 
   rm -rf "$home_dir"
@@ -158,6 +169,23 @@ case6() {
   fi
 
   rm -rf "$home_dir" "$stub_dir"
+}
+
+# --- Bonus: malformed JSON on stdin -> single fallback line, exit 0 -------
+case7() {
+  local home_dir
+  home_dir="$(make_sandbox)"
+
+  OUT="$(HOME="$home_dir" bash "$TARGET" <<<'{not valid json' 2>&1)"
+  EXIT_CODE=$?
+
+  if [[ "$EXIT_CODE" -eq 0 ]] && [[ -n "$OUT" ]] && [[ "$(printf '%s\n' "$OUT" | wc -l)" -eq 1 ]]; then
+    pass "case7 malformed JSON yields single fallback line, exit 0"
+  else
+    fail "case7 malformed JSON handling (exit=$EXIT_CODE): $OUT"
+  fi
+
+  rm -rf "$home_dir"
 }
 
 # --- Bonus: unbound variable inside main -> guard still catches it --------
@@ -191,13 +219,13 @@ case8() {
   rm -rf "$home_dir" "$scratch_script"
 }
 
-# --- Color-threshold boundary cases ----------------------------------------
+# --- Fill-color boundary cases ----------------------------------------------
 # statusline-usage.sh's color_for() rule (see its PCT_OK_MAX/PCT_WARN_MAX
 # constants): pct < 60 -> ok (108), 60 <= pct <= 85 -> warn (179),
-# pct > 85 -> crit (167). Each case below feeds a minimal inline JSON
-# (both rate-limit buckets set to the same boundary pct, since only the
-# five_hour/seven_day bars' own color is under test here) and asserts the
-# exact 256-color SGR escape for that boundary's expected bucket appears.
+# pct > 85 -> crit (167). Each case below feeds a minimal inline JSON (both
+# rate-limit buckets set to the same boundary pct, since only the 5H/WK
+# capsules' own fill color is under test here) and asserts the exact
+# 256-color SGR escape for that boundary's expected bucket appears.
 run_boundary_pct() {
   local home_dir="$1" pct="$2"
   local json
@@ -225,36 +253,43 @@ assert_color_boundary() {
 
 # --- Case 9: pct 59 -> still ok (108), one below the warn threshold --------
 case9() {
-  assert_color_boundary 59 108 "case9 pct 59 shows ok color 108 (just below warn threshold)"
+  assert_color_boundary 59 108 "case9 pct 59 shows ok fill color 108 (just below warn threshold)"
 }
 
 # --- Case 10: pct 60 -> warn (179), the first warn value -------------------
 case10() {
-  assert_color_boundary 60 179 "case10 pct 60 shows warn color 179 (first warn value)"
+  assert_color_boundary 60 179 "case10 pct 60 shows warn fill color 179 (first warn value)"
 }
 
 # --- Case 11: pct 85 -> still warn (179), the last warn value --------------
 case11() {
-  assert_color_boundary 85 179 "case11 pct 85 shows warn color 179 (last warn value)"
+  assert_color_boundary 85 179 "case11 pct 85 shows warn fill color 179 (last warn value)"
 }
 
 # --- Case 12: pct 86 -> crit (167), the first crit value -------------------
 case12() {
-  assert_color_boundary 86 167 "case12 pct 86 shows crit color 167 (first crit value)"
+  assert_color_boundary 86 167 "case12 pct 86 shows crit fill color 167 (first crit value)"
 }
 
-# --- Bonus: malformed JSON on stdin -> single fallback line, exit 0 -------
-case7() {
+# --- Case 13: label tints for 5H (110), WK (176), CTX (246) ----------------
+case13() {
   local home_dir
   home_dir="$(make_sandbox)"
 
-  OUT="$(HOME="$home_dir" bash "$TARGET" <<<'{not valid json' 2>&1)"
-  EXIT_CODE=$?
+  run_script "$home_dir" "$FIXTURES/normal.json"
 
-  if [[ "$EXIT_CODE" -eq 0 ]] && [[ -n "$OUT" ]] && [[ "$(printf '%s\n' "$OUT" | wc -l)" -eq 1 ]]; then
-    pass "case7 malformed JSON yields single fallback line, exit 0"
+  local p5h pwk pctx
+  p5h="$(printf '\033[38;5;110m')"
+  pwk="$(printf '\033[38;5;176m')"
+  pctx="$(printf '\033[38;5;246m')"
+
+  if [[ "$EXIT_CODE" -eq 0 ]] \
+    && printf '%s' "$OUT" | grep -qF "$p5h" \
+    && printf '%s' "$OUT" | grep -qF "$pwk" \
+    && printf '%s' "$OUT" | grep -qF "$pctx"; then
+    pass "case13 label tints present: 5H=110, WK=176, CTX=246"
   else
-    fail "case7 malformed JSON handling (exit=$EXIT_CODE): $OUT"
+    fail "case13 label tints missing (exit=$EXIT_CODE): $(printf '%s' "$OUT" | cat -v)"
   fi
 
   rm -rf "$home_dir"
@@ -278,6 +313,7 @@ main() {
   case10
   case11
   case12
+  case13
 
   echo
   echo "----------------------------------------"

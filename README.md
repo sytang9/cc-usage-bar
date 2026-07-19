@@ -5,21 +5,24 @@ for saving, switching between, and monitoring rate-limit headroom across
 multiple Claude accounts.
 
 ```
-Acme Corp · jane@acme.com    Fable · high    ctx ██████▌········· 41%
-5H     ████████████▌··· 78%   ↻ 2h 14m
-WEEK   ███▉············ 24%   ↻ 3d 9h
+Ctrl CV · jane@acme.com                 Opus 4.8 (1M context) · high
+5H ▕▰▰▱▱▱▱▱▱▏ 24% ↻3h 2m   WK ▕▰▰▱▱▱▱▱▱▏ 24% ↻3d 23h   CTX ▕▰▰▱▱▱▱▱▱▏ 19%
 ```
 
-(Rendered in your terminal with 256-color ANSI: sage when a meter is under
-60%, amber from 60–85%, red above 85%. The block above is the plain-text
-equivalent.)
+Two rows: identity + model on top, then three slim capsule meters — 5-hour,
+weekly, and context window — on one line. Rendered in your terminal with
+256-color ANSI. The capsule fill is a danger signal: sage under 60%, amber
+60–85%, red above 85% — so a near-limit meter always reads red regardless of
+which one it is. The `5H` / `WK` / `CTX` labels carry distinct calm tints so
+they stay easy to tell apart; caps and the empty track are dim grey. The
+block above is the plain-text equivalent.
 
 ## What it does
 
 - **`statusline-usage.sh`** — a Claude Code `statusLine` script. Every render
-  it reads the JSON Claude Code feeds it on stdin and prints three rows:
-  account/model/context on top, then 5-hour and weekly rate-limit meters
-  with reset countdowns underneath.
+  it reads the JSON Claude Code feeds it on stdin and prints two rows:
+  account and model on top, then the 5-hour, weekly, and context-window
+  meters (with reset countdowns) on one line underneath.
 - **`ccswitch`** — save the currently logged-in Claude account under a
   label, list saved accounts, switch between them, or delete one.
 - **`ccswitch usage`** — an all-account monitor: polls the 5h/weekly usage
@@ -47,6 +50,10 @@ cd cc-usage-bar
 
 - Copies `statusline-usage.sh` and `ccswitch` into `~/.claude/` and makes
   them executable.
+- Symlinks `ccswitch` into `~/.local/bin` so you can run it as a bare
+  `ccswitch` command. If `~/.local/bin` isn't on your `PATH`, it prints the
+  exact `export PATH=...` line to add (and meanwhile you can run it by full
+  path, `~/.claude/ccswitch`).
 - Checks `jq` is on `PATH` (hard requirement; exits with an install hint if
   missing) and warns, non-fatally, if `curl` is missing.
 - Merges the `statusLine` entry into `~/.claude/settings.json` — creating
@@ -72,19 +79,17 @@ To wire up the statusLine by hand instead, merge this into
 
 ## Usage — the bar
 
-Once the statusLine is configured, Claude Code renders three rows above the
+Once the statusLine is configured, Claude Code renders two rows above the
 prompt:
 
 - **Row 1** — account identity (`org · email`, from `~/.claude.json`, when
-  available), the active model and effort level, and a context-window meter
-  (`ctx`).
-- **Row 2** — `5H`: percentage of your rolling 5-hour rate limit used, with
-  a countdown (`↻`) to when it resets.
-- **Row 3** — `WEEK`: percentage of your weekly rate limit used, with the
-  same kind of countdown.
+  available) and the active model and effort level.
+- **Row 2** — three capsule meters side by side: `5H` (rolling 5-hour rate
+  limit) and `WK` (weekly rate limit), each with a reset countdown (`↻`),
+  plus `CTX` (how full the current session's context window is).
 
-Before Claude Code has received a first API response in the session, rows 2
-and 3 show `— waiting for first API call` instead of a meter. `settings.json`
+Before Claude Code has received a first API response in the session, the `5H`
+and `WK` meters show `—` instead of a bar. `settings.json`
 sets `refreshInterval: 5`, so the bar redraws every 5 seconds; percentages
 update in discrete steps as new usage data arrives from Claude Code — this
 is not a smooth, mid-generation animation.
@@ -104,6 +109,7 @@ ccswitch <label>             switch to a saved account
 ccswitch <label> --relaunch  switch, then exec the `claude` CLI (override
                               the command with CCSWITCH_CLAUDE_CMD)
 ccswitch delete <label>      remove a saved account (prompts to confirm)
+ccswitch help                show the full command guide (also -h, --help)
 ```
 
 Switching **requires restarting Claude Code** — see Caveats below. If you
