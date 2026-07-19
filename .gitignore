@@ -1,0 +1,9 @@
+# scratch / process artifacts — never shipped
+.superpowers/
+docs/superpowers/
+*SPEC*.md
+# credential-shaped safety backstop (accounts live in ~/.claude, never here)
+*.credentials.json
+.credentials.json
+accounts/
+*.usage-cache
