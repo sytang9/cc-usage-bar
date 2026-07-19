@@ -1,0 +1,258 @@
+#!/usr/bin/env bash
+# ccswitch: save, list, switch between, and delete Claude Code accounts by
+# swapping the OAuth credential files Claude Code reads from $HOME.
+#
+# Storage layout:
+#   $HOME/.claude/accounts/<label>/credentials.json   (copy of live .credentials.json)
+#   $HOME/.claude/accounts/<label>/oauthAccount.json  (the .oauthAccount object from .claude.json)
+#
+# SECURITY: never print token values or credential file contents. All moves
+# use cp/jq, never echo of secret fields.
+set -uo pipefail
+
+: "${HOME:?HOME must be set}"
+
+CLAUDE_DIR="$HOME/.claude"
+CLAUDE_JSON="$HOME/.claude.json"
+CREDENTIALS_FILE="$CLAUDE_DIR/.credentials.json"
+ACCOUNTS_DIR="$CLAUDE_DIR/accounts"
+
+RESERVED_WORDS=(save delete list usage)
+
+# is_reserved_label <label>: true if the label can't be used (reserved
+# subcommand name, or looks like an option flag).
+is_reserved_label() {
+  local label="$1"
+  case "$label" in
+    -*) return 0 ;;
+  esac
+  local reserved
+  for reserved in "${RESERVED_WORDS[@]}"; do
+    [[ "$label" == "$reserved" ]] && return 0
+  done
+  return 1
+}
+
+require_claude_json() {
+  if [[ ! -f "$CLAUDE_JSON" ]]; then
+    echo "Error: $CLAUDE_JSON not found." >&2
+    exit 1
+  fi
+  if ! jq empty "$CLAUDE_JSON" >/dev/null 2>&1; then
+    echo "Error: $CLAUDE_JSON is not valid JSON." >&2
+    exit 1
+  fi
+}
+
+require_live_credentials() {
+  if [[ ! -f "$CREDENTIALS_FILE" ]]; then
+    echo "Error: no active credentials found at $CREDENTIALS_FILE." >&2
+    exit 1
+  fi
+}
+
+# secure_dir <path>: create a directory (if missing) and force mode 700.
+secure_dir() {
+  local dir="$1"
+  mkdir -p "$dir"
+  chmod 700 "$dir"
+}
+
+# secure_copy <src> <dst>: copy a file and force mode 600 on the destination.
+secure_copy() {
+  local src="$1" dst="$2"
+  cp "$src" "$dst"
+  chmod 600 "$dst"
+}
+
+live_refresh_token() {
+  jq -r '.claudeAiOauth.refreshToken // empty' "$CREDENTIALS_FILE" 2>/dev/null
+}
+
+saved_refresh_token() {
+  local label="$1"
+  jq -r '.claudeAiOauth.refreshToken // empty' "$ACCOUNTS_DIR/$label/credentials.json" 2>/dev/null
+}
+
+confirm() {
+  local prompt="$1" answer
+  read -r -p "$prompt [y/N] " answer
+  case "$answer" in
+    y | Y | yes | YES) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+cmd_save() {
+  local label="${1:-}"
+
+  if [[ -z "$label" ]]; then
+    echo "Error: usage: ccswitch save <label>" >&2
+    exit 1
+  fi
+  if is_reserved_label "$label"; then
+    echo "Error: '$label' is a reserved word and cannot be used as a label." >&2
+    exit 1
+  fi
+
+  require_claude_json
+  require_live_credentials
+
+  secure_dir "$ACCOUNTS_DIR"
+
+  local label_dir="$ACCOUNTS_DIR/$label"
+  if [[ -d "$label_dir" ]]; then
+    if ! confirm "Account '$label' already exists. Overwrite?"; then
+      echo "Aborted."
+      exit 0
+    fi
+  fi
+  secure_dir "$label_dir"
+
+  secure_copy "$CREDENTIALS_FILE" "$label_dir/credentials.json"
+
+  local tmp_oauth
+  tmp_oauth="$(mktemp "${TMPDIR:-/tmp}/ccswitch-oauth.XXXXXX")"
+  jq '.oauthAccount // {}' "$CLAUDE_JSON" >"$tmp_oauth"
+  secure_copy "$tmp_oauth" "$label_dir/oauthAccount.json"
+  rm -f "$tmp_oauth"
+
+  echo "Saved account '$label'."
+}
+
+cmd_list() {
+  if [[ ! -d "$ACCOUNTS_DIR" ]] || [[ -z "$(ls -A "$ACCOUNTS_DIR" 2>/dev/null)" ]]; then
+    echo "no saved accounts -- run: ccswitch save <label>"
+    return 0
+  fi
+
+  local live_refresh=""
+  if [[ -f "$CREDENTIALS_FILE" ]]; then
+    live_refresh="$(live_refresh_token)"
+  fi
+
+  local label_dir label
+  for label_dir in "$ACCOUNTS_DIR"/*/; do
+    label="$(basename "$label_dir")"
+    if [[ -n "$live_refresh" ]] && [[ "$(saved_refresh_token "$label")" == "$live_refresh" ]]; then
+      echo "* $label"
+    else
+      echo "  $label"
+    fi
+  done
+}
+
+cmd_delete() {
+  local label="${1:-}"
+
+  if [[ -z "$label" ]]; then
+    echo "Error: usage: ccswitch delete <label>" >&2
+    exit 1
+  fi
+  if is_reserved_label "$label"; then
+    echo "Error: '$label' is a reserved word and cannot be used as a label." >&2
+    exit 1
+  fi
+
+  local label_dir="$ACCOUNTS_DIR/$label"
+  if [[ ! -d "$label_dir" ]]; then
+    echo "Error: no saved account named '$label'." >&2
+    exit 1
+  fi
+
+  if confirm "Delete account '$label'?"; then
+    rm -rf "$label_dir"
+    echo "Deleted account '$label'."
+  else
+    echo "Aborted."
+  fi
+}
+
+cmd_switch() {
+  local label="$1" relaunch="${2:-}"
+  local label_dir="$ACCOUNTS_DIR/$label"
+
+  if [[ ! -d "$label_dir" ]]; then
+    echo "Error: no saved account named '$label'. Run: ccswitch save $label" >&2
+    exit 1
+  fi
+  if [[ ! -f "$label_dir/credentials.json" ]]; then
+    echo "Error: saved account '$label' is missing credentials.json." >&2
+    exit 1
+  fi
+
+  require_claude_json
+
+  mkdir -p "$CLAUDE_DIR"
+  chmod 700 "$CLAUDE_DIR"
+
+  if [[ -f "$CREDENTIALS_FILE" ]]; then
+    secure_copy "$CREDENTIALS_FILE" "$CREDENTIALS_FILE.bak"
+  fi
+
+  secure_copy "$label_dir/credentials.json" "$CREDENTIALS_FILE"
+
+  local oauth_account_file="$label_dir/oauthAccount.json"
+  if [[ -f "$oauth_account_file" ]]; then
+    local tmp_claude_json
+    tmp_claude_json="$(mktemp "${TMPDIR:-/tmp}/ccswitch-claude.XXXXXX")"
+    jq --slurpfile oauth "$oauth_account_file" '.oauthAccount = $oauth[0]' "$CLAUDE_JSON" >"$tmp_claude_json"
+    mv "$tmp_claude_json" "$CLAUDE_JSON"
+  fi
+
+  echo "Switched to $label. Restart Claude Code to apply."
+
+  if [[ "$relaunch" == "--relaunch" ]]; then
+    exec ${CCSWITCH_CLAUDE_CMD:-claude}
+  fi
+}
+
+usage_text() {
+  cat <<'EOF'
+ccswitch: save, list, switch between, and delete Claude Code accounts.
+
+Usage:
+  ccswitch                     list saved accounts (same as `list`)
+  ccswitch list                list saved accounts, '*' marks the active one
+  ccswitch save <label>        snapshot the currently active account
+  ccswitch delete <label>      remove a saved account (prompts to confirm)
+  ccswitch <label> [--relaunch]
+                                switch to a saved account; --relaunch execs
+                                the claude CLI afterward (override with
+                                CCSWITCH_CLAUDE_CMD)
+EOF
+}
+
+main() {
+  local cmd="${1:-}"
+
+  case "$cmd" in
+    save)
+      shift
+      cmd_save "${1:-}"
+      ;;
+    delete)
+      shift
+      cmd_delete "${1:-}"
+      ;;
+    list | "")
+      cmd_list
+      ;;
+    usage)
+      # Task 3 replaces this stub with the real usage-monitor subcommand.
+      echo "usage monitor not yet implemented"
+      ;;
+    -h | --help)
+      usage_text
+      ;;
+    -*)
+      echo "Error: unknown option '$cmd'." >&2
+      exit 1
+      ;;
+    *)
+      cmd_switch "$cmd" "${2:-}"
+      ;;
+  esac
+}
+
+main "$@"
