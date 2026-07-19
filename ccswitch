@@ -18,19 +18,58 @@ CREDENTIALS_FILE="$CLAUDE_DIR/.credentials.json"
 ACCOUNTS_DIR="$CLAUDE_DIR/accounts"
 
 RESERVED_WORDS=(save delete list usage)
+# Whitelist charset for labels. Deliberately strict: this is what stands
+# between a label and a raw filesystem path ($ACCOUNTS_DIR/$label), so it
+# must reject '/' and '.' outright rather than trying to blocklist "..".
+LABEL_CHARSET_PATTERN='^[A-Za-z0-9_-]+$'
 
-# is_reserved_label <label>: true if the label can't be used (reserved
-# subcommand name, or looks like an option flag).
-is_reserved_label() {
-  local label="$1"
-  case "$label" in
+# is_dash_prefixed_label <label>: true if the label starts with '-' (would
+# read as a CLI flag rather than a label). NOTE: '-' is itself inside
+# LABEL_CHARSET_PATTERN's allowed set (for mid-label hyphens like
+# "my-label"), so this leading-dash rule has to be enforced separately from
+# the charset check below -- the charset regex alone would accept "-foo".
+is_dash_prefixed_label() {
+  case "$1" in
     -*) return 0 ;;
+    *) return 1 ;;
   esac
-  local reserved
+}
+
+# is_reserved_label <label>: true if the label collides with a reserved
+# subcommand name.
+is_reserved_label() {
+  local label="$1" reserved
   for reserved in "${RESERVED_WORDS[@]}"; do
     [[ "$label" == "$reserved" ]] && return 0
   done
   return 1
+}
+
+# validate_label <label>: exits with a clear message and non-zero status
+# unless the label is non-empty, made up only of [A-Za-z0-9_-], not
+# dash-prefixed, and not a reserved subcommand name. Every code path that
+# turns a label into a filesystem path (save/switch/delete) MUST call this
+# before touching $ACCOUNTS_DIR/$label -- that path is built by direct
+# string concatenation, so an unvalidated label (e.g. "../../etc") is a
+# path-traversal vector into mkdir/cp/rm -rf.
+validate_label() {
+  local label="$1"
+  if [[ -z "$label" ]]; then
+    echo "Error: label is required." >&2
+    exit 1
+  fi
+  if is_dash_prefixed_label "$label"; then
+    echo "Error: '$label' looks like an option flag and cannot be used as a label." >&2
+    exit 1
+  fi
+  if ! [[ "$label" =~ $LABEL_CHARSET_PATTERN ]]; then
+    echo "Error: '$label' is not a valid label -- only letters, digits, '_' and '-' are allowed." >&2
+    exit 1
+  fi
+  if is_reserved_label "$label"; then
+    echo "Error: '$label' is a reserved word and cannot be used as a label." >&2
+    exit 1
+  fi
 }
 
 require_claude_json() {
@@ -86,14 +125,7 @@ confirm() {
 cmd_save() {
   local label="${1:-}"
 
-  if [[ -z "$label" ]]; then
-    echo "Error: usage: ccswitch save <label>" >&2
-    exit 1
-  fi
-  if is_reserved_label "$label"; then
-    echo "Error: '$label' is a reserved word and cannot be used as a label." >&2
-    exit 1
-  fi
+  validate_label "$label"
 
   require_claude_json
   require_live_credentials
@@ -145,14 +177,7 @@ cmd_list() {
 cmd_delete() {
   local label="${1:-}"
 
-  if [[ -z "$label" ]]; then
-    echo "Error: usage: ccswitch delete <label>" >&2
-    exit 1
-  fi
-  if is_reserved_label "$label"; then
-    echo "Error: '$label' is a reserved word and cannot be used as a label." >&2
-    exit 1
-  fi
+  validate_label "$label"
 
   local label_dir="$ACCOUNTS_DIR/$label"
   if [[ ! -d "$label_dir" ]]; then
@@ -170,6 +195,9 @@ cmd_delete() {
 
 cmd_switch() {
   local label="$1" relaunch="${2:-}"
+
+  validate_label "$label"
+
   local label_dir="$ACCOUNTS_DIR/$label"
 
   if [[ ! -d "$label_dir" ]]; then
@@ -203,6 +231,10 @@ cmd_switch() {
   echo "Switched to $label. Restart Claude Code to apply."
 
   if [[ "$relaunch" == "--relaunch" ]]; then
+    # Intentionally unquoted: CCSWITCH_CLAUDE_CMD may hold a command plus
+    # arguments (e.g. "claude --resume"), and relying on word-splitting here
+    # is how those arguments reach exec. Do not "fix" this by quoting it.
+    # shellcheck disable=SC2086
     exec ${CCSWITCH_CLAUDE_CMD:-claude}
   fi
 }

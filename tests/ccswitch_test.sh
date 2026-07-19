@@ -132,8 +132,9 @@ main() {
   # --- Case 4: switch to work -------------------------------------------------
   run_cc "$home_dir" "" work
 
-  local live_refresh live_email backup_file
-  live_refresh="$(jq -r '.claudeAiOauth.refreshToken' "$home_dir/.claude/.credentials.json" 2>/dev/null)"
+  local live_refresh live_email backup_file live_credentials_file
+  live_credentials_file="$home_dir/.claude/.credentials.json"
+  live_refresh="$(jq -r '.claudeAiOauth.refreshToken' "$live_credentials_file" 2>/dev/null)"
   live_email="$(jq -r '.oauthAccount.emailAddress' "$home_dir/.claude.json" 2>/dev/null)"
   backup_file="$home_dir/.claude/.credentials.json.bak"
   local preserved_key
@@ -143,10 +144,12 @@ main() {
     && [[ "$live_refresh" == "REFRESH_A" ]] \
     && [[ -f "$backup_file" ]] \
     && [[ "$live_email" == "a@x.com" ]] \
-    && [[ "$preserved_key" == "preserve-me" ]]; then
-    pass "case4 switch work restores credentials, oauthAccount, writes .bak, preserves rest of .claude.json"
+    && [[ "$preserved_key" == "preserve-me" ]] \
+    && [[ "$(file_mode "$backup_file")" == "600" ]] \
+    && [[ "$(file_mode "$live_credentials_file")" == "600" ]]; then
+    pass "case4 switch work restores credentials, oauthAccount, writes .bak, preserves rest of .claude.json, both files mode 600"
   else
-    fail "case4 switch work (exit=$EXIT_CODE live_refresh=$live_refresh live_email=$live_email preserved=$preserved_key bak_exists=$([[ -f "$backup_file" ]] && echo yes || echo no)): $OUT"
+    fail "case4 switch work (exit=$EXIT_CODE live_refresh=$live_refresh live_email=$live_email preserved=$preserved_key bak_exists=$([[ -f "$backup_file" ]] && echo yes || echo no) bak_mode=$(file_mode "$backup_file") live_mode=$(file_mode "$live_credentials_file")): $OUT"
   fi
 
   # --- Case 5: switch --relaunch invokes CCSWITCH_CLAUDE_CMD -----------------
@@ -213,6 +216,27 @@ EOF
     fail "case7d dash-prefixed label not rejected (exit=$EXIT_CODE): $OUT"
   fi
 
+  run_cc "$home_dir" "" save usage
+  if [[ "$EXIT_CODE" -ne 0 ]]; then
+    pass "case7e reserved word 'usage' rejected as save label"
+  else
+    fail "case7e reserved word 'usage' not rejected (exit=$EXIT_CODE): $OUT"
+  fi
+
+  run_cc "$home_dir" "" save delete
+  if [[ "$EXIT_CODE" -ne 0 ]]; then
+    pass "case7f reserved word 'delete' rejected as save label"
+  else
+    fail "case7f reserved word 'delete' not rejected (exit=$EXIT_CODE): $OUT"
+  fi
+
+  run_cc "$home_dir" "y" delete list
+  if [[ "$EXIT_CODE" -ne 0 ]]; then
+    pass "case7g reserved word 'list' rejected as delete label"
+  else
+    fail "case7g reserved word 'list' not rejected by delete (exit=$EXIT_CODE): $OUT"
+  fi
+
   # --- Case 8: security -- no token ever appears in any captured output -----
   local combined
   combined="$(cat "$ALL_OUTPUT_LOG")"
@@ -220,6 +244,36 @@ EOF
     pass "case8 no secret token ever appears in captured output"
   else
     fail "case8 SECURITY LEAK: a secret token appeared in output"
+  fi
+
+  # --- Case 9: bare `ccswitch` with zero args exercises the no-args branch --
+  # (distinct from explicit `list`: this call passes NO subcommand at all)
+  run_cc "$home_dir" ""
+  if [[ "$EXIT_CODE" -eq 0 ]] && printf '%s' "$OUT" | grep -qx '\* work'; then
+    pass "case9 bare ccswitch (zero args) lists accounts same as 'list'"
+  else
+    fail "case9 bare ccswitch zero-args (exit=$EXIT_CODE): $OUT"
+  fi
+
+  # --- Case 10: path traversal in a label must be rejected everywhere -------
+  local traversal_label="../evil"
+  local claude_dir="$home_dir/.claude"
+
+  run_cc "$home_dir" "" save "$traversal_label"
+  local save_traversal_exit="$EXIT_CODE"
+
+  run_cc "$home_dir" "y" delete "$traversal_label"
+  local delete_traversal_exit="$EXIT_CODE"
+
+  if [[ "$save_traversal_exit" -ne 0 ]] \
+    && [[ "$delete_traversal_exit" -ne 0 ]] \
+    && [[ ! -e "$claude_dir/evil" ]] \
+    && [[ ! -e "$home_dir/evil" ]] \
+    && [[ ! -e "$accounts_dir/evil" ]] \
+    && [[ ! -e "$accounts_dir/../evil" ]]; then
+    pass "case10 path traversal label '../evil' rejected by save and delete, nothing created/removed outside accounts/"
+  else
+    fail "case10 path traversal not fully blocked (save_exit=$save_traversal_exit delete_exit=$delete_traversal_exit)"
   fi
 
   rm -rf "$home_dir" "$ALL_OUTPUT_LOG"
