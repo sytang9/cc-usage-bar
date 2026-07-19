@@ -205,25 +205,28 @@ main() {
   fi
 
   # --- Row 2: 5H / WEEK / CTX capsule meters -------------------------------
-  local row2=""
+  # Groups separated by a dim middot with wide padding; items within a group
+  # keep a single even space, so proximity reads as grouping.
+  local row2="" GROUP_SEP
+  GROUP_SEP="   $(dim "·")   "
   if [[ "$has_limits" == "1" ]]; then
     local five_int week_int
     five_int="$(round_pct "$five_hour_pct")"
     week_int="$(round_pct "$week_pct")"
-    row2+="$(tint "$COLOR_LABEL_5H" "5H") $(render_capsule "$five_int") $(dim "${five_int}%") $(dim "↻ $(fmt_reset "$five_hour_reset")")"
-    row2+="   "
-    row2+="$(tint "$COLOR_LABEL_WK" "WK") $(render_capsule "$week_int") $(dim "${week_int}%") $(dim "↻ $(fmt_reset "$week_reset")")"
+    row2+="$(tint "$COLOR_LABEL_5H" "5H") $(render_capsule "$five_int") $(dim "$(printf '%3d%%' "$five_int")") $(dim "↻ $(fmt_reset "$five_hour_reset")")"
+    row2+="$GROUP_SEP"
+    row2+="$(tint "$COLOR_LABEL_WK" "WK") $(render_capsule "$week_int") $(dim "$(printf '%3d%%' "$week_int")") $(dim "↻ $(fmt_reset "$week_reset")")"
   else
     row2+="$(tint "$COLOR_LABEL_5H" "5H") $(dim "—")"
-    row2+="   "
+    row2+="$GROUP_SEP"
     row2+="$(tint "$COLOR_LABEL_WK" "WK") $(dim "—")"
   fi
 
   if [[ -n "$ctx_pct" ]]; then
     local ctx_int
     ctx_int="$(round_pct "$ctx_pct")"
-    row2+="   "
-    row2+="$(tint "$COLOR_LABEL_CTX" "CTX") $(render_capsule "$ctx_int") $(dim "${ctx_int}%")"
+    row2+="$GROUP_SEP"
+    row2+="$(tint "$COLOR_LABEL_CTX" "CTX") $(render_capsule "$ctx_int") $(dim "$(printf '%3d%%' "$ctx_int")")"
   fi
 
   printf '%s\n%s\n' "$row1" "$row2"
