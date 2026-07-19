@@ -17,6 +17,39 @@ CLAUDE_JSON="$HOME/.claude.json"
 CREDENTIALS_FILE="$CLAUDE_DIR/.credentials.json"
 ACCOUNTS_DIR="$CLAUDE_DIR/accounts"
 
+# --- `usage` subcommand: OAuth endpoint constants ---------------------------
+# Reverse-engineered from third-party community projects (Anthropic does not
+# publish this API). Sources checked 2026-07-19:
+#   - github.com/pcvelz/ccstatusline-usage, src/utils/usage-fetch.ts and
+#     usage-types.ts (fetched directly via `gh api .../contents/...`) --
+#     CONFIRMED the usage URL, method, headers, and full response schema
+#     (five_hour/seven_day buckets with utilization + resets_at).
+#   - gist.github.com/jtbr/4f99671d1cee06b44106456958caba8b ("Claude Code
+#     Status Line" guide) -- independently corroborates the same usage
+#     endpoint/schema with a worked JSON example.
+#   - flopsstuff.github.io/coqu/claude-oauth/ -- corroborates the token
+#     endpoint host (platform.claude.com) and client_id.
+#   - Community write-ups referencing RavenStorm-bit/claude-token-refresh and
+#     an "Unlock Claude API from Claude Pro/Max" blog post -- corroborate the
+#     refresh request body shape (grant_type/refresh_token/client_id) and a
+#     snake_case response (access_token/expires_in/refresh_token).
+#
+# UNCERTAIN (best-supported guess, not directly observed in source): the
+# refresh endpoint HOST. Anthropic is reported to have migrated OAuth token
+# handling from console.anthropic.com to platform.claude.com; some
+# community tools still hit console.anthropic.com/v1/oauth/token as a
+# fallback. We pick platform.claude.com/v1/oauth/token as primary. If Claude
+# Code accounts start showing "re-login" after a real (non-test) run, check
+# this constant first -- it is the single most likely thing to have moved.
+USAGE_API_URL="https://api.anthropic.com/api/oauth/usage"
+USAGE_API_BETA_HEADER="oauth-2025-04-20"
+TOKEN_REFRESH_URL="https://platform.claude.com/v1/oauth/token"
+OAUTH_CLIENT_ID="9d1c250a-e61b-44d9-88ed-5944d1962f5e"
+
+USAGE_CACHE_TTL_SECONDS=600
+USAGE_RATE_LIMIT_BACKOFF_SECONDS=120
+USAGE_METER_WIDTH=12
+
 RESERVED_WORDS=(save delete list usage)
 # Whitelist charset for labels. Deliberately strict: this is what stands
 # between a label and a raw filesystem path ($ACCOUNTS_DIR/$label), so it
@@ -239,6 +272,453 @@ cmd_switch() {
   fi
 }
 
+# =============================================================================
+# `usage` subcommand: all-account rate-limit monitor.
+#
+# Network/schema isolation (see constants block above for sourcing/caveats):
+#   fetch_usage_raw  -- the ONLY function that curls the usage endpoint.
+#   refresh_token     -- the ONLY function that curls the token endpoint.
+#   parse_usage       -- the ONLY function that knows the usage JSON shape.
+# If Anthropic changes the API, one of these three functions is the fix.
+# =============================================================================
+
+# fetch_usage_raw <access_token> -> prints "<body>\n<http_status>" (curl's
+# -w appends the status as a trailing line). Never logs the token or body.
+fetch_usage_raw() {
+  local token="$1"
+  curl -sS -o - -w '\n%{http_code}' \
+    -H "Authorization: Bearer ${token}" \
+    -H "anthropic-beta: ${USAGE_API_BETA_HEADER}" \
+    "$USAGE_API_URL" 2>/dev/null
+}
+
+# refresh_token <refresh_token> -> prints "<body>\n<http_status>", same
+# convention as fetch_usage_raw. Only place that builds the refresh body.
+refresh_token() {
+  local rt="$1"
+  local req_body
+  req_body="$(jq -cn --arg rt "$rt" --arg cid "$OAUTH_CLIENT_ID" \
+    '{grant_type: "refresh_token", refresh_token: $rt, client_id: $cid}')"
+  curl -sS -o - -w '\n%{http_code}' \
+    -X POST \
+    -H "Content-Type: application/json" \
+    -d "$req_body" \
+    "$TOKEN_REFRESH_URL" 2>/dev/null
+}
+
+# split_http_response <raw> -> sets HTTP_STATUS and HTTP_BODY from the
+# "<body>\n<status>" convention shared by fetch_usage_raw and refresh_token.
+split_http_response() {
+  local raw="$1"
+  HTTP_STATUS="$(printf '%s' "$raw" | tail -n1)"
+  HTTP_BODY="$(printf '%s' "$raw" | sed '$d')"
+}
+
+# parse_usage <json> -> echoes "five_hour_pct|seven_day_pct|five_hour_reset_epoch"
+# on success, or returns non-zero with no output on any schema mismatch. This
+# is the ONLY function that knows the usage response field names.
+parse_usage() {
+  local json="$1"
+
+  echo "$json" | jq -e \
+    '(.five_hour.utilization != null) and (.seven_day.utilization != null) and (.five_hour.resets_at != null)' \
+    >/dev/null 2>&1 || return 1
+
+  local five_pct week_pct reset_iso reset_epoch
+  five_pct="$(echo "$json" | jq -r '.five_hour.utilization')"
+  week_pct="$(echo "$json" | jq -r '.seven_day.utilization')"
+  reset_iso="$(echo "$json" | jq -r '.five_hour.resets_at')"
+
+  reset_epoch="$(date -d "$reset_iso" +%s 2>/dev/null)" || return 1
+  [[ -z "$reset_epoch" ]] && return 1
+
+  echo "${five_pct}|${week_pct}|${reset_epoch}"
+}
+
+# is_active_account <label> -> true if this account's saved refresh token
+# matches the live one (same identity cmd_list uses for its '*' marker).
+is_active_account() {
+  local label="$1"
+  [[ ! -f "$CREDENTIALS_FILE" ]] && return 1
+  local live_rt
+  live_rt="$(live_refresh_token)"
+  [[ -n "$live_rt" ]] && [[ "$(saved_refresh_token "$label")" == "$live_rt" ]]
+}
+
+# resolve_account_credentials <label> -> echoes "access|expiresAt|refreshToken".
+# For the active account, the accessToken/expiresAt come from the LIVE
+# credentials file (freshest available); the refreshToken always comes from
+# the account's own snapshot, since that is the file we write refresh results
+# back into. Missing fields come through as empty strings, never as errors.
+resolve_account_credentials() {
+  local label="$1"
+  local snapshot_file="$ACCOUNTS_DIR/$label/credentials.json"
+  [[ ! -f "$snapshot_file" ]] && { echo "||"; return 0; }
+
+  local source_file="$snapshot_file"
+  is_active_account "$label" && source_file="$CREDENTIALS_FILE"
+
+  local access exp refresh
+  access="$(jq -r '.claudeAiOauth.accessToken // empty' "$source_file" 2>/dev/null)"
+  exp="$(jq -r '.claudeAiOauth.expiresAt // empty' "$source_file" 2>/dev/null)"
+  refresh="$(jq -r '.claudeAiOauth.refreshToken // empty' "$snapshot_file" 2>/dev/null)"
+
+  echo "${access}|${exp}|${refresh}"
+}
+
+# is_token_expired <expires_at_ms> -> true iff expires_at_ms is a valid
+# epoch-millisecond timestamp that is now (or already past). An unparseable
+# or missing value is treated as "not expired" -- the usage call itself will
+# fail cleanly (row shows dashes) rather than us guessing wrong and forcing
+# an unnecessary refresh.
+is_token_expired() {
+  local exp="$1"
+  [[ "$exp" =~ ^[0-9]+$ ]] || return 1
+  local now_ms=$(( $(date +%s) * 1000 ))
+  (( exp <= now_ms ))
+}
+
+# attempt_refresh <label> <refresh_token> -> on success, echoes the new
+# access token and rewrites accounts/<label>/credentials.json's accessToken
+# + expiresAt (mode 600); on any failure (empty refresh token, non-2xx,
+# unparseable response) returns non-zero and touches nothing. Deliberately
+# does NOT overwrite refreshToken: is_active_account's identity match relies
+# on the snapshot's refreshToken staying equal to the live one.
+attempt_refresh() {
+  local label="$1" rt="$2"
+  [[ -z "$rt" ]] && return 1
+
+  local raw
+  raw="$(refresh_token "$rt")"
+  split_http_response "$raw"
+
+  [[ "$HTTP_STATUS" =~ ^2[0-9][0-9]$ ]] || return 1
+
+  local new_access new_expires_in
+  new_access="$(echo "$HTTP_BODY" | jq -r '.access_token // empty' 2>/dev/null)"
+  new_expires_in="$(echo "$HTTP_BODY" | jq -r '.expires_in // empty' 2>/dev/null)"
+  [[ -n "$new_access" ]] || return 1
+  [[ "$new_expires_in" =~ ^[0-9]+$ ]] || return 1
+
+  local new_expires_at_ms=$(( $(date +%s) * 1000 + new_expires_in * 1000 ))
+  local snapshot_file="$ACCOUNTS_DIR/$label/credentials.json"
+  local tmp
+  tmp="$(mktemp "${TMPDIR:-/tmp}/ccswitch-refresh.XXXXXX")"
+  if ! jq --arg at "$new_access" --argjson exp "$new_expires_at_ms" \
+    '.claudeAiOauth.accessToken = $at | .claudeAiOauth.expiresAt = $exp' \
+    "$snapshot_file" >"$tmp" 2>/dev/null; then
+    rm -f "$tmp"
+    return 1
+  fi
+  mv "$tmp" "$snapshot_file"
+  chmod 600 "$snapshot_file"
+
+  echo "$new_access"
+}
+
+usage_cache_file() {
+  echo "$ACCOUNTS_DIR/$1/.usage-cache"
+}
+
+# read_usage_cache <label> -> echoes cache JSON, or "{}" if missing/corrupt.
+read_usage_cache() {
+  local cache_file
+  cache_file="$(usage_cache_file "$1")"
+  local content
+  content="$(cat "$cache_file" 2>/dev/null)"
+  echo "$content" | jq -e . >/dev/null 2>&1 && echo "$content" || echo "{}"
+}
+
+write_usage_cache() {
+  local label="$1" json="$2"
+  local cache_file
+  cache_file="$(usage_cache_file "$label")"
+  printf '%s' "$json" >"$cache_file"
+  chmod 600 "$cache_file"
+}
+
+# fetch_and_cache_usage <label> <access_token> <bypass_cache: 0|1> -> echoes
+# "five_hour_pct|seven_day_pct|five_hour_reset_epoch" (all empty on failure).
+# Cache TTL and the 429 backoff are both handled here so callers never see
+# the difference between "fresh" and "served from cache".
+fetch_and_cache_usage() {
+  local label="$1" token="$2" bypass_cache="$3"
+  local now cache
+  now="$(date +%s)"
+  cache="$(read_usage_cache "$label")"
+
+  local rate_limited_until fetched_at cached_5h cached_7d cached_reset
+  rate_limited_until="$(echo "$cache" | jq -r '.rate_limited_until // empty')"
+  fetched_at="$(echo "$cache" | jq -r '.fetched_at // empty')"
+  cached_5h="$(echo "$cache" | jq -r '.five_hour_pct // empty')"
+  cached_7d="$(echo "$cache" | jq -r '.seven_day_pct // empty')"
+  cached_reset="$(echo "$cache" | jq -r '.five_hour_reset_epoch // empty')"
+
+  # A 429 backoff window is honored even with --refresh: hammering an
+  # endpoint that just rate-limited us is never the right override.
+  if [[ -n "$rate_limited_until" ]] && (( now < rate_limited_until )); then
+    [[ -n "$cached_5h" ]] && echo "${cached_5h}|${cached_7d}|${cached_reset}" || echo "|||"
+    return 0
+  fi
+
+  if [[ "$bypass_cache" != "1" ]] \
+    && [[ -n "$fetched_at" ]] \
+    && (( now - fetched_at < USAGE_CACHE_TTL_SECONDS )) \
+    && [[ -n "$cached_5h" ]]; then
+    echo "${cached_5h}|${cached_7d}|${cached_reset}"
+    return 0
+  fi
+
+  local raw
+  raw="$(fetch_usage_raw "$token")"
+  split_http_response "$raw"
+
+  if [[ "$HTTP_STATUS" == "429" ]]; then
+    local new_cache
+    new_cache="$(echo "$cache" | jq --argjson rl "$((now + USAGE_RATE_LIMIT_BACKOFF_SECONDS))" '.rate_limited_until = $rl')"
+    write_usage_cache "$label" "$new_cache"
+    [[ -n "$cached_5h" ]] && echo "${cached_5h}|${cached_7d}|${cached_reset}" || echo "|||"
+    return 0
+  fi
+
+  if ! [[ "$HTTP_STATUS" =~ ^2[0-9][0-9]$ ]]; then
+    echo "|||"
+    return 0
+  fi
+
+  local parsed
+  if ! parsed="$(parse_usage "$HTTP_BODY")"; then
+    echo "|||"
+    return 0
+  fi
+
+  local p5 p7 preset
+  IFS='|' read -r p5 p7 preset <<<"$parsed"
+  local new_cache
+  new_cache="$(jq -n --argjson fa "$now" --argjson p5 "$p5" --argjson p7 "$p7" --argjson pr "$preset" \
+    '{fetched_at: $fa, five_hour_pct: $p5, seven_day_pct: $p7, five_hour_reset_epoch: $pr, rate_limited_until: null}')"
+  write_usage_cache "$label" "$new_cache"
+
+  echo "${p5}|${p7}|${preset}"
+}
+
+# --- meter rendering (mirrors statusline-usage.sh's aesthetic: eighth-block
+# fill + middle-dot track + 256-color thresholds) -----------------------------
+USAGE_PCT_OK_MAX=59
+USAGE_PCT_WARN_MAX=85
+USAGE_COLOR_OK=108
+USAGE_COLOR_WARN=179
+USAGE_COLOR_CRIT=167
+USAGE_COLOR_DIM=245
+USAGE_COLOR_TRACK=240
+USAGE_EIGHTHS=("" "▏" "▎" "▍" "▌" "▋" "▊" "▉" "█")
+
+usage_color_for() {
+  local pct="$1"
+  if (( pct > USAGE_PCT_WARN_MAX )); then
+    echo "$USAGE_COLOR_CRIT"
+  elif (( pct > USAGE_PCT_OK_MAX )); then
+    echo "$USAGE_COLOR_WARN"
+  else
+    echo "$USAGE_COLOR_OK"
+  fi
+}
+
+usage_render_meter() {
+  local pct="$1" width="$2" color
+  color="$(usage_color_for "$pct")"
+
+  local total_eighths full_cells frac_eighths empty_cells bar track i
+  total_eighths="$(awk -v p="$pct" -v w="$width" 'BEGIN {
+    v = (p / 100.0) * w * 8.0
+    printf "%d", (v - int(v) >= 0.5) ? int(v) + 1 : int(v)
+  }')"
+  full_cells=$(( total_eighths / 8 ))
+  frac_eighths=$(( total_eighths % 8 ))
+  if (( full_cells > width )); then
+    full_cells=$width
+    frac_eighths=0
+  fi
+  empty_cells=$(( width - full_cells - (frac_eighths > 0 ? 1 : 0) ))
+  (( empty_cells < 0 )) && empty_cells=0
+
+  bar=""
+  for (( i = 0; i < full_cells; i++ )); do bar+="█"; done
+  (( frac_eighths > 0 )) && bar+="${USAGE_EIGHTHS[$frac_eighths]}"
+  track=""
+  for (( i = 0; i < empty_cells; i++ )); do track+="·"; done
+
+  printf '\033[38;5;%sm%s\033[38;5;%sm%s\033[0m' "$color" "$bar" "$USAGE_COLOR_TRACK" "$track"
+}
+
+usage_round_pct() {
+  awk -v v="$1" 'BEGIN { p = (v < 0) ? 0 : v; printf "%d", p + 0.5 }'
+}
+
+# usage_fmt_reset <epoch_seconds> -> short human countdown ("2h 14m").
+usage_fmt_reset() {
+  local epoch="$1"
+  [[ "$epoch" =~ ^[0-9]+$ ]] || { echo "—"; return; }
+  local now delta
+  now="$(date +%s)"
+  delta=$(( epoch - now ))
+  (( delta <= 0 )) && { echo "0m"; return; }
+  if (( delta < 3600 )); then
+    echo "$(( delta / 60 ))m"
+  elif (( delta < 86400 )); then
+    echo "$(( delta / 3600 ))h $(( (delta % 3600) / 60 ))m"
+  else
+    echo "$(( delta / 86400 ))d $(( (delta % 86400) / 3600 ))h"
+  fi
+}
+
+# build_usage_row <label> -> echoes "label|marker|state|five_pct|week_pct|reset_epoch".
+# state is one of: ok, dash, relogin. Never lets one account's failure abort
+# the loop -- every failure mode resolves to a row, not an exit.
+build_usage_row() {
+  local label="$1"
+  local marker="  "
+  is_active_account "$label" && marker="* "
+
+  local access exp refresh
+  IFS='|' read -r access exp refresh <<<"$(resolve_account_credentials "$label")"
+
+  if [[ -z "$access" ]] && [[ -z "$refresh" ]]; then
+    echo "${label}|${marker}|dash|||"
+    return 0
+  fi
+
+  if [[ -z "$access" ]] || is_token_expired "$exp"; then
+    local refreshed
+    if refreshed="$(attempt_refresh "$label" "$refresh")"; then
+      access="$refreshed"
+    else
+      echo "${label}|${marker}|relogin|||"
+      return 0
+    fi
+  fi
+
+  if [[ -z "$access" ]]; then
+    echo "${label}|${marker}|dash|||"
+    return 0
+  fi
+
+  local p5 p7 preset
+  IFS='|' read -r p5 p7 preset <<<"$(fetch_and_cache_usage "$label" "$access" "$USAGE_BYPASS_CACHE")"
+
+  if [[ -z "$p5" ]]; then
+    echo "${label}|${marker}|dash|||"
+  else
+    echo "${label}|${marker}|ok|${p5}|${p7}|${preset}"
+  fi
+}
+
+# find_headroom_label <<< rows: pipe of "label|state|five_pct" -> echoes the
+# label with the lowest five_pct among rows in the "ok" state (most
+# headroom == least used). Empty output if no row is in the "ok" state.
+find_headroom_label() {
+  awk -F'|' '
+    $2 == "ok" {
+      if (!seen || $3 + 0 < best) { best = $3 + 0; label = $1; seen = 1 }
+    }
+    END { if (seen) print label }
+  '
+}
+
+# render_usage_cell <state> <pct> -> a cell string of a FIXED VISIBLE width
+# (USAGE_CELL_WIDTH), regardless of state. This matters because the "ok"
+# cell is full of ANSI color codes: padding a colored string afterward with
+# `printf '%-Ns'` counts the escape-code bytes toward N, so the visible
+# padding shrinks to nothing and columns run together. Building every
+# variant to the same VISIBLE width up front means the caller never needs
+# to pad a colored string -- a fixed literal separator between cells is
+# enough.
+USAGE_CELL_WIDTH=$(( USAGE_METER_WIDTH + 5 )) # meter + " " + "NNN%"/"  N%" (4 chars)
+render_usage_cell() {
+  local state="$1" pct="$2"
+  case "$state" in
+    ok)
+      local pct_int pct_text
+      pct_int="$(usage_round_pct "$pct")"
+      pct_text="$(printf '%3d%%' "$pct_int")" # always 4 visible chars
+      printf '%s %s' "$(usage_render_meter "$pct_int" "$USAGE_METER_WIDTH")" "$pct_text"
+      ;;
+    relogin) printf '%-*s' "$USAGE_CELL_WIDTH" "re-login" ;;
+    *) printf '%-*s' "$USAGE_CELL_WIDTH" $'\xe2\x80\x94' ;; # em dash
+  esac
+}
+
+cmd_usage() {
+  local no_switch=0 bypass_cache=0 relaunch=""
+  local arg
+  for arg in "$@"; do
+    case "$arg" in
+      --no-switch) no_switch=1 ;;
+      --refresh) bypass_cache=1 ;;
+      --relaunch) relaunch="--relaunch" ;;
+      *)
+        echo "Error: unknown option '$arg' for 'usage'." >&2
+        exit 1
+        ;;
+    esac
+  done
+  USAGE_BYPASS_CACHE="$bypass_cache"
+
+  if [[ ! -d "$ACCOUNTS_DIR" ]] || [[ -z "$(ls -A "$ACCOUNTS_DIR" 2>/dev/null)" ]]; then
+    echo "no saved accounts -- run: ccswitch save <label>"
+    return 0
+  fi
+
+  local rows="" headroom_lookup="" label_dir label row
+  for label_dir in "$ACCOUNTS_DIR"/*/; do
+    label="$(basename "$label_dir")"
+    row="$(build_usage_row "$label")"
+    rows+="${row}"$'\n'
+    headroom_lookup+="$(echo "$row" | awk -F'|' '{print $1"|"$3"|"$4}')"$'\n'
+  done
+
+  local headroom_label
+  headroom_label="$(echo "$headroom_lookup" | find_headroom_label)"
+
+  printf '%-14s%-*s   %-*s   %s\n' "  ACCOUNT" "$USAGE_CELL_WIDTH" "5H" "$USAGE_CELL_WIDTH" "WEEK" "RESET(5h)"
+  local marker state p5 p7 preset line
+  while IFS='|' read -r label marker state p5 p7 preset; do
+    [[ -z "$label" ]] && continue
+    line="$(printf '%-14s' "${marker}${label}")"
+    line+="$(render_usage_cell "$state" "$p5")"
+    line+="   "
+    line+="$(render_usage_cell "$state" "$p7")"
+    line+="   "
+    if [[ "$state" == "ok" ]]; then
+      line+="$(usage_fmt_reset "$preset")"
+    else
+      line+=$'\xe2\x80\x94'
+    fi
+    if [[ -n "$headroom_label" ]] && [[ "$label" == "$headroom_label" ]]; then
+      line+="  <- most headroom"
+    fi
+    printf '%s\n' "$line"
+  done <<<"$rows"
+
+  if [[ "$no_switch" == "1" ]]; then
+    return 0
+  fi
+
+  local choice
+  echo
+  if ! read -r -p "switch to which? [label / enter to cancel] " choice; then
+    return 0
+  fi
+  [[ -z "$choice" ]] && return 0
+
+  if [[ ! -d "$ACCOUNTS_DIR/$choice" ]]; then
+    echo "Error: no saved account named '$choice'. Nothing changed." >&2
+    return 0
+  fi
+
+  cmd_switch "$choice" "$relaunch"
+}
+
 usage_text() {
   cat <<'EOF'
 ccswitch: save, list, switch between, and delete Claude Code accounts.
@@ -252,6 +732,10 @@ Usage:
                                 switch to a saved account; --relaunch execs
                                 the claude CLI afterward (override with
                                 CCSWITCH_CLAUDE_CMD)
+  ccswitch usage [--no-switch] [--refresh] [--relaunch]
+                                show 5h/week usage for every saved account,
+                                then optionally prompt to switch; --refresh
+                                bypasses the usage cache
 EOF
 }
 
@@ -271,8 +755,8 @@ main() {
       cmd_list
       ;;
     usage)
-      # Task 3 replaces this stub with the real usage-monitor subcommand.
-      echo "usage monitor not yet implemented"
+      shift
+      cmd_usage "$@"
       ;;
     -h | --help)
       usage_text
