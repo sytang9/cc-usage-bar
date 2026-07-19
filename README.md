@@ -6,7 +6,7 @@ multiple Claude accounts.
 
 ```
 Ctrl CV · jane@acme.com                 Opus 4.8 (1M context) · high
-5H ▕▰▰▱▱▱▱▱▱▏ 24% ↻3h 2m   WK ▕▰▰▱▱▱▱▱▱▏ 24% ↻3d 23h   CTX ▕▰▰▱▱▱▱▱▱▏ 19%
+5H ▕▰▰▱▱▱▱▱▱▏ 24% ↻ 3h 2m   WK ▕▰▰▱▱▱▱▱▱▏ 24% ↻ 3d 23h   CTX ▕▰▰▱▱▱▱▱▱▏ 19%
 ```
 
 Two rows: identity + model on top, then three slim capsule meters — 5-hour,

@@ -210,9 +210,9 @@ main() {
     local five_int week_int
     five_int="$(round_pct "$five_hour_pct")"
     week_int="$(round_pct "$week_pct")"
-    row2+="$(tint "$COLOR_LABEL_5H" "5H") $(render_capsule "$five_int") $(dim "${five_int}%") $(dim "↻$(fmt_reset "$five_hour_reset")")"
+    row2+="$(tint "$COLOR_LABEL_5H" "5H") $(render_capsule "$five_int") $(dim "${five_int}%") $(dim "↻ $(fmt_reset "$five_hour_reset")")"
     row2+="   "
-    row2+="$(tint "$COLOR_LABEL_WK" "WK") $(render_capsule "$week_int") $(dim "${week_int}%") $(dim "↻$(fmt_reset "$week_reset")")"
+    row2+="$(tint "$COLOR_LABEL_WK" "WK") $(render_capsule "$week_int") $(dim "${week_int}%") $(dim "↻ $(fmt_reset "$week_reset")")"
   else
     row2+="$(tint "$COLOR_LABEL_5H" "5H") $(dim "—")"
     row2+="   "
