@@ -1,0 +1,11 @@
+{
+  "context_window": {
+    "used_percentage": 10
+  },
+  "model": {
+    "display_name": "Haiku"
+  },
+  "effort": {
+    "level": "low"
+  }
+}

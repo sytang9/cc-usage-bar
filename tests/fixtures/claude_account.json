@@ -1,0 +1,6 @@
+{
+  "oauthAccount": {
+    "emailAddress": "test-user@example.com",
+    "organizationName": "Test Org"
+  }
+}
