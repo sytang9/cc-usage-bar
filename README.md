@@ -28,7 +28,9 @@ equivalent.)
 
 ## Requirements
 
-- `bash`, `jq`, `date` — required by both scripts.
+- `bash`, `jq` — required by both scripts.
+- `date` — required by the bar and by `ccswitch usage` (the usage monitor);
+  `ccswitch save/list/<label>/delete` don't call it.
 - `curl` — required only by `ccswitch usage` (the usage monitor); the bar
   and `ccswitch save/list/<label>/delete` don't need it.
 - Targets Claude Code on Linux and macOS.

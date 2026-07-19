@@ -20,6 +20,13 @@ PASS_COUNT=0
 # case can grep the whole suite for leaked secrets in one place.
 ALL_OUTPUT_LOG="$(mktemp "${TMPDIR:-/tmp}/ccswitch-usage-test-alloutput.XXXXXX")"
 
+# Accumulates every argv the stub curl was ever invoked with (see
+# write_curl_stub's argv.log), across every case's own (short-lived,
+# per-case) CURL_STUB_DIR. This is what proves tokens never travel as a
+# literal curl argv argument -- the actual /proc/<pid>/cmdline exposure the
+# --config / -d @file switch in ccswitch defends against.
+ALL_ARGV_LOG="$(mktemp "${TMPDIR:-/tmp}/ccswitch-usage-test-allargv.XXXXXX")"
+
 # One shared stub-curl bin dir for the whole suite; each case gets its own
 # CURL_STUB_DIR (control dir) so cache/counter files never leak between cases.
 STUB_BIN="$(mktemp -d "${TMPDIR:-/tmp}/ccswitch-usage-test-stubbin.XXXXXX")"
@@ -53,15 +60,23 @@ write_curl_stub() {
 # $CURL_STUB_DIR, keyed by request URL + (bearer token | refresh_token).
 # Mirrors the real curl invocations' `-w '\n%{http_code}'` convention:
 # prints "<body>\n<status>" with no trailing newline after status.
+#
+# ccswitch keeps secrets OUT of argv (see fetch_usage_raw/refresh_token):
+# the bearer token travels via a --config file, the refresh body via
+# `-d @file`. This stub follows those same indirections rather than
+# expecting the secret to be a literal argv string.
 set -uo pipefail
 
-url="" token="" body_data="" prev=""
+url="" token="" body_data="" config_file="" prev=""
 for a in "$@"; do
-  if [[ "$prev" == "-H" && "$a" == Authorization:* ]]; then
-    token="${a#Authorization: Bearer }"
+  if [[ "$prev" == "--config" ]]; then
+    config_file="$a"
   fi
   if [[ "$prev" == "-d" ]]; then
-    body_data="$a"
+    case "$a" in
+      @*) body_data="$(cat "${a#@}" 2>/dev/null)" ;;
+      *) body_data="$a" ;;
+    esac
   fi
   case "$a" in
     http*) url="$a" ;;
@@ -69,8 +84,22 @@ for a in "$@"; do
   prev="$a"
 done
 
+if [[ -n "$config_file" ]]; then
+  token="$(grep -o 'Authorization: Bearer [^"]*' "$config_file" 2>/dev/null | head -1)"
+  token="${token#Authorization: Bearer }"
+fi
+
 : "${CURL_STUB_DIR:?CURL_STUB_DIR must be set for the curl stub}"
 mkdir -p "$CURL_STUB_DIR/calls"
+
+# Log every argv this stub was ever invoked with, so the suite can assert
+# (from the OUTSIDE, on the real strings this process was launched with)
+# that no secret ever traveled as a literal argv argument -- exactly the
+# /proc/<pid>/cmdline exposure the --config / -d @file switch defends
+# against. %q quotes each arg so embedded spaces/specials are visible as
+# distinct tokens rather than merging together.
+printf '%q ' "$0" "$@" >>"$CURL_STUB_DIR/calls/argv.log"
+printf '\n' >>"$CURL_STUB_DIR/calls/argv.log"
 
 respond_from() {
   local dir="$1" key="$2"
@@ -122,6 +151,7 @@ run_cc() {
   OUT="$(PATH="$STUB_BIN:$PATH" HOME="$home" CURL_STUB_DIR="$ctl" bash "$TARGET" usage "$@" <<<"$stdin_text" 2>&1)"
   EXIT_CODE=$?
   printf '%s\n' "$OUT" >>"$ALL_OUTPUT_LOG"
+  cat "$ctl/calls/argv.log" >>"$ALL_ARGV_LOG" 2>/dev/null || true
 }
 
 write_live_credentials() {
@@ -538,7 +568,31 @@ main() {
     fi
   }
 
-  rm -rf "$STUB_BIN" "$ALL_OUTPUT_LOG"
+  # =========================================================================
+  # Case 9 (security): none of the fake secret tokens ever appear as a
+  # literal curl argv argument across the whole suite. This is the specific
+  # property fetch_usage_raw's --config file and refresh_token's -d @file
+  # exist to guarantee (argv is readable via /proc/<pid>/cmdline on a
+  # shared host; the config/body FILE contents are not argv and are not
+  # checked here -- only what curl was actually invoked with).
+  # =========================================================================
+  {
+    local combined_argv leaked=0 secret
+    combined_argv="$(cat "$ALL_ARGV_LOG")"
+    for secret in "${SECRET_TOKENS[@]}"; do
+      if printf '%s' "$combined_argv" | grep -q "$secret"; then
+        leaked=1
+        echo "  leaked secret in curl argv: $secret"
+      fi
+    done
+    if [[ "$leaked" -eq 0 ]]; then
+      pass "case9 no secret token ever appears in curl argv"
+    else
+      fail "case9 SECURITY LEAK: a secret token appeared in curl argv"
+    fi
+  }
+
+  rm -rf "$STUB_BIN" "$ALL_OUTPUT_LOG" "$ALL_ARGV_LOG"
 
   echo
   echo "----------------------------------------"

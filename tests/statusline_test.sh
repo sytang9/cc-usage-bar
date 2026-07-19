@@ -191,6 +191,58 @@ case8() {
   rm -rf "$home_dir" "$scratch_script"
 }
 
+# --- Color-threshold boundary cases ----------------------------------------
+# statusline-usage.sh's color_for() rule (see its PCT_OK_MAX/PCT_WARN_MAX
+# constants): pct < 60 -> ok (108), 60 <= pct <= 85 -> warn (179),
+# pct > 85 -> crit (167). Each case below feeds a minimal inline JSON
+# (both rate-limit buckets set to the same boundary pct, since only the
+# five_hour/seven_day bars' own color is under test here) and asserts the
+# exact 256-color SGR escape for that boundary's expected bucket appears.
+run_boundary_pct() {
+  local home_dir="$1" pct="$2"
+  local json
+  json="$(printf '{"rate_limits":{"five_hour":{"used_percentage":%s,"resets_at":4102444800},"seven_day":{"used_percentage":%s,"resets_at":4102444800}}}' "$pct" "$pct")"
+  OUT="$(HOME="$home_dir" bash "$TARGET" <<<"$json" 2>&1)"
+  EXIT_CODE=$?
+}
+
+assert_color_boundary() {
+  local pct="$1" expected_color="$2" label="$3"
+  local home_dir pattern
+  home_dir="$(make_sandbox)"
+
+  run_boundary_pct "$home_dir" "$pct"
+  pattern="$(printf '\033[38;5;%sm' "$expected_color")"
+
+  if [[ "$EXIT_CODE" -eq 0 ]] && printf '%s' "$OUT" | grep -qF "$pattern"; then
+    pass "$label"
+  else
+    fail "$label (exit=$EXIT_CODE): $(printf '%s' "$OUT" | cat -v)"
+  fi
+
+  rm -rf "$home_dir"
+}
+
+# --- Case 9: pct 59 -> still ok (108), one below the warn threshold --------
+case9() {
+  assert_color_boundary 59 108 "case9 pct 59 shows ok color 108 (just below warn threshold)"
+}
+
+# --- Case 10: pct 60 -> warn (179), the first warn value -------------------
+case10() {
+  assert_color_boundary 60 179 "case10 pct 60 shows warn color 179 (first warn value)"
+}
+
+# --- Case 11: pct 85 -> still warn (179), the last warn value --------------
+case11() {
+  assert_color_boundary 85 179 "case11 pct 85 shows warn color 179 (last warn value)"
+}
+
+# --- Case 12: pct 86 -> crit (167), the first crit value -------------------
+case12() {
+  assert_color_boundary 86 167 "case12 pct 86 shows crit color 167 (first crit value)"
+}
+
 # --- Bonus: malformed JSON on stdin -> single fallback line, exit 0 -------
 case7() {
   local home_dir
@@ -222,6 +274,10 @@ main() {
   case6
   case7
   case8
+  case9
+  case10
+  case11
+  case12
 
   echo
   echo "----------------------------------------"

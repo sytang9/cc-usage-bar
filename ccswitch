@@ -289,26 +289,49 @@ cmd_switch() {
 
 # fetch_usage_raw <access_token> -> prints "<body>\n<http_status>" (curl's
 # -w appends the status as a trailing line). Never logs the token or body.
+#
+# SECURITY: the bearer token is deliberately kept OUT of argv. Any argv a
+# process is launched with is world-readable on a shared host via
+# /proc/<pid>/cmdline for the duration of the call, regardless of shell
+# quoting -- `-H "Authorization: Bearer $token"` would leak the token to
+# anyone who can list processes at the right instant. Instead we write a
+# curl config file (mode 600, this process's own tmp file) and point curl
+# at it with --config; the URL itself is not secret and stays in argv (the
+# test stub, and any `ps`/audit tooling, still identify the call by it).
 fetch_usage_raw() {
   local token="$1"
-  curl -sS -o - -w '\n%{http_code}' \
-    -H "Authorization: Bearer ${token}" \
-    -H "anthropic-beta: ${USAGE_API_BETA_HEADER}" \
-    "$USAGE_API_URL" 2>/dev/null
+  local cfgfile
+  cfgfile="$(mktemp "${TMPDIR:-/tmp}/ccswitch-usage-cfg.XXXXXX")"
+  chmod 600 "$cfgfile"
+  {
+    printf 'header = "Authorization: Bearer %s"\n' "$token"
+    printf 'header = "anthropic-beta: %s"\n' "$USAGE_API_BETA_HEADER"
+  } >"$cfgfile"
+  curl -sS -o - -w '\n%{http_code}' --config "$cfgfile" "$USAGE_API_URL" 2>/dev/null
+  rm -f "$cfgfile"
 }
 
 # refresh_token <refresh_token> -> prints "<body>\n<http_status>", same
 # convention as fetch_usage_raw. Only place that builds the refresh body.
+#
+# SECURITY: same argv concern as fetch_usage_raw, but here it's the request
+# BODY (refresh_token + client_id) that must stay off argv. Written to a
+# mode-600 tmp file and passed via `-d @file`, which tells curl to read the
+# body from disk instead of taking it as a literal argv string.
 refresh_token() {
   local rt="$1"
-  local req_body
+  local req_body bodyfile
   req_body="$(jq -cn --arg rt "$rt" --arg cid "$OAUTH_CLIENT_ID" \
     '{grant_type: "refresh_token", refresh_token: $rt, client_id: $cid}')"
+  bodyfile="$(mktemp "${TMPDIR:-/tmp}/ccswitch-refresh-body.XXXXXX")"
+  chmod 600 "$bodyfile"
+  printf '%s' "$req_body" >"$bodyfile"
   curl -sS -o - -w '\n%{http_code}' \
     -X POST \
     -H "Content-Type: application/json" \
-    -d "$req_body" \
+    -d @"$bodyfile" \
     "$TOKEN_REFRESH_URL" 2>/dev/null
+  rm -f "$bodyfile"
 }
 
 # split_http_response <raw> -> sets HTTP_STATUS and HTTP_BODY from the
@@ -458,6 +481,9 @@ read_usage_cache() {
   cache_file="$(usage_cache_file "$1")"
   local content
   content="$(cat "$cache_file" 2>/dev/null)"
+  # `jq -e .` also treats a literal top-level `null` (valid JSON, e.g. an
+  # empty/truncated write) as "invalid" -- exit code 1 -- so that case
+  # self-heals to "{}" here too, not just missing-file/corrupt-JSON.
   echo "$content" | jq -e . >/dev/null 2>&1 && echo "$content" || echo "{}"
 }
 
