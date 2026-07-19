@@ -122,10 +122,24 @@ for `ccswitch <label> --relaunch`.
 ccswitch usage [--no-switch] [--refresh] [--relaunch]
 ```
 
-Shows 5h/weekly usage for every saved account in one table — active account
-starred, the account with the most headroom flagged — so you can decide
-where to switch before you do it. After the table, it prompts for a label to
-switch to (Enter cancels).
+Shows 5-hour and weekly usage for every saved account in one table, with each
+window's reset countdown, so you can decide where to switch before you do it:
+
+```
+  ACCOUNT     5H                  WEEK                RESET(5h)   RESET(wk)
+* claude001   █▍··········  11%   ████········  33%   4h 11m      3d 21h
+  claude003   ············   0%   ████████████ 100%   —           10h 0m
+  shanyuan    █▌··········  12%   ▎···········   2%   1h 41m      5d 7h      <- most headroom
+```
+
+- The active account is starred; the one with the **most headroom** is flagged.
+  Headroom accounts for *both* limits (the higher of 5h/weekly), so an account
+  that is idle on 5h but maxed for the week is never flagged as free.
+- `RESET(5h)` shows `—` when 5-hour usage is 0% (the API reports no active
+  window to reset yet) — the row still shows real weekly numbers.
+- After the table it prompts for a label to switch to (Enter cancels).
+
+Flags:
 
 - `--no-switch` — print the table and exit; skip the switch prompt.
 - `--refresh` — bypass the 10-minute usage cache and poll live.

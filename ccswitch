@@ -342,25 +342,42 @@ split_http_response() {
   HTTP_BODY="$(printf '%s' "$raw" | sed '$d')"
 }
 
-# parse_usage <json> -> echoes "five_hour_pct|seven_day_pct|five_hour_reset_epoch"
+# iso_to_epoch_or_null <iso_string> -> epoch seconds, or the JSON literal
+# `null` when the input is empty or unparseable. `null` (not "") is used so
+# the value stays valid JSON for --argjson when it is cached.
+iso_to_epoch_or_null() {
+  local iso="$1" ep
+  [[ -z "$iso" ]] && { echo "null"; return; }
+  ep="$(date -d "$iso" +%s 2>/dev/null)"
+  [[ -z "$ep" ]] && { echo "null"; return; }
+  echo "$ep"
+}
+
+# parse_usage <json> -> echoes
+# "five_hour_pct|seven_day_pct|five_hour_reset_epoch|seven_day_reset_epoch"
 # on success, or returns non-zero with no output on any schema mismatch. This
 # is the ONLY function that knows the usage response field names.
+#
+# Only the two utilization percentages are required. Either `resets_at` is
+# OPTIONAL: the API returns `five_hour.resets_at` as null whenever 5-hour usage
+# is 0% (no active window to reset), yet the weekly number is still valid and
+# worth showing. A missing reset is emitted as the JSON literal `null` (so it
+# stays valid for --argjson caching) and renders as a dash in its reset column,
+# rather than discarding the whole row.
 parse_usage() {
   local json="$1"
 
   echo "$json" | jq -e \
-    '(.five_hour.utilization != null) and (.seven_day.utilization != null) and (.five_hour.resets_at != null)' \
+    '(.five_hour.utilization != null) and (.seven_day.utilization != null)' \
     >/dev/null 2>&1 || return 1
 
-  local five_pct week_pct reset_iso reset_epoch
+  local five_pct week_pct five_reset week_reset
   five_pct="$(echo "$json" | jq -r '.five_hour.utilization')"
   week_pct="$(echo "$json" | jq -r '.seven_day.utilization')"
-  reset_iso="$(echo "$json" | jq -r '.five_hour.resets_at')"
+  five_reset="$(iso_to_epoch_or_null "$(echo "$json" | jq -r '.five_hour.resets_at // empty')")"
+  week_reset="$(iso_to_epoch_or_null "$(echo "$json" | jq -r '.seven_day.resets_at // empty')")"
 
-  reset_epoch="$(date -d "$reset_iso" +%s 2>/dev/null)" || return 1
-  [[ -z "$reset_epoch" ]] && return 1
-
-  echo "${five_pct}|${week_pct}|${reset_epoch}"
+  echo "${five_pct}|${week_pct}|${five_reset}|${week_reset}"
 }
 
 # parse_refresh <json> -> echoes "access_token|expires_in|refresh_token" on
@@ -501,26 +518,27 @@ write_usage_cache() {
 }
 
 # fetch_and_cache_usage <label> <access_token> <bypass_cache: 0|1> -> echoes
-# "five_hour_pct|seven_day_pct|five_hour_reset_epoch" (all empty on failure).
-# Cache TTL and the 429 backoff are both handled here so callers never see
-# the difference between "fresh" and "served from cache".
+# "five_hour_pct|seven_day_pct|five_hour_reset_epoch|seven_day_reset_epoch"
+# (all empty on failure). Cache TTL and the 429 backoff are both handled here
+# so callers never see the difference between "fresh" and "served from cache".
 fetch_and_cache_usage() {
   local label="$1" token="$2" bypass_cache="$3"
   local now cache
   now="$(date +%s)"
   cache="$(read_usage_cache "$label")"
 
-  local rate_limited_until fetched_at cached_5h cached_7d cached_reset
+  local rate_limited_until fetched_at cached_5h cached_7d cached_5reset cached_7reset
   rate_limited_until="$(echo "$cache" | jq -r '.rate_limited_until // empty')"
   fetched_at="$(echo "$cache" | jq -r '.fetched_at // empty')"
   cached_5h="$(echo "$cache" | jq -r '.five_hour_pct // empty')"
   cached_7d="$(echo "$cache" | jq -r '.seven_day_pct // empty')"
-  cached_reset="$(echo "$cache" | jq -r '.five_hour_reset_epoch // empty')"
+  cached_5reset="$(echo "$cache" | jq -r '.five_hour_reset_epoch // empty')"
+  cached_7reset="$(echo "$cache" | jq -r '.seven_day_reset_epoch // empty')"
 
   # A 429 backoff window is honored even with --refresh: hammering an
   # endpoint that just rate-limited us is never the right override.
   if [[ -n "$rate_limited_until" ]] && (( now < rate_limited_until )); then
-    [[ -n "$cached_5h" ]] && echo "${cached_5h}|${cached_7d}|${cached_reset}" || echo "|||"
+    [[ -n "$cached_5h" ]] && echo "${cached_5h}|${cached_7d}|${cached_5reset}|${cached_7reset}" || echo "|||"
     return 0
   fi
 
@@ -528,7 +546,7 @@ fetch_and_cache_usage() {
     && [[ -n "$fetched_at" ]] \
     && (( now - fetched_at < USAGE_CACHE_TTL_SECONDS )) \
     && [[ -n "$cached_5h" ]]; then
-    echo "${cached_5h}|${cached_7d}|${cached_reset}"
+    echo "${cached_5h}|${cached_7d}|${cached_5reset}|${cached_7reset}"
     return 0
   fi
 
@@ -540,7 +558,7 @@ fetch_and_cache_usage() {
     local new_cache
     new_cache="$(echo "$cache" | jq --argjson rl "$((now + USAGE_RATE_LIMIT_BACKOFF_SECONDS))" '.rate_limited_until = $rl')"
     write_usage_cache "$label" "$new_cache"
-    [[ -n "$cached_5h" ]] && echo "${cached_5h}|${cached_7d}|${cached_reset}" || echo "|||"
+    [[ -n "$cached_5h" ]] && echo "${cached_5h}|${cached_7d}|${cached_5reset}|${cached_7reset}" || echo "|||"
     return 0
   fi
 
@@ -555,14 +573,14 @@ fetch_and_cache_usage() {
     return 0
   fi
 
-  local p5 p7 preset
-  IFS='|' read -r p5 p7 preset <<<"$parsed"
+  local p5 p7 p5reset p7reset
+  IFS='|' read -r p5 p7 p5reset p7reset <<<"$parsed"
   local new_cache
-  new_cache="$(jq -n --argjson fa "$now" --argjson p5 "$p5" --argjson p7 "$p7" --argjson pr "$preset" \
-    '{fetched_at: $fa, five_hour_pct: $p5, seven_day_pct: $p7, five_hour_reset_epoch: $pr, rate_limited_until: null}')"
+  new_cache="$(jq -n --argjson fa "$now" --argjson p5 "$p5" --argjson p7 "$p7" --argjson pr5 "$p5reset" --argjson pr7 "$p7reset" \
+    '{fetched_at: $fa, five_hour_pct: $p5, seven_day_pct: $p7, five_hour_reset_epoch: $pr5, seven_day_reset_epoch: $pr7, rate_limited_until: null}')"
   write_usage_cache "$label" "$new_cache"
 
-  echo "${p5}|${p7}|${preset}"
+  echo "${p5}|${p7}|${p5reset}|${p7reset}"
 }
 
 # --- meter rendering (mirrors statusline-usage.sh's aesthetic: eighth-block
@@ -642,6 +660,23 @@ usage_fmt_reset() {
   fi
 }
 
+# Width of a reset column; matches the "RESET(5h)" header label so the two
+# reset columns line up.
+USAGE_RESET_WIDTH=9
+
+# usage_reset_cell <epoch_or_null> -> the dim reset countdown, padded to a
+# fixed VISIBLE width. The em-dash placeholder is multibyte (3 bytes, 1
+# column), so its width is corrected explicitly; every other value is ASCII.
+usage_reset_cell() {
+  local txt vis pad
+  txt="$(usage_fmt_reset "$1")"
+  vis=${#txt}
+  [[ "$txt" == "—" ]] && vis=1
+  pad=$(( USAGE_RESET_WIDTH - vis ))
+  (( pad < 0 )) && pad=0
+  usage_dim "$(printf '%s%*s' "$txt" "$pad" "")"
+}
+
 # build_usage_row <label> -> echoes "label|marker|state|five_pct|week_pct|reset_epoch".
 # state is one of: ok, dash, relogin. Never lets one account's failure abort
 # the loop -- every failure mode resolves to a row, not an exit.
@@ -654,7 +689,7 @@ build_usage_row() {
   IFS='|' read -r access exp refresh <<<"$(resolve_account_credentials "$label")"
 
   if [[ -z "$access" ]] && [[ -z "$refresh" ]]; then
-    echo "${label}|${marker}|dash|||"
+    echo "${label}|${marker}|dash||||"
     return 0
   fi
 
@@ -663,33 +698,37 @@ build_usage_row() {
     if refreshed="$(attempt_refresh "$label" "$refresh")"; then
       access="$refreshed"
     else
-      echo "${label}|${marker}|relogin|||"
+      echo "${label}|${marker}|relogin||||"
       return 0
     fi
   fi
 
   if [[ -z "$access" ]]; then
-    echo "${label}|${marker}|dash|||"
+    echo "${label}|${marker}|dash||||"
     return 0
   fi
 
-  local p5 p7 preset
-  IFS='|' read -r p5 p7 preset <<<"$(fetch_and_cache_usage "$label" "$access" "$USAGE_BYPASS_CACHE")"
+  local p5 p7 p5reset p7reset
+  IFS='|' read -r p5 p7 p5reset p7reset <<<"$(fetch_and_cache_usage "$label" "$access" "$USAGE_BYPASS_CACHE")"
 
   if [[ -z "$p5" ]]; then
-    echo "${label}|${marker}|dash|||"
+    echo "${label}|${marker}|dash||||"
   else
-    echo "${label}|${marker}|ok|${p5}|${p7}|${preset}"
+    echo "${label}|${marker}|ok|${p5}|${p7}|${p5reset}|${p7reset}"
   fi
 }
 
-# find_headroom_label <<< rows: pipe of "label|state|five_pct" -> echoes the
-# label with the lowest five_pct among rows in the "ok" state (most
-# headroom == least used). Empty output if no row is in the "ok" state.
+# find_headroom_label <<< rows: pipe of "label|state|five_pct|week_pct" ->
+# echoes the label with the MOST headroom among rows in the "ok" state. A
+# window with the most headroom is the one whose tighter limit (the higher of
+# its 5-hour and weekly utilization) is lowest -- an account at 0% 5h but 100%
+# weekly has no real headroom, so weekly must count too. Empty output if no
+# row is in the "ok" state.
 find_headroom_label() {
   awk -F'|' '
     $2 == "ok" {
-      if (!seen || $3 + 0 < best) { best = $3 + 0; label = $1; seen = 1 }
+      u = ($3 + 0 > $4 + 0) ? $3 + 0 : $4 + 0
+      if (!seen || u < best) { best = u; label = $1; seen = 1 }
     }
     END { if (seen) print label }
   '
@@ -744,28 +783,28 @@ cmd_usage() {
     label="$(basename "$label_dir")"
     row="$(build_usage_row "$label")"
     rows+="${row}"$'\n'
-    headroom_lookup+="$(echo "$row" | awk -F'|' '{print $1"|"$3"|"$4}')"$'\n'
+    headroom_lookup+="$(echo "$row" | awk -F'|' '{print $1"|"$3"|"$4"|"$5}')"$'\n'
   done
 
   local headroom_label
   headroom_label="$(echo "$headroom_lookup" | find_headroom_label)"
 
   local header_text
-  header_text="$(printf '%-14s%-*s   %-*s   %s' "  ACCOUNT" "$USAGE_CELL_WIDTH" "5H" "$USAGE_CELL_WIDTH" "WEEK" "RESET(5h)")"
+  header_text="$(printf '%-14s%-*s   %-*s   %-*s   %s' \
+    "  ACCOUNT" "$USAGE_CELL_WIDTH" "5H" "$USAGE_CELL_WIDTH" "WEEK" \
+    "$USAGE_RESET_WIDTH" "RESET(5h)" "RESET(wk)")"
   printf '%s\n' "$(usage_dim "$header_text")"
-  local marker state p5 p7 preset line
-  while IFS='|' read -r label marker state p5 p7 preset; do
+  local marker state p5 p7 p5reset p7reset line
+  while IFS='|' read -r label marker state p5 p7 p5reset p7reset; do
     [[ -z "$label" ]] && continue
     line="$(printf '%-14s' "${marker}${label}")"
     line+="$(render_usage_cell "$state" "$p5")"
     line+="   "
     line+="$(render_usage_cell "$state" "$p7")"
     line+="   "
-    if [[ "$state" == "ok" ]]; then
-      line+="$(usage_dim "$(usage_fmt_reset "$preset")")"
-    else
-      line+=$'\xe2\x80\x94'
-    fi
+    line+="$(usage_reset_cell "$p5reset")"
+    line+="   "
+    line+="$(usage_reset_cell "$p7reset")"
     if [[ -n "$headroom_label" ]] && [[ "$label" == "$headroom_label" ]]; then
       line+="  <- most headroom"
     fi

@@ -216,6 +216,18 @@ usage_body() {
     '{five_hour: {utilization: $five, resets_at: $reset}, seven_day: {utilization: $week, resets_at: $reset}}'
 }
 
+# usage_body_5hnull <five> <week> -> like usage_body but five_hour.resets_at is
+# null, exactly as the real API returns it when 5-hour usage is 0%. The weekly
+# reset stays present. Used to prove such a row still renders (regression: it
+# used to be discarded entirely).
+usage_body_5hnull() {
+  local five="$1" week="$2" reset_epoch reset_iso
+  reset_epoch=$(( $(date +%s) + 7200 ))
+  reset_iso="$(date -u -d "@$reset_epoch" +"%Y-%m-%dT%H:%M:%S.000000+00:00")"
+  jq -cn --argjson five "$five" --argjson week "$week" --arg reset "$reset_iso" \
+    '{five_hour: {utilization: $five, resets_at: null}, seven_day: {utilization: $week, resets_at: $reset}}'
+}
+
 # refresh_success_body <new_access> [new_refresh] -> a realistic refresh
 # response: real refresh tokens rotate, so this always includes a
 # refresh_token field (tests assert it gets persisted back).
@@ -590,6 +602,75 @@ main() {
     else
       fail "case9 SECURITY LEAK: a secret token appeared in curl argv"
     fi
+  }
+
+  # =========================================================================
+  # Case 10: a 200 body with five_hour.resets_at = null (5h usage 0%) still
+  # renders the row -- weekly is valid and must show -- rather than being
+  # discarded. RESET(wk) column present; the 5h reset cell shows the em dash.
+  # =========================================================================
+  {
+    local home ctl
+    home="$(new_home)"
+    ctl="$(new_ctl)"
+
+    write_claude_json "$home"
+    write_account_credentials "$home" "acct_zero5h" "REFRESH_Z" "TOK_ZERO5H" "$(future_ms)"
+
+    set_usage_response "$ctl" "TOK_ZERO5H" 200 "$(usage_body_5hnull 0 100)"
+
+    run_cc "$home" "$ctl" "" --no-switch
+
+    local zline
+    zline="$(printf '%s' "$OUT" | grep 'acct_zero5h')"
+
+    # A rendered meter always contains the track char '·'; a dashed-out row
+    # never does -- so '·' proves the row rendered (ok state), not dashed.
+    if [[ "$EXIT_CODE" -eq 0 ]] \
+      && printf '%s' "$OUT" | grep -q 'RESET(wk)' \
+      && printf '%s' "$zline" | grep -q '100%' \
+      && printf '%s' "$zline" | grep -q '·' \
+      && printf '%s' "$zline" | grep -q $'\xe2\x80\x94'; then
+      pass "case10 null 5h reset still renders (weekly shown, RESET(wk) present, 5h reset dashed)"
+    else
+      fail "case10 (exit=$EXIT_CODE): $OUT"
+    fi
+
+    rm -rf "$home" "$ctl"
+  }
+
+  # =========================================================================
+  # Case 11: "most headroom" accounts for BOTH limits. An account at 0% 5h but
+  # 100% weekly has no real headroom and must NOT be flagged over an account
+  # that is low on both.
+  # =========================================================================
+  {
+    local home ctl
+    home="$(new_home)"
+    ctl="$(new_ctl)"
+
+    write_claude_json "$home"
+    write_account_credentials "$home" "acct_wkmax" "REFRESH_WM" "TOK_WM" "$(future_ms)"
+    write_account_credentials "$home" "acct_free" "REFRESH_FR" "TOK_FR" "$(future_ms)"
+
+    set_usage_response "$ctl" "TOK_WM" 200 "$(usage_body 0 100)"
+    set_usage_response "$ctl" "TOK_FR" 200 "$(usage_body 5 10)"
+
+    run_cc "$home" "$ctl" "" --no-switch
+
+    local wmline frline
+    wmline="$(printf '%s' "$OUT" | grep 'acct_wkmax')"
+    frline="$(printf '%s' "$OUT" | grep 'acct_free')"
+
+    if [[ "$EXIT_CODE" -eq 0 ]] \
+      && printf '%s' "$frline" | grep -q 'most headroom' \
+      && ! printf '%s' "$wmline" | grep -q 'most headroom'; then
+      pass "case11 most-headroom accounts for weekly too (100%-weekly account not flagged)"
+    else
+      fail "case11 (exit=$EXIT_CODE): $OUT"
+    fi
+
+    rm -rf "$home" "$ctl"
   }
 
   rm -rf "$STUB_BIN" "$ALL_OUTPUT_LOG" "$ALL_ARGV_LOG"
