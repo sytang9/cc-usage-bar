@@ -30,8 +30,10 @@ STUB_BIN="$(mktemp -d "${TMPDIR:-/tmp}/ccswitch-usage-test-stubbin.XXXXXX")"
 SECRET_TOKENS=(
   TOK_ACTIVE_5H80 TOK_OTHER_5H20 TOK_GOOD TOK_BAD TOK_C_OLD TOK_C_NEW
   TOK_D_OLD REFRESH_ACTIVE REFRESH_OTHER REFRESH_GOOD REFRESH_BAD
-  REFRESH_C REFRESH_D TOK_CACHE REFRESH_CACHE TOK_SWITCHA TOK_SWITCHB
-  REFRESH_SWITCHA REFRESH_SWITCHB
+  REFRESH_C REFRESH_C_ROTATED REFRESH_D TOK_CACHE REFRESH_CACHE
+  TOK_SWITCHA TOK_SWITCHB REFRESH_SWITCHA REFRESH_SWITCHB
+  TOK_GARBAGE TOK_PARTNER REFRESH_GARBAGE REFRESH_PARTNER
+  TOK_RATELIMIT REFRESH_RATELIMIT
 )
 
 pass() {
@@ -131,9 +133,15 @@ write_live_credentials() {
   chmod 600 "$home/.claude/.credentials.json"
 }
 
+# write_claude_json <home> [account_uuid] -> the live .claude.json.
+# Active-account detection is anchored on .oauthAccount.accountUuid (NOT
+# refreshToken, which rotates), so any case that needs the '*' marker /
+# is_active_account to fire must pass a uuid here that also appears in
+# that account's oauthAccount.json snapshot (write_account_oauth below).
 write_claude_json() {
-  local home="$1"
-  jq -n '{oauthAccount: {}}' >"$home/.claude.json"
+  local home="$1" uuid="${2:-}"
+  jq -cn --arg uuid "$uuid" '{oauthAccount: (if $uuid == "" then {} else {accountUuid: $uuid} end)}' \
+    >"$home/.claude.json"
 }
 
 write_account_credentials() {
@@ -144,6 +152,17 @@ write_account_credentials() {
     >"$home/.claude/accounts/$label/credentials.json"
   chmod 600 "$home/.claude/accounts/$label/credentials.json"
   chmod 700 "$home/.claude/accounts/$label"
+}
+
+# write_account_oauth <home> <label> <account_uuid> -> the saved
+# oauthAccount.json snapshot cmd_save would normally produce. Only the
+# accountUuid field matters for active-account detection.
+write_account_oauth() {
+  local home="$1" label="$2" uuid="$3"
+  mkdir -p "$home/.claude/accounts/$label"
+  jq -cn --arg uuid "$uuid" '{accountUuid: $uuid}' \
+    >"$home/.claude/accounts/$label/oauthAccount.json"
+  chmod 600 "$home/.claude/accounts/$label/oauthAccount.json"
 }
 
 set_usage_response() {
@@ -167,9 +186,13 @@ usage_body() {
     '{five_hour: {utilization: $five, resets_at: $reset}, seven_day: {utilization: $week, resets_at: $reset}}'
 }
 
+# refresh_success_body <new_access> [new_refresh] -> a realistic refresh
+# response: real refresh tokens rotate, so this always includes a
+# refresh_token field (tests assert it gets persisted back).
 refresh_success_body() {
-  local new_access="$1"
-  jq -cn --arg at "$new_access" '{access_token: $at, expires_in: 28800, refresh_token: "ROTATED_UNUSED", token_type: "Bearer"}'
+  local new_access="$1" new_refresh="${2:-REFRESH_C_ROTATED}"
+  jq -cn --arg at "$new_access" --arg rt "$new_refresh" \
+    '{access_token: $at, expires_in: 28800, refresh_token: $rt, token_type: "Bearer"}'
 }
 
 future_ms() {
@@ -197,10 +220,12 @@ main() {
     home="$(new_home)"
     ctl="$(new_ctl)"
 
-    write_claude_json "$home"
+    write_claude_json "$home" "UUID_ACTIVE"
     write_live_credentials "$home" "REFRESH_ACTIVE" "TOK_ACTIVE_5H80" "$(future_ms)"
     write_account_credentials "$home" "acct_active" "REFRESH_ACTIVE" "TOK_ACTIVE_5H80" "$(future_ms)"
+    write_account_oauth "$home" "acct_active" "UUID_ACTIVE"
     write_account_credentials "$home" "acct_other" "REFRESH_OTHER" "TOK_OTHER_5H20" "$(future_ms)"
+    write_account_oauth "$home" "acct_other" "UUID_OTHER"
 
     set_usage_response "$ctl" "TOK_ACTIVE_5H80" 200 "$(usage_body 80 50)"
     set_usage_response "$ctl" "TOK_OTHER_5H20" 200 "$(usage_body 20 10)"
@@ -258,8 +283,8 @@ main() {
   }
 
   # =========================================================================
-  # Case 3: expired accessToken + successful refresh -> stored credentials.json
-  # accessToken updated, row renders normally.
+  # Case 2b: HTTP 200 but a schema-mismatched body (parse_usage fails) -> that
+  # account's row degrades to the dash placeholder, the other still renders.
   # =========================================================================
   {
     local home ctl
@@ -267,24 +292,100 @@ main() {
     ctl="$(new_ctl)"
 
     write_claude_json "$home"
-    write_account_credentials "$home" "acct_c" "REFRESH_C" "TOK_C_OLD" 1
+    write_account_credentials "$home" "acct_partner" "REFRESH_PARTNER" "TOK_PARTNER" "$(future_ms)"
+    write_account_credentials "$home" "acct_garbage" "REFRESH_GARBAGE" "TOK_GARBAGE" "$(future_ms)"
 
-    set_token_response "$ctl" "REFRESH_C" 200 "$(refresh_success_body "TOK_C_NEW")"
+    set_usage_response "$ctl" "TOK_PARTNER" 200 "$(usage_body 41 22)"
+    set_usage_response "$ctl" "TOK_GARBAGE" 200 '{"garbage":true}'
+
+    run_cc "$home" "$ctl" "" --no-switch
+
+    local partner_line garbage_line
+    partner_line="$(printf '%s' "$OUT" | grep "acct_partner")"
+    garbage_line="$(printf '%s' "$OUT" | grep "acct_garbage")"
+
+    if [[ "$EXIT_CODE" -eq 0 ]] \
+      && printf '%s' "$partner_line" | grep -q '41%' \
+      && printf '%s' "$garbage_line" | grep -q $'\xe2\x80\x94'; then
+      pass "case2b 200-with-schema-mismatch degrades to dash, other account still renders"
+    else
+      fail "case2b (exit=$EXIT_CODE): $OUT"
+    fi
+
+    rm -rf "$home" "$ctl"
+  }
+
+  # =========================================================================
+  # Case 2c: HTTP 429 -> row degrades to dash and the backoff is recorded;
+  # a second call (even with --refresh) within the 120s window must not
+  # re-hit the usage stub.
+  # =========================================================================
+  {
+    local home ctl
+    home="$(new_home)"
+    ctl="$(new_ctl)"
+
+    write_claude_json "$home"
+    write_account_credentials "$home" "acct_ratelimit" "REFRESH_RATELIMIT" "TOK_RATELIMIT" "$(future_ms)"
+    set_usage_response "$ctl" "TOK_RATELIMIT" 429 '{"error":"rate limited"}'
+
+    run_cc "$home" "$ctl" "" --no-switch
+    local count_after_first line_after_first
+    count_after_first="$(usage_call_count "$ctl")"
+    line_after_first="$(printf '%s' "$OUT" | grep "acct_ratelimit")"
+
+    run_cc "$home" "$ctl" "" --refresh --no-switch
+    local count_after_refresh
+    count_after_refresh="$(usage_call_count "$ctl")"
+
+    if [[ "$count_after_first" -eq 1 ]] \
+      && printf '%s' "$line_after_first" | grep -q $'\xe2\x80\x94' \
+      && [[ "$count_after_refresh" -eq 1 ]]; then
+      pass "case2c 429 degrades to dash and records a backoff that even --refresh honors"
+    else
+      fail "case2c (count_after_first=$count_after_first count_after_refresh=$count_after_refresh): $OUT"
+    fi
+
+    rm -rf "$home" "$ctl"
+  }
+
+  # =========================================================================
+  # Case 3: expired accessToken + successful refresh -> stored credentials.json
+  # accessToken updated, row renders normally. acct_c is ALSO the active
+  # account (matching accountUuid), so this simultaneously proves: (a) the
+  # rotated refresh_token from the response is persisted back into the
+  # snapshot, and (b) active-account detection survives that rotation
+  # because it is keyed on accountUuid, not on refreshToken equality.
+  # =========================================================================
+  {
+    local home ctl
+    home="$(new_home)"
+    ctl="$(new_ctl)"
+
+    write_claude_json "$home" "UUID_C"
+    write_live_credentials "$home" "REFRESH_C" "TOK_C_OLD" 1
+    write_account_credentials "$home" "acct_c" "REFRESH_C" "TOK_C_OLD" 1
+    write_account_oauth "$home" "acct_c" "UUID_C"
+
+    set_token_response "$ctl" "REFRESH_C" 200 "$(refresh_success_body "TOK_C_NEW" "REFRESH_C_ROTATED")"
     set_usage_response "$ctl" "TOK_C_NEW" 200 "$(usage_body 15 5)"
 
     run_cc "$home" "$ctl" "" --no-switch
 
-    local stored_access
+    local stored_access stored_refresh
     stored_access="$(jq -r '.claudeAiOauth.accessToken' "$home/.claude/accounts/acct_c/credentials.json" 2>/dev/null)"
+    stored_refresh="$(jq -r '.claudeAiOauth.refreshToken' "$home/.claude/accounts/acct_c/credentials.json" 2>/dev/null)"
     local acct_c_line
     acct_c_line="$(printf '%s' "$OUT" | grep "acct_c")"
 
     if [[ "$EXIT_CODE" -eq 0 ]] \
       && [[ "$stored_access" == "TOK_C_NEW" ]] \
-      && printf '%s' "$acct_c_line" | grep -q '15%'; then
-      pass "case3 expired token refreshed, stored credentials.json accessToken updated, row renders"
+      && [[ "$stored_refresh" == "REFRESH_C_ROTATED" ]] \
+      && printf '%s' "$acct_c_line" | grep -q '15%' \
+      && printf '%s' "$acct_c_line" | grep -q '\* acct_c'; then
+      pass "case3 expired token refreshed: accessToken+rotated refreshToken persisted, row renders, still marked active (accountUuid) after rotation"
     else
-      fail "case3 (exit=$EXIT_CODE stored_access=$stored_access): $OUT"
+      fail "case3 (exit=$EXIT_CODE stored_access=$stored_access stored_refresh=$stored_refresh): $OUT"
     fi
 
     rm -rf "$home" "$ctl"

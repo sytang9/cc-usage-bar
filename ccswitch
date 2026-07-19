@@ -137,13 +137,17 @@ secure_copy() {
   chmod 600 "$dst"
 }
 
-live_refresh_token() {
-  jq -r '.claudeAiOauth.refreshToken // empty' "$CREDENTIALS_FILE" 2>/dev/null
+# Active-account identity is anchored on accountUuid, NOT refreshToken.
+# refreshToken rotates on every use (the usage monitor's token-refresh flow
+# writes a new one back after each successful refresh) so it cannot be a
+# stable identity key; accountUuid never changes for a given account.
+live_account_uuid() {
+  jq -r '.oauthAccount.accountUuid // empty' "$CLAUDE_JSON" 2>/dev/null
 }
 
-saved_refresh_token() {
+saved_account_uuid() {
   local label="$1"
-  jq -r '.claudeAiOauth.refreshToken // empty' "$ACCOUNTS_DIR/$label/credentials.json" 2>/dev/null
+  jq -r '.accountUuid // empty' "$ACCOUNTS_DIR/$label/oauthAccount.json" 2>/dev/null
 }
 
 confirm() {
@@ -191,15 +195,15 @@ cmd_list() {
     return 0
   fi
 
-  local live_refresh=""
-  if [[ -f "$CREDENTIALS_FILE" ]]; then
-    live_refresh="$(live_refresh_token)"
+  local live_uuid=""
+  if [[ -f "$CLAUDE_JSON" ]]; then
+    live_uuid="$(live_account_uuid)"
   fi
 
   local label_dir label
   for label_dir in "$ACCOUNTS_DIR"/*/; do
     label="$(basename "$label_dir")"
-    if [[ -n "$live_refresh" ]] && [[ "$(saved_refresh_token "$label")" == "$live_refresh" ]]; then
+    if [[ -n "$live_uuid" ]] && [[ "$(saved_account_uuid "$label")" == "$live_uuid" ]]; then
       echo "* $label"
     else
       echo "  $label"
@@ -279,7 +283,8 @@ cmd_switch() {
 #   fetch_usage_raw  -- the ONLY function that curls the usage endpoint.
 #   refresh_token     -- the ONLY function that curls the token endpoint.
 #   parse_usage       -- the ONLY function that knows the usage JSON shape.
-# If Anthropic changes the API, one of these three functions is the fix.
+#   parse_refresh     -- the ONLY function that knows the refresh JSON shape.
+# If Anthropic changes the API, one of these four functions is the fix.
 # =============================================================================
 
 # fetch_usage_raw <access_token> -> prints "<body>\n<http_status>" (curl's
@@ -335,14 +340,37 @@ parse_usage() {
   echo "${five_pct}|${week_pct}|${reset_epoch}"
 }
 
-# is_active_account <label> -> true if this account's saved refresh token
+# parse_refresh <json> -> echoes "access_token|expires_in|refresh_token" on
+# success (refresh_token is empty-string when the response didn't rotate
+# it), or returns non-zero with no output on any schema mismatch. This is
+# the ONLY function that knows the token-refresh response field names.
+parse_refresh() {
+  local json="$1"
+
+  echo "$json" | jq -e '(.access_token != null) and (.expires_in != null)' \
+    >/dev/null 2>&1 || return 1
+
+  local access_token expires_in refresh_token_val
+  access_token="$(echo "$json" | jq -r '.access_token')"
+  expires_in="$(echo "$json" | jq -r '.expires_in')"
+  refresh_token_val="$(echo "$json" | jq -r '.refresh_token // empty')"
+
+  [[ -n "$access_token" ]] || return 1
+  [[ "$expires_in" =~ ^[0-9]+$ ]] || return 1
+
+  echo "${access_token}|${expires_in}|${refresh_token_val}"
+}
+
+# is_active_account <label> -> true if this account's saved accountUuid
 # matches the live one (same identity cmd_list uses for its '*' marker).
+# Anchored on accountUuid rather than refreshToken -- see the comment above
+# live_account_uuid for why refreshToken cannot be used for this.
 is_active_account() {
   local label="$1"
-  [[ ! -f "$CREDENTIALS_FILE" ]] && return 1
-  local live_rt
-  live_rt="$(live_refresh_token)"
-  [[ -n "$live_rt" ]] && [[ "$(saved_refresh_token "$label")" == "$live_rt" ]]
+  [[ ! -f "$CLAUDE_JSON" ]] && return 1
+  local live_uuid
+  live_uuid="$(live_account_uuid)"
+  [[ -n "$live_uuid" ]] && [[ "$(saved_account_uuid "$label")" == "$live_uuid" ]]
 }
 
 # resolve_account_credentials <label> -> echoes "access|expiresAt|refreshToken".
@@ -379,11 +407,15 @@ is_token_expired() {
 }
 
 # attempt_refresh <label> <refresh_token> -> on success, echoes the new
-# access token and rewrites accounts/<label>/credentials.json's accessToken
-# + expiresAt (mode 600); on any failure (empty refresh token, non-2xx,
-# unparseable response) returns non-zero and touches nothing. Deliberately
-# does NOT overwrite refreshToken: is_active_account's identity match relies
-# on the snapshot's refreshToken staying equal to the live one.
+# access token and atomically rewrites accounts/<label>/credentials.json's
+# accessToken + expiresAt (mode 600); on any failure (empty refresh token,
+# non-2xx, unparseable response) returns non-zero and touches nothing.
+#
+# Refresh tokens rotate: when the response includes a new refresh_token, it
+# is ALSO persisted here. This is safe to do unconditionally now because
+# active-account identity is anchored on accountUuid (see is_active_account),
+# not on refreshToken equality -- a rotated refreshToken no longer breaks
+# active detection the way it would have before that change.
 attempt_refresh() {
   local label="$1" rt="$2"
   [[ -z "$rt" ]] && return 1
@@ -394,18 +426,18 @@ attempt_refresh() {
 
   [[ "$HTTP_STATUS" =~ ^2[0-9][0-9]$ ]] || return 1
 
-  local new_access new_expires_in
-  new_access="$(echo "$HTTP_BODY" | jq -r '.access_token // empty' 2>/dev/null)"
-  new_expires_in="$(echo "$HTTP_BODY" | jq -r '.expires_in // empty' 2>/dev/null)"
-  [[ -n "$new_access" ]] || return 1
-  [[ "$new_expires_in" =~ ^[0-9]+$ ]] || return 1
+  local parsed new_access new_expires_in new_refresh
+  parsed="$(parse_refresh "$HTTP_BODY")" || return 1
+  IFS='|' read -r new_access new_expires_in new_refresh <<<"$parsed"
 
   local new_expires_at_ms=$(( $(date +%s) * 1000 + new_expires_in * 1000 ))
   local snapshot_file="$ACCOUNTS_DIR/$label/credentials.json"
   local tmp
   tmp="$(mktemp "${TMPDIR:-/tmp}/ccswitch-refresh.XXXXXX")"
-  if ! jq --arg at "$new_access" --argjson exp "$new_expires_at_ms" \
-    '.claudeAiOauth.accessToken = $at | .claudeAiOauth.expiresAt = $exp' \
+  if ! jq --arg at "$new_access" --argjson exp "$new_expires_at_ms" --arg rt "$new_refresh" \
+    '.claudeAiOauth.accessToken = $at
+     | .claudeAiOauth.expiresAt = $exp
+     | if ($rt != "") then .claudeAiOauth.refreshToken = $rt else . end' \
     "$snapshot_file" >"$tmp" 2>/dev/null; then
     rm -f "$tmp"
     return 1
@@ -429,12 +461,17 @@ read_usage_cache() {
   echo "$content" | jq -e . >/dev/null 2>&1 && echo "$content" || echo "{}"
 }
 
+# write_usage_cache <label> <json> -> writes atomically (tmp file + rename,
+# same pattern as attempt_refresh's credentials write-back) so a reader
+# never observes a partially-written cache file.
 write_usage_cache() {
   local label="$1" json="$2"
-  local cache_file
+  local cache_file tmp
   cache_file="$(usage_cache_file "$label")"
-  printf '%s' "$json" >"$cache_file"
-  chmod 600 "$cache_file"
+  tmp="$(mktemp "${TMPDIR:-/tmp}/ccswitch-cache.XXXXXX")"
+  printf '%s' "$json" >"$tmp"
+  chmod 600 "$tmp"
+  mv "$tmp" "$cache_file"
 }
 
 # fetch_and_cache_usage <label> <access_token> <bypass_cache: 0|1> -> echoes
@@ -553,6 +590,13 @@ usage_render_meter() {
 
 usage_round_pct() {
   awk -v v="$1" 'BEGIN { p = (v < 0) ? 0 : v; printf "%d", p + 0.5 }'
+}
+
+# usage_dim <text> -> text in the same dim/secondary color statusline-usage.sh
+# uses for labels (mirrors its dim()). Used for the table header and the
+# reset countdown, which are secondary information next to the meters.
+usage_dim() {
+  printf '\033[38;5;%sm%s\033[0m' "$USAGE_COLOR_DIM" "$1"
 }
 
 # usage_fmt_reset <epoch_seconds> -> short human countdown ("2h 14m").
@@ -680,7 +724,9 @@ cmd_usage() {
   local headroom_label
   headroom_label="$(echo "$headroom_lookup" | find_headroom_label)"
 
-  printf '%-14s%-*s   %-*s   %s\n' "  ACCOUNT" "$USAGE_CELL_WIDTH" "5H" "$USAGE_CELL_WIDTH" "WEEK" "RESET(5h)"
+  local header_text
+  header_text="$(printf '%-14s%-*s   %-*s   %s' "  ACCOUNT" "$USAGE_CELL_WIDTH" "5H" "$USAGE_CELL_WIDTH" "WEEK" "RESET(5h)")"
+  printf '%s\n' "$(usage_dim "$header_text")"
   local marker state p5 p7 preset line
   while IFS='|' read -r label marker state p5 p7 preset; do
     [[ -z "$label" ]] && continue
@@ -690,7 +736,7 @@ cmd_usage() {
     line+="$(render_usage_cell "$state" "$p7")"
     line+="   "
     if [[ "$state" == "ok" ]]; then
-      line+="$(usage_fmt_reset "$preset")"
+      line+="$(usage_dim "$(usage_fmt_reset "$preset")")"
     else
       line+=$'\xe2\x80\x94'
     fi

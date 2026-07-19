@@ -129,6 +129,21 @@ main() {
     fi
   fi
 
+  # --- Case 3b: active-account identity is anchored on accountUuid, NOT on
+  # refreshToken (which rotates on every refresh). Rotate the live
+  # refreshToken in place -- .claude.json's oauthAccount (still uuid-b) is
+  # untouched -- and confirm `list` still marks 'personal' active. Before
+  # the accountUuid-anchoring fix, this would have flipped to no active
+  # account at all (refreshToken equality would no longer match).
+  write_credentials "$home_dir" "REFRESH_B_ROTATED" "$SECRET_B"
+
+  run_cc "$home_dir" "" list
+  if [[ "$EXIT_CODE" -eq 0 ]] && printf '%s' "$OUT" | grep -qx '\* personal'; then
+    pass "case3b list active marker survives a rotated live refreshToken (anchored on accountUuid)"
+  else
+    fail "case3b active marker not accountUuid-anchored (exit=$EXIT_CODE): $OUT"
+  fi
+
   # --- Case 4: switch to work -------------------------------------------------
   run_cc "$home_dir" "" work
 
