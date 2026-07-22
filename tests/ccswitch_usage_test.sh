@@ -753,6 +753,38 @@ main() {
     fi
   }
 
+  # =========================================================================
+  # Case 13: a 429 from the refresh endpoint is transient, not fatal. An
+  # expired token whose refresh is rate-limited must render "rate-limited"
+  # (wait state), NEVER "re-login", and must not treat the account as dead.
+  # =========================================================================
+  {
+    local home ctl expired_ms
+    home="$(new_home)"
+    ctl="$(new_ctl)"
+    expired_ms=$(( ($(date +%s) - 3600) * 1000 ))
+
+    write_claude_json "$home"
+    write_account_credentials "$home" "acct_rl" "REFRESH_RL" "TOK_RL" "$expired_ms"
+
+    set_token_response "$ctl" "REFRESH_RL" 429 '{"error":{"type":"rate_limit_error","message":"Rate limited"}}'
+
+    run_cc "$home" "$ctl" "" --no-switch
+
+    local rline
+    rline="$(printf '%s' "$OUT" | grep 'acct_rl')"
+
+    if [[ "$EXIT_CODE" -eq 0 ]] \
+      && printf '%s' "$rline" | grep -q 'rate-limited' \
+      && ! printf '%s' "$rline" | grep -q 're-login'; then
+      pass "case13 refresh 429 renders 'rate-limited' (transient), not re-login"
+    else
+      fail "case13 (exit=$EXIT_CODE): $OUT"
+    fi
+
+    rm -rf "$home" "$ctl"
+  }
+
   rm -rf "$STUB_BIN" "$ALL_OUTPUT_LOG" "$ALL_ARGV_LOG"
 
   echo

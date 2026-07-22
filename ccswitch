@@ -51,6 +51,11 @@ OAUTH_CLIENT_ID="9d1c250a-e61b-44d9-88ed-5944d1962f5e"
 # expires. Mirrors what the interactive login flow sends. Not secret.
 OAUTH_BROWSER_UA="Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
 OAUTH_ORIGIN="https://claude.ai"
+# The token-refresh endpoint rate-limits (429) if refreshed too often. When we
+# hit one, back off for this long and skip further refresh attempts (a burst of
+# expired accounts must not hammer it) -- the row shows a transient state, NOT
+# a false re-login.
+REFRESH_BACKOFF_SECONDS=300
 
 USAGE_CACHE_TTL_SECONDS=600
 USAGE_RATE_LIMIT_BACKOFF_SECONDS=120
@@ -465,13 +470,38 @@ is_token_expired() {
 # active-account identity is anchored on accountUuid (see is_active_account),
 # not on refreshToken equality -- a rotated refreshToken no longer breaks
 # active detection the way it would have before that change.
+# Refresh-backoff: a shared marker file (one per accounts dir) recording when a
+# 429 window ends, so a burst of expired accounts stops calling the endpoint
+# after the first rate-limit instead of hammering it.
+REFRESH_BACKOFF_FILE="$ACCOUNTS_DIR/.refresh-backoff"
+is_refresh_backoff() {
+  local until
+  until="$(cat "$REFRESH_BACKOFF_FILE" 2>/dev/null)"
+  [[ "$until" =~ ^[0-9]+$ ]] && (( $(date +%s) < until ))
+}
+set_refresh_backoff() {
+  mkdir -p "$ACCOUNTS_DIR"
+  printf '%s' "$(( $(date +%s) + REFRESH_BACKOFF_SECONDS ))" >"$REFRESH_BACKOFF_FILE"
+}
+
+# attempt_refresh <label> <rt> -> exit status: 0 success (echoes new access
+# token), 2 rate-limited/backoff (transient -- do NOT treat as dead), 1 any
+# other failure (genuine -- needs re-login).
 attempt_refresh() {
   local label="$1" rt="$2"
   [[ -z "$rt" ]] && return 1
 
+  # Don't call the endpoint during an active 429 backoff window.
+  is_refresh_backoff && return 2
+
   local raw
   raw="$(refresh_token "$rt")"
   split_http_response "$raw"
+
+  if [[ "$HTTP_STATUS" == "429" ]]; then
+    set_refresh_backoff
+    return 2
+  fi
 
   [[ "$HTTP_STATUS" =~ ^2[0-9][0-9]$ ]] || return 1
 
@@ -711,10 +741,14 @@ build_usage_row() {
 
   local did_refresh=0
   if [[ -z "$access" ]] || is_token_expired "$exp"; then
-    local refreshed
-    if refreshed="$(attempt_refresh "$label" "$refresh")"; then
+    local refreshed rc
+    refreshed="$(attempt_refresh "$label" "$refresh")"; rc=$?
+    if [[ "$rc" == "0" ]]; then
       access="$refreshed"
       did_refresh=1
+    elif [[ "$rc" == "2" ]]; then
+      echo "${label}|${marker}|wait||||"   # rate-limited: transient, not dead
+      return 0
     else
       echo "${label}|${marker}|relogin||||"
       return 0
@@ -737,9 +771,13 @@ build_usage_row() {
   if [[ -z "$p5" ]] && [[ "$did_refresh" == "0" ]] \
     && { [[ "$httpstatus" == "401" ]] || [[ "$httpstatus" == "403" ]]; } \
     && [[ -n "$refresh" ]]; then
-    local retried
-    if retried="$(attempt_refresh "$label" "$refresh")"; then
+    local retried rc2
+    retried="$(attempt_refresh "$label" "$refresh")"; rc2=$?
+    if [[ "$rc2" == "0" ]]; then
       IFS='|' read -r p5 p7 p5reset p7reset httpstatus <<<"$(fetch_and_cache_usage "$label" "$retried" 1)"
+    elif [[ "$rc2" == "2" ]]; then
+      echo "${label}|${marker}|wait||||"   # rate-limited: transient, not dead
+      return 0
     else
       echo "${label}|${marker}|relogin||||"
       return 0
@@ -788,6 +826,7 @@ render_usage_cell() {
       printf '%s %s' "$(usage_render_meter "$pct_int" "$USAGE_METER_WIDTH")" "$pct_text"
       ;;
     relogin) printf '%-*s' "$USAGE_CELL_WIDTH" "re-login" ;;
+    wait) printf '%-*s' "$USAGE_CELL_WIDTH" "rate-limited" ;;
     *) printf '%-*s' "$USAGE_CELL_WIDTH" $'\xe2\x80\x94' ;; # em dash
   esac
 }

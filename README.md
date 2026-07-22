@@ -139,8 +139,11 @@ window's reset countdown, so you can decide where to switch before you do it:
   window to reset yet) — the row still shows real weekly numbers.
 - If an account's stored access token is rejected (expired, or revoked/rotated
   by a real Claude Code session), the monitor refreshes it automatically and
-  retries. Only if the refresh itself fails does the row show `re-login` — then
-  run `ccswitch <label>` (or log in again) to re-enroll that account.
+  retries. The token-refresh endpoint rate-limits bursts, so if too many
+  accounts refresh at once a row may briefly show `rate-limited` — that is
+  transient (the tool backs off and recovers), not a dead account. Only a
+  genuine refresh failure shows `re-login`; then run `ccswitch <label>` (or log
+  in again) to re-enroll that account.
 - After the table it prompts for a label to switch to (Enter cancels).
 
 Flags:
