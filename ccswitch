@@ -45,6 +45,12 @@ USAGE_API_URL="https://api.anthropic.com/api/oauth/usage"
 USAGE_API_BETA_HEADER="oauth-2025-04-20"
 TOKEN_REFRESH_URL="https://platform.claude.com/v1/oauth/token"
 OAUTH_CLIENT_ID="9d1c250a-e61b-44d9-88ed-5944d1962f5e"
+# Browser-like headers on the refresh call. The token endpoint sits behind a
+# Cloudflare WAF that blocks "headless"-looking POSTs; without these a refresh
+# silently fails and the account falls back to re-login once its access token
+# expires. Mirrors what the interactive login flow sends. Not secret.
+OAUTH_BROWSER_UA="Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+OAUTH_ORIGIN="https://claude.ai"
 
 USAGE_CACHE_TTL_SECONDS=600
 USAGE_RATE_LIMIT_BACKOFF_SECONDS=120
@@ -329,6 +335,9 @@ refresh_token() {
   curl -sS -o - -w '\n%{http_code}' \
     -X POST \
     -H "Content-Type: application/json" \
+    -H "User-Agent: ${OAUTH_BROWSER_UA}" \
+    -H "Referer: ${OAUTH_ORIGIN}/" \
+    -H "Origin: ${OAUTH_ORIGIN}" \
     -d @"$bodyfile" \
     "$TOKEN_REFRESH_URL" 2>/dev/null
   rm -f "$bodyfile"

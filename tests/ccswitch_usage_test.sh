@@ -737,6 +737,22 @@ main() {
     rm -rf "$home" "$ctl"
   }
 
+  # =========================================================================
+  # Case 12c: every refresh (token-endpoint) call must carry browser-like
+  # headers, or Cloudflare's WAF blocks headless refreshes. Cases 3/4/12/12b
+  # all hit the token endpoint; assert none of those logged argv lines lacks
+  # the claude.ai Origin/Referer.
+  # =========================================================================
+  {
+    local tokenlines
+    tokenlines="$(grep 'oauth/token' "$ALL_ARGV_LOG" 2>/dev/null || true)"
+    if [[ -n "$tokenlines" ]] && ! printf '%s\n' "$tokenlines" | grep -vq 'claude\.ai'; then
+      pass "case12c refresh calls carry browser headers (Cloudflare WAF workaround)"
+    else
+      fail "case12c a token-endpoint call lacked the claude.ai browser headers"
+    fi
+  }
+
   rm -rf "$STUB_BIN" "$ALL_OUTPUT_LOG" "$ALL_ARGV_LOG"
 
   echo
