@@ -61,7 +61,7 @@ USAGE_CACHE_TTL_SECONDS=600
 USAGE_RATE_LIMIT_BACKOFF_SECONDS=120
 USAGE_METER_WIDTH=12
 
-RESERVED_WORDS=(save delete list usage help)
+RESERVED_WORDS=(save delete list usage help refresh-pause refresh-resume)
 # Whitelist charset for labels. Deliberately strict: this is what stands
 # between a label and a raw filesystem path ($ACCOUNTS_DIR/$label), so it
 # must reject '/' and '.' outright rather than trying to blocklist "..".
@@ -473,6 +473,13 @@ is_token_expired() {
 # Refresh-backoff: a shared marker file (one per accounts dir) recording when a
 # 429 window ends, so a burst of expired accounts stops calling the endpoint
 # after the first rate-limit instead of hammering it.
+# Manual pause switch: while this flag file exists, ccswitch never calls the
+# refresh endpoint (rows with an expired token show the wait state instead).
+# Use `ccswitch refresh-pause` / `refresh-resume` to toggle it. Meant for when
+# the refresh endpoint is rate-limiting a machine's IP and you want to stop
+# adding pressure without losing the (GET-only) usage view.
+NO_REFRESH_FLAG="$ACCOUNTS_DIR/.no-refresh"
+
 REFRESH_BACKOFF_FILE="$ACCOUNTS_DIR/.refresh-backoff"
 is_refresh_backoff() {
   local until
@@ -490,6 +497,9 @@ set_refresh_backoff() {
 attempt_refresh() {
   local label="$1" rt="$2"
   [[ -z "$rt" ]] && return 1
+
+  # Refresh manually paused -> never touch the endpoint.
+  [[ -f "$NO_REFRESH_FLAG" ]] && return 2
 
   # Don't call the endpoint during an active 429 backoff window.
   is_refresh_backoff && return 2
@@ -917,6 +927,9 @@ COMMANDS
   ccswitch delete <label>      remove a saved account (asks to confirm)
   ccswitch usage               show 5h/week usage for every saved account,
                                then optionally prompt which one to switch to
+  ccswitch refresh-pause       stop refreshing tokens (usage still readable);
+                               use when the refresh endpoint is rate-limiting
+  ccswitch refresh-resume      re-enable token refresh
   ccswitch help                show this help (also -h, --help)
 
 usage FLAGS
@@ -960,6 +973,17 @@ main() {
     usage)
       shift
       cmd_usage "$@"
+      ;;
+    refresh-pause)
+      mkdir -p "$ACCOUNTS_DIR"
+      : >"$NO_REFRESH_FLAG"
+      echo "Refresh paused. 'ccswitch usage' still reads usage but will not"
+      echo "refresh tokens (expired accounts show 'rate-limited'). Resume with:"
+      echo "  ccswitch refresh-resume"
+      ;;
+    refresh-resume)
+      rm -f "$NO_REFRESH_FLAG"
+      echo "Refresh resumed. Tokens will refresh normally again."
       ;;
     help | -h | --help)
       usage_text

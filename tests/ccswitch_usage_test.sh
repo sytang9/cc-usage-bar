@@ -785,6 +785,41 @@ main() {
     rm -rf "$home" "$ctl"
   }
 
+  # =========================================================================
+  # Case 14: refresh-pause flag stops refresh entirely. An expired token whose
+  # refresh WOULD succeed must NOT call the token endpoint while paused, and
+  # renders the wait state. Proves the safety switch makes no network refresh.
+  # =========================================================================
+  {
+    local home ctl expired_ms tokcount
+    home="$(new_home)"
+    ctl="$(new_ctl)"
+    expired_ms=$(( ($(date +%s) - 3600) * 1000 ))
+
+    write_claude_json "$home"
+    write_account_credentials "$home" "acct_paused" "REFRESH_PA" "TOK_PA" "$expired_ms"
+    set_token_response "$ctl" "REFRESH_PA" 200 "$(refresh_success_body TOK_PA_NEW)" # would succeed if called
+
+    mkdir -p "$home/.claude/accounts"
+    : >"$home/.claude/accounts/.no-refresh"   # pause
+
+    run_cc "$home" "$ctl" "" --no-switch
+
+    local pline
+    pline="$(printf '%s' "$OUT" | grep 'acct_paused')"
+    tokcount="$(wc -l <"$ctl/calls/token_count" 2>/dev/null || echo 0)"
+
+    if [[ "$EXIT_CODE" -eq 0 ]] \
+      && printf '%s' "$pline" | grep -q 'rate-limited' \
+      && [[ "${tokcount//[[:space:]]/}" == "0" ]]; then
+      pass "case14 refresh-pause: expired account not refreshed (no token call), shows wait state"
+    else
+      fail "case14 (exit=$EXIT_CODE tokcount=$tokcount): $OUT"
+    fi
+
+    rm -rf "$home" "$ctl"
+  }
+
   rm -rf "$STUB_BIN" "$ALL_OUTPUT_LOG" "$ALL_ARGV_LOG"
 
   echo
