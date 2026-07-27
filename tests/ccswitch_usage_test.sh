@@ -123,6 +123,28 @@ else
 fi
 STUB
   chmod +x "$STUB_BIN/curl"
+
+  # Fake Node-refresh transport (ccswitch calls $CCSWITCH_REFRESH_CMD with
+  # "<bodyfile> <url>"). Mirrors the curl stub's token branch: reads the
+  # refresh_token from the body file, answers from $CURL_STUB_DIR/token,
+  # logs argv (no secret -- only the file path travels as an arg), counts calls.
+  cat >"$STUB_BIN/refresh-helper" <<'RSTUB'
+#!/usr/bin/env bash
+set -uo pipefail
+bodyfile="$1"
+: "${CURL_STUB_DIR:?CURL_STUB_DIR must be set for the refresh stub}"
+mkdir -p "$CURL_STUB_DIR/calls"
+printf '%q ' "$0" "$@" >>"$CURL_STUB_DIR/calls/argv.log"
+printf '\n' >>"$CURL_STUB_DIR/calls/argv.log"
+echo x >>"$CURL_STUB_DIR/calls/token_count"
+rt="$(jq -r '.refresh_token // empty' "$bodyfile" 2>/dev/null)"
+status="$(cat "$CURL_STUB_DIR/token/${rt}.status" 2>/dev/null)"
+body="$(cat "$CURL_STUB_DIR/token/${rt}.body" 2>/dev/null)"
+[[ -z "$status" ]] && status=500
+[[ -z "$body" ]] && body='{}'
+printf '%s\n%s' "$body" "$status"
+RSTUB
+  chmod +x "$STUB_BIN/refresh-helper"
 }
 
 new_home() {
@@ -148,7 +170,7 @@ token_call_count() {
 run_cc() {
   local home="$1" ctl="$2" stdin_text="$3"
   shift 3
-  OUT="$(PATH="$STUB_BIN:$PATH" HOME="$home" CURL_STUB_DIR="$ctl" bash "$TARGET" usage "$@" <<<"$stdin_text" 2>&1)"
+  OUT="$(PATH="$STUB_BIN:$PATH" HOME="$home" CURL_STUB_DIR="$ctl" CCSWITCH_REFRESH_CMD="$STUB_BIN/refresh-helper" bash "$TARGET" usage "$@" <<<"$stdin_text" 2>&1)"
   EXIT_CODE=$?
   printf '%s\n' "$OUT" >>"$ALL_OUTPUT_LOG"
   cat "$ctl/calls/argv.log" >>"$ALL_ARGV_LOG" 2>/dev/null || true
@@ -735,22 +757,6 @@ main() {
     fi
 
     rm -rf "$home" "$ctl"
-  }
-
-  # =========================================================================
-  # Case 12c: every refresh (token-endpoint) call must carry browser-like
-  # headers, or Cloudflare's WAF blocks headless refreshes. Cases 3/4/12/12b
-  # all hit the token endpoint; assert none of those logged argv lines lacks
-  # the claude.ai Origin/Referer.
-  # =========================================================================
-  {
-    local tokenlines
-    tokenlines="$(grep 'oauth/token' "$ALL_ARGV_LOG" 2>/dev/null || true)"
-    if [[ -n "$tokenlines" ]] && ! printf '%s\n' "$tokenlines" | grep -vq 'claude\.ai'; then
-      pass "case12c refresh calls carry browser headers (Cloudflare WAF workaround)"
-    else
-      fail "case12c a token-endpoint call lacked the claude.ai browser headers"
-    fi
   }
 
   # =========================================================================

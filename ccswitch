@@ -45,12 +45,12 @@ USAGE_API_URL="https://api.anthropic.com/api/oauth/usage"
 USAGE_API_BETA_HEADER="oauth-2025-04-20"
 TOKEN_REFRESH_URL="https://platform.claude.com/v1/oauth/token"
 OAUTH_CLIENT_ID="9d1c250a-e61b-44d9-88ed-5944d1962f5e"
-# Browser-like headers on the refresh call. The token endpoint sits behind a
-# Cloudflare WAF that blocks "headless"-looking POSTs; without these a refresh
-# silently fails and the account falls back to re-login once its access token
-# expires. Mirrors what the interactive login flow sends. Not secret.
-OAUTH_BROWSER_UA="Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
-OAUTH_ORIGIN="https://claude.ai"
+# The token-refresh endpoint sits behind Cloudflare, which fingerprints the
+# HTTP client (TLS/HTTP-2 signature) and blocks a headless `curl` with a 429 --
+# no header spoofing defeats that. Claude Code refreshes fine because it is a
+# Node app, and Node's HTTP client passes. So we make the refresh POST via Node
+# too (see refresh_token). `curl` is still used for the usage GET, whose host
+# (api.anthropic.com) is not behind that WAF.
 # The token-refresh endpoint rate-limits (429) if refreshed too often. When we
 # hit one, back off for this long and skip further refresh attempts (a burst of
 # expired accounts must not hammer it) -- the row shows a transient state, NOT
@@ -325,10 +325,13 @@ fetch_usage_raw() {
 # refresh_token <refresh_token> -> prints "<body>\n<http_status>", same
 # convention as fetch_usage_raw. Only place that builds the refresh body.
 #
-# SECURITY: same argv concern as fetch_usage_raw, but here it's the request
-# BODY (refresh_token + client_id) that must stay off argv. Written to a
-# mode-600 tmp file and passed via `-d @file`, which tells curl to read the
-# body from disk instead of taking it as a literal argv string.
+# Transport is Node (see the Cloudflare note above), not curl. Overridable via
+# $CCSWITCH_REFRESH_CMD (given "<bodyfile> <url>") so tests can stub it without
+# a network call.
+#
+# SECURITY: the request BODY (refresh_token + client_id) stays off argv --
+# written to a mode-600 tmp file; Node/the override reads it from disk. Only
+# the file PATH and the (non-secret) URL are passed as arguments.
 refresh_token() {
   local rt="$1"
   local req_body bodyfile
@@ -337,14 +340,23 @@ refresh_token() {
   bodyfile="$(mktemp "${TMPDIR:-/tmp}/ccswitch-refresh-body.XXXXXX")"
   chmod 600 "$bodyfile"
   printf '%s' "$req_body" >"$bodyfile"
-  curl -sS -o - -w '\n%{http_code}' \
-    -X POST \
-    -H "Content-Type: application/json" \
-    -H "User-Agent: ${OAUTH_BROWSER_UA}" \
-    -H "Referer: ${OAUTH_ORIGIN}/" \
-    -H "Origin: ${OAUTH_ORIGIN}" \
-    -d @"$bodyfile" \
-    "$TOKEN_REFRESH_URL" 2>/dev/null
+
+  if [[ -n "${CCSWITCH_REFRESH_CMD:-}" ]]; then
+    "$CCSWITCH_REFRESH_CMD" "$bodyfile" "$TOKEN_REFRESH_URL"
+  else
+    node -e '
+      const fs = require("fs");
+      const [bodyFile, url] = process.argv.slice(1);
+      const body = fs.readFileSync(bodyFile, "utf8");
+      fetch(url, { method: "POST",
+        headers: { "Content-Type": "application/json",
+                   "Origin": "https://claude.ai", "Referer": "https://claude.ai/" },
+        body })
+        .then(async r => { const t = await r.text(); process.stdout.write(t + "\n" + r.status); })
+        .catch(() => process.stdout.write("\n000"));
+    ' "$bodyfile" "$TOKEN_REFRESH_URL" 2>/dev/null
+  fi
+
   rm -f "$bodyfile"
 }
 
