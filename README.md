@@ -36,6 +36,10 @@ block above is the plain-text equivalent.
   `ccswitch save/list/<label>/delete` don't call it.
 - `curl` — required only by `ccswitch usage` (the usage monitor); the bar
   and `ccswitch save/list/<label>/delete` don't need it.
+- `node` — required only by `ccswitch usage` to refresh expired account tokens
+  (the refresh endpoint is behind Cloudflare, which blocks headless `curl`;
+  Node's client passes, same as Claude Code). Claude Code ships Node, so you
+  already have it.
 - Targets Claude Code on Linux and macOS.
 
 ## Install

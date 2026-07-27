@@ -50,6 +50,14 @@ check_curl() {
   fi
 }
 
+check_node() {
+  if ! command -v node >/dev/null 2>&1; then
+    echo "Warning: node not found on PATH. 'ccswitch usage' needs it to refresh" >&2
+    echo "expired account tokens (Cloudflare blocks headless curl on the refresh" >&2
+    echo "endpoint; Node passes). Claude Code ships Node, so this is usually present." >&2
+  fi
+}
+
 install_scripts() {
   mkdir -p "$CLAUDE_DIR"
   cp "$SCRIPT_DIR/statusline-usage.sh" "$CLAUDE_DIR/statusline-usage.sh"
@@ -152,6 +160,7 @@ main() {
 
   check_jq
   check_curl
+  check_node
 
   install_scripts
   link_ccswitch_on_path
