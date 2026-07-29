@@ -161,6 +161,35 @@ saved_account_uuid() {
   jq -r '.accountUuid // empty' "$ACCOUNTS_DIR/$label/oauthAccount.json" 2>/dev/null
 }
 
+# mirror_live_to_snapshot: keep the ACTIVE account's saved snapshot in sync with
+# the live credential file. Claude Code rotates the active account's refresh
+# token inside $CREDENTIALS_FILE on its own schedule (single-use rotation),
+# which silently invalidates the refresh token frozen in that account's saved
+# snapshot. While the account stays active the staleness is masked (usage reads
+# the live access token); it only surfaces as a FALSE "re-login" once you switch
+# away and the account falls back to its now-dead snapshot. Mirroring
+# live -> the matching snapshot (on every `usage` poll and before every switch)
+# keeps the snapshot's tokens current, so switching away never strands an
+# account. One-way only (live -> snapshot); it never writes the live file, so it
+# cannot disturb the running Claude Code that owns it.
+mirror_live_to_snapshot() {
+  [[ -f "$CLAUDE_JSON" ]] || return 0
+  [[ -f "$CREDENTIALS_FILE" ]] || return 0
+  [[ -d "$ACCOUNTS_DIR" ]] || return 0
+  local live_uuid
+  live_uuid="$(live_account_uuid)"
+  [[ -n "$live_uuid" ]] || return 0
+  local label_dir label
+  for label_dir in "$ACCOUNTS_DIR"/*/; do
+    [[ -d "$label_dir" ]] || continue
+    label="$(basename "$label_dir")"
+    if [[ "$(saved_account_uuid "$label")" == "$live_uuid" ]]; then
+      secure_copy "$CREDENTIALS_FILE" "$label_dir/credentials.json"
+      return 0
+    fi
+  done
+}
+
 confirm() {
   local prompt="$1" answer
   read -r -p "$prompt [y/N] " answer
@@ -258,6 +287,11 @@ cmd_switch() {
   fi
 
   require_claude_json
+
+  # Save-on-leave: before we overwrite the live file, snapshot the account we
+  # are switching AWAY from, so its (Claude-Code-rotated) tokens are preserved
+  # and it can still refresh as a non-active account afterwards.
+  mirror_live_to_snapshot
 
   mkdir -p "$CLAUDE_DIR"
   chmod 700 "$CLAUDE_DIR"
@@ -873,6 +907,11 @@ cmd_usage() {
     echo "no saved accounts -- run: ccswitch save <label>"
     return 0
   fi
+
+  # Keep the active account's snapshot current on every poll (the CtrlA poller
+  # runs this every 5 min), so its refresh token never goes stale behind
+  # Claude Code's back.
+  mirror_live_to_snapshot
 
   local rows="" headroom_lookup="" label_dir label row
   for label_dir in "$ACCOUNTS_DIR"/*/; do
