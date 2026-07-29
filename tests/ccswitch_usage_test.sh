@@ -41,6 +41,7 @@ SECRET_TOKENS=(
   TOK_SWITCHA TOK_SWITCHB REFRESH_SWITCHA REFRESH_SWITCHB
   TOK_GARBAGE TOK_PARTNER REFRESH_GARBAGE REFRESH_PARTNER
   TOK_RATELIMIT REFRESH_RATELIMIT
+  REFRESH_M_NEW REFRESH_M_OLD TOK_M
 )
 
 pass() {
@@ -821,6 +822,40 @@ main() {
       pass "case14 refresh-pause: expired account not refreshed (no token call), shows wait state"
     else
       fail "case14 (exit=$EXIT_CODE tokcount=$tokcount): $OUT"
+    fi
+
+    rm -rf "$home" "$ctl"
+  }
+
+  # =========================================================================
+  # Case 15: `usage` mirrors the ACTIVE account's live tokens into its snapshot.
+  # Claude Code rotates the active account's refresh token in the live file on
+  # its own schedule; keeping the snapshot in sync each poll is what stops the
+  # account from showing a false "re-login" once you later switch away. Token
+  # is non-expired so NO network refresh happens -- the only thing that can
+  # change the snapshot here is the mirror.
+  # =========================================================================
+  {
+    local home ctl snap_refresh
+    home="$(new_home)"
+    ctl="$(new_ctl)"
+
+    write_claude_json "$home" "UUID_M"
+    write_live_credentials "$home" "REFRESH_M_NEW" "TOK_M" "$(future_ms)"
+    write_account_credentials "$home" "acct_m" "REFRESH_M_OLD" "TOK_M" "$(future_ms)"
+    write_account_oauth "$home" "acct_m" "UUID_M"
+    set_usage_response "$ctl" "TOK_M" 200 "$(usage_body 15 25)"
+
+    run_cc "$home" "$ctl" "" --no-switch
+
+    snap_refresh="$(jq -r '.claudeAiOauth.refreshToken' "$home/.claude/accounts/acct_m/credentials.json" 2>/dev/null)"
+    if [[ "$EXIT_CODE" -eq 0 ]] \
+      && printf '%s' "$OUT" | grep -q '\* acct_m' \
+      && [[ "$snap_refresh" == "REFRESH_M_NEW" ]] \
+      && [[ "$(file_mode "$home/.claude/accounts/acct_m/credentials.json")" == "600" ]]; then
+      pass "case15 usage mirrors active account's rotated live token into its snapshot (mode 600)"
+    else
+      fail "case15 usage mirror (exit=$EXIT_CODE snap_refresh=$snap_refresh): $OUT"
     fi
 
     rm -rf "$home" "$ctl"

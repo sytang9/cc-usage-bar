@@ -312,6 +312,36 @@ EOF
     fail "case11 help command (help_exit=$help_exit save_help_exit=$save_help_exit)"
   fi
 
+  # --- Case 12: save-on-leave. Claude Code rotates the ACTIVE account's live
+  # refresh token behind ccswitch's back; when you switch away, that account's
+  # snapshot must capture the rotated live token, or it shows a false
+  # "re-login" the moment it is no longer active. Set A active + saved, save a
+  # second account B, rotate A's LIVE refresh token in place, switch to B, and
+  # confirm A's snapshot now holds the rotated token (mode 600). ------------
+  local m_home
+  m_home="$(make_sandbox)"
+  write_claude_json "$m_home" "a@x.com" "OrgA" "uuid-a"
+  write_credentials "$m_home" "REFRESH_A" "$SECRET_A"
+  run_cc "$m_home" "" save active-a
+  write_claude_json "$m_home" "b@y.com" "OrgB" "uuid-b"
+  write_credentials "$m_home" "REFRESH_B" "$SECRET_B"
+  run_cc "$m_home" "" save other-b
+  # A is active again; simulate Claude Code rotating A's live refresh token.
+  write_claude_json "$m_home" "a@x.com" "OrgA" "uuid-a"
+  write_credentials "$m_home" "REFRESH_A_ROTATED" "$SECRET_A"
+  run_cc "$m_home" "" other-b   # switch AWAY from A -> mirror A's live creds into its snapshot
+  local a_snap_refresh a_snap_file
+  a_snap_file="$m_home/.claude/accounts/active-a/credentials.json"
+  a_snap_refresh="$(jq -r '.claudeAiOauth.refreshToken' "$a_snap_file" 2>/dev/null)"
+  if [[ "$EXIT_CODE" -eq 0 ]] \
+    && [[ "$a_snap_refresh" == "REFRESH_A_ROTATED" ]] \
+    && [[ "$(file_mode "$a_snap_file")" == "600" ]]; then
+    pass "case12 switch-away mirrors the departing active account's rotated live token into its snapshot (mode 600)"
+  else
+    fail "case12 save-on-leave mirror (exit=$EXIT_CODE a_snap_refresh=$a_snap_refresh): $OUT"
+  fi
+  rm -rf "$m_home"
+
   rm -rf "$home_dir" "$ALL_OUTPUT_LOG"
 
   echo
