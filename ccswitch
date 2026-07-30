@@ -784,8 +784,8 @@ usage_reset_cell() {
 # the loop -- every failure mode resolves to a row, not an exit.
 build_usage_row() {
   local label="$1"
-  local marker="  "
-  is_active_account "$label" && marker="* "
+  local marker="  " active=0
+  if is_active_account "$label"; then marker="* "; active=1; fi
 
   local access exp refresh
   IFS='|' read -r access exp refresh <<<"$(resolve_account_credentials "$label")"
@@ -795,8 +795,16 @@ build_usage_row() {
     return 0
   fi
 
+  # NEVER refresh the ACTIVE account. Its tokens live in $CREDENTIALS_FILE and are
+  # owned by the running Claude Code, which rotates them there itself. If ccswitch
+  # refreshed it, attempt_refresh would write the rotated token only to the snapshot
+  # and leave the live file holding a now-invalidated refresh token -> Claude Code's
+  # next refresh fails and the logged-in account "expires" (a regression the
+  # live->snapshot mirror made reachable, since the mirrored snapshot token is valid
+  # enough to rotate). So for the active account we only READ its live access token;
+  # a missing/expired one just shows a state and Claude Code refreshes it.
   local did_refresh=0
-  if [[ -z "$access" ]] || is_token_expired "$exp"; then
+  if [[ "$active" != "1" ]] && { [[ -z "$access" ]] || is_token_expired "$exp"; }; then
     local refreshed rc
     refreshed="$(attempt_refresh "$label" "$refresh")"; rc=$?
     if [[ "$rc" == "0" ]]; then
@@ -824,7 +832,7 @@ build_usage_row() {
   # though it had not time-expired, so is_token_expired never triggered a
   # refresh above. Refresh once and retry the fetch. If the refresh itself
   # fails, the account genuinely needs a re-login.
-  if [[ -z "$p5" ]] && [[ "$did_refresh" == "0" ]] \
+  if [[ "$active" != "1" ]] && [[ -z "$p5" ]] && [[ "$did_refresh" == "0" ]] \
     && { [[ "$httpstatus" == "401" ]] || [[ "$httpstatus" == "403" ]]; } \
     && [[ -n "$refresh" ]]; then
     local retried rc2
