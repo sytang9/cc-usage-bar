@@ -42,6 +42,7 @@ SECRET_TOKENS=(
   TOK_GARBAGE TOK_PARTNER REFRESH_GARBAGE REFRESH_PARTNER
   TOK_RATELIMIT REFRESH_RATELIMIT
   REFRESH_M_NEW REFRESH_M_OLD TOK_M
+  TOK_ACT TOK_ACT_OLD REFRESH_ACT_LIVE REFRESH_ACT_SNAP TOK_NEW_L REFRESH_ROT_L TOK_NEW_S REFRESH_ROT_S
 )
 
 pass() {
@@ -415,19 +416,18 @@ main() {
   }
 
   # =========================================================================
-  # Case 3: expired accessToken + successful refresh -> stored credentials.json
-  # accessToken updated, row renders normally. acct_c is ALSO the active
-  # account (matching accountUuid), so this simultaneously proves: (a) the
-  # rotated refresh_token from the response is persisted back into the
-  # snapshot, and (b) active-account detection survives that rotation
-  # because it is keyed on accountUuid, not on refreshToken equality.
+  # Case 3: expired accessToken on a NON-active account + successful refresh ->
+  # the rotated access + refresh_token are persisted back into the snapshot and
+  # the row renders. (The active identity is deliberately different: ccswitch must
+  # NEVER refresh the active account -- that is case16. accountUuid-anchored active
+  # detection is covered by ccswitch_test case3b.)
   # =========================================================================
   {
     local home ctl
     home="$(new_home)"
     ctl="$(new_ctl)"
 
-    write_claude_json "$home" "UUID_C"
+    write_claude_json "$home" "UUID_OTHER"
     write_live_credentials "$home" "REFRESH_C" "TOK_C_OLD" 1
     write_account_credentials "$home" "acct_c" "REFRESH_C" "TOK_C_OLD" 1
     write_account_oauth "$home" "acct_c" "UUID_C"
@@ -447,8 +447,8 @@ main() {
       && [[ "$stored_access" == "TOK_C_NEW" ]] \
       && [[ "$stored_refresh" == "REFRESH_C_ROTATED" ]] \
       && printf '%s' "$acct_c_line" | grep -q '15%' \
-      && printf '%s' "$acct_c_line" | grep -q '\* acct_c'; then
-      pass "case3 expired token refreshed: accessToken+rotated refreshToken persisted, row renders, still marked active (accountUuid) after rotation"
+      && printf '%s' "$acct_c_line" | grep -q 'acct_c'; then
+      pass "case3 expired NON-active token refreshed: rotated access+refresh persisted, row renders"
     else
       fail "case3 (exit=$EXIT_CODE stored_access=$stored_access stored_refresh=$stored_refresh): $OUT"
     fi
@@ -856,6 +856,46 @@ main() {
       pass "case15 usage mirrors active account's rotated live token into its snapshot (mode 600)"
     else
       fail "case15 usage mirror (exit=$EXIT_CODE snap_refresh=$snap_refresh): $OUT"
+    fi
+
+    rm -rf "$home" "$ctl"
+  }
+
+  # =========================================================================
+  # Case 16: NEVER refresh the ACTIVE account. Its live access token is expired
+  # and a refresh WOULD succeed (stub 200 for both its live and snapshot refresh
+  # tokens), but ccswitch must not call the token endpoint for the active account
+  # -- doing so rotates the refresh token and desyncs the live file, expiring the
+  # logged-in Claude Code. Assert: zero token calls; live refresh token untouched;
+  # snapshot equals the mirrored live token (NOT a rotated value).
+  # =========================================================================
+  {
+    local home ctl expired_ms tokcount live_rt snap_rt
+    home="$(new_home)"
+    ctl="$(new_ctl)"
+    expired_ms=$(( ($(date +%s) - 3600) * 1000 ))
+
+    write_claude_json "$home" "UUID_ACT"
+    write_live_credentials "$home" "REFRESH_ACT_LIVE" "TOK_ACT" "$expired_ms"
+    write_account_credentials "$home" "acct_act" "REFRESH_ACT_SNAP" "TOK_ACT_OLD" "$expired_ms"
+    write_account_oauth "$home" "acct_act" "UUID_ACT"
+    set_token_response "$ctl" "REFRESH_ACT_LIVE" 200 "$(refresh_success_body TOK_NEW_L REFRESH_ROT_L)"
+    set_token_response "$ctl" "REFRESH_ACT_SNAP" 200 "$(refresh_success_body TOK_NEW_S REFRESH_ROT_S)"
+
+    run_cc "$home" "$ctl" "" --no-switch
+
+    tokcount="$(wc -l <"$ctl/calls/token_count" 2>/dev/null || echo 0)"
+    live_rt="$(jq -r '.claudeAiOauth.refreshToken' "$home/.claude/.credentials.json" 2>/dev/null)"
+    snap_rt="$(jq -r '.claudeAiOauth.refreshToken' "$home/.claude/accounts/acct_act/credentials.json" 2>/dev/null)"
+
+    if [[ "$EXIT_CODE" -eq 0 ]] \
+      && printf '%s' "$OUT" | grep -q '\* acct_act' \
+      && [[ "${tokcount//[[:space:]]/}" == "0" ]] \
+      && [[ "$live_rt" == "REFRESH_ACT_LIVE" ]] \
+      && [[ "$snap_rt" == "REFRESH_ACT_LIVE" ]]; then
+      pass "case16 active account is never refreshed (no token call, live token intact)"
+    else
+      fail "case16 (exit=$EXIT_CODE tok=$tokcount live_rt=$live_rt snap_rt=$snap_rt): $OUT"
     fi
 
     rm -rf "$home" "$ctl"
