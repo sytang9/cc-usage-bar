@@ -342,6 +342,42 @@ EOF
   fi
   rm -rf "$m_home"
 
+  # --- Case 13: MCP OAuth grants survive an account switch. .credentials.json
+  # holds two unrelated things: claudeAiOauth (which Claude account you are) and
+  # mcpOAuth/<server> (grants for MCP servers like Atlassian). The MCP grant
+  # belongs to the human and the machine, not to the Claude account, so a switch
+  # must swap the former and keep the latter. Overwriting wholesale silently
+  # logs you out of every MCP server on every switch. Save A and B, add a live
+  # MCP grant, switch to B, and confirm the grant is still there. -----------
+  local n_home
+  n_home="$(make_sandbox)"
+  write_claude_json "$n_home" "a@x.com" "OrgA" "uuid-a"
+  write_credentials "$n_home" "REFRESH_A" "$SECRET_A"
+  run_cc "$n_home" "" save acct-a
+  write_claude_json "$n_home" "b@y.com" "OrgB" "uuid-b"
+  write_credentials "$n_home" "REFRESH_B" "$SECRET_B"
+  run_cc "$n_home" "" save acct-b
+  # Authenticate an MCP server while B is active; the grant lands in LIVE creds
+  # and in no snapshot, exactly as a real `/mcp` authentication does.
+  local n_live="$n_home/.claude/.credentials.json"
+  local n_tmp
+  n_tmp="$(mktemp)"
+  jq '.mcpOAuth = {"atlassian|deadbeef": {"accessToken": "MCP_GRANT_KEPT"}}' \
+    "$n_live" >"$n_tmp" && mv "$n_tmp" "$n_live" && chmod 600 "$n_live"
+  run_cc "$n_home" "" acct-a   # switch accounts
+  local kept_grant switched_refresh
+  kept_grant="$(jq -r '.mcpOAuth["atlassian|deadbeef"].accessToken // "GONE"' "$n_live" 2>/dev/null)"
+  switched_refresh="$(jq -r '.claudeAiOauth.refreshToken' "$n_live" 2>/dev/null)"
+  if [[ "$EXIT_CODE" -eq 0 ]] \
+    && [[ "$kept_grant" == "MCP_GRANT_KEPT" ]] \
+    && [[ "$switched_refresh" == "REFRESH_A" ]] \
+    && [[ "$(file_mode "$n_live")" == "600" ]]; then
+    pass "case13 MCP OAuth grants survive an account switch while claudeAiOauth swaps (mode 600)"
+  else
+    fail "case13 mcpOAuth preservation (exit=$EXIT_CODE grant=$kept_grant refresh=$switched_refresh): $OUT"
+  fi
+  rm -rf "$n_home"
+
   rm -rf "$home_dir" "$ALL_OUTPUT_LOG"
 
   echo

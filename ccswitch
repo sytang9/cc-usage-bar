@@ -148,6 +148,40 @@ secure_copy() {
   chmod 600 "$dst"
 }
 
+# install_credentials <snapshot> <dst>: write the snapshot's credentials to dst,
+# but carry the LIVE mcpOAuth grants forward.
+#
+# .credentials.json holds two unrelated things: claudeAiOauth (which Claude
+# account you are) and mcpOAuth/<server> (OAuth grants for MCP servers such as
+# Atlassian). Switching Claude accounts must swap the first and must NOT discard
+# the second — the MCP grant belongs to the human and the machine, not to the
+# Claude account, so overwriting wholesale silently logs you out of every MCP
+# server every time you switch. Per-server, the live grant wins; snapshot grants
+# survive for servers the live file does not have.
+install_credentials() {
+  local snapshot="$1" dst="$2"
+
+  if [[ ! -f "$dst" ]] || ! command -v jq >/dev/null 2>&1; then
+    secure_copy "$snapshot" "$dst"
+    return
+  fi
+
+  local tmp
+  tmp="$(mktemp "${TMPDIR:-/tmp}/ccswitch-creds.XXXXXX")"
+  chmod 600 "$tmp"
+  if jq -s '.[0] as $snap | .[1] as $live
+            | $snap
+            + (if ($live.mcpOAuth // {}) == {} then {}
+               else {mcpOAuth: (($snap.mcpOAuth // {}) + $live.mcpOAuth)} end)' \
+       "$snapshot" "$dst" >"$tmp" 2>/dev/null && [[ -s "$tmp" ]]; then
+    mv "$tmp" "$dst"
+    chmod 600 "$dst"
+  else
+    rm -f "$tmp"
+    secure_copy "$snapshot" "$dst"
+  fi
+}
+
 # Active-account identity is anchored on accountUuid, NOT refreshToken.
 # refreshToken rotates on every use (the usage monitor's token-refresh flow
 # writes a new one back after each successful refresh) so it cannot be a
@@ -300,7 +334,7 @@ cmd_switch() {
     secure_copy "$CREDENTIALS_FILE" "$CREDENTIALS_FILE.bak"
   fi
 
-  secure_copy "$label_dir/credentials.json" "$CREDENTIALS_FILE"
+  install_credentials "$label_dir/credentials.json" "$CREDENTIALS_FILE"
 
   local oauth_account_file="$label_dir/oauthAccount.json"
   if [[ -f "$oauth_account_file" ]]; then
