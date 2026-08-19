@@ -429,20 +429,65 @@ EOF
   run_cc "$home15" "" save second
   run_cc "$home15" "" first
 
-  local bak15 bak_email15
+  local bak15 bak_email15 live_email15
   bak15="$home15/.claude.json.bak"
   bak_email15="$(jq -r '.oauthAccount.emailAddress // empty' "$bak15" 2>/dev/null)"
+  # Not enough to check the .bak holds the PRE-switch identity -- confirm the
+  # switch actually landed the TARGET identity in the live .claude.json too,
+  # or a broken write that left .bak correct but .claude.json untouched would
+  # pass this case anyway.
+  live_email15="$(jq -r '.oauthAccount.emailAddress // empty' "$home15/.claude.json" 2>/dev/null)"
 
   if [[ "$EXIT_CODE" -eq 0 ]] \
     && [[ -f "$bak15" ]] \
     && [[ "$bak_email15" == "b@y.com" ]] \
-    && [[ "$(file_mode "$bak15")" == "600" ]]; then
-    pass "case15 switch backs up .claude.json (pre-switch identity, mode 600)"
+    && [[ "$(file_mode "$bak15")" == "600" ]] \
+    && [[ "$live_email15" == "a@x.com" ]]; then
+    pass "case15 switch backs up .claude.json (pre-switch identity, mode 600) and updates it to the target identity"
   else
-    fail "case15 .claude.json backup missing/wrong (exit=$EXIT_CODE bak_email=$bak_email15 mode=$(file_mode "$bak15")): $OUT"
+    fail "case15 .claude.json backup/update wrong (exit=$EXIT_CODE bak_email=$bak_email15 live_email=$live_email15 mode=$(file_mode "$bak15")): $OUT"
   fi
 
   rm -rf "$home15"
+
+  # --- Case 16: a 0-byte oauthAccount.json must NOT pass the switch
+  # pre-flight. `jq empty` exits 0 on a zero-byte file ("zero JSON documents"
+  # is valid JSON to jq), so a bare `jq empty` check lets a 0-byte snapshot
+  # through. This is not hypothetical: the OLD unchecked `cmd_save` wrote
+  # `jq '.oauthAccount // {}' >"$tmp"` with no status check, so a failed,
+  # killed, or disk-full save produced exactly a 0-byte oauthAccount.json --
+  # corruption that is already sitting in real users' ~/.claude/accounts/*.
+  # A 0-byte oauthAccount.json passing the pre-flight means
+  # `jq --slurpfile oauth <empty-file> '.oauthAccount = $oauth[0]'` happily
+  # writes `"oauthAccount": null` into .claude.json while ccswitch prints
+  # "Switched to ..." and exits 0 -- silent identity loss.
+  local home16
+  home16="$(make_sandbox)"
+  write_claude_json "$home16" "a@x.com" "OrgA" "uuid-a"
+  write_credentials "$home16" "REFRESH_A" "$SECRET_A"
+  run_cc "$home16" "" save good16
+  : >"$home16/.claude/accounts/good16/oauthAccount.json"   # 0-byte, planted after a healthy save
+
+  local before16
+  before16="$(cat "$home16/.claude.json")"
+
+  run_cc "$home16" "" good16
+
+  local after16 after_oauth16
+  after16="$(cat "$home16/.claude.json")"
+  after_oauth16="$(jq -r '.oauthAccount // "MISSING"' "$home16/.claude.json" 2>/dev/null)"
+
+  if [[ "$EXIT_CODE" -ne 0 ]] \
+    && [[ "$after16" == "$before16" ]] \
+    && [[ "$after_oauth16" != "null" ]] \
+    && [[ "$after_oauth16" != "MISSING" ]] \
+    && ! printf '%s' "$OUT" | grep -q "Switched to"; then
+    pass "case16 a 0-byte oauthAccount.json fails the switch pre-flight and leaves .claude.json's oauthAccount intact (not null)"
+  else
+    fail "case16 0-byte oauthAccount.json not rejected (exit=$EXIT_CODE oauth=$after_oauth16): $OUT"
+  fi
+
+  rm -rf "$home16"
 
   rm -rf "$home_dir" "$ALL_OUTPUT_LOG"
 

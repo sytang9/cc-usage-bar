@@ -134,6 +134,19 @@ require_live_credentials() {
   fi
 }
 
+# is_valid_json_object_file <path>: true iff the file is non-empty AND its
+# top-level JSON value is an object. `jq empty` alone is NOT enough for this --
+# it exits 0 on a zero-byte file ("zero JSON documents" is valid JSON to jq),
+# so a bare `jq empty` check lets a 0-byte snapshot sail through. That matters
+# here specifically because the OLD unchecked `cmd_save` wrote
+# `jq '.oauthAccount // {}' >"$tmp"` with no status check, so a failed,
+# killed, or disk-full save produced exactly a 0-byte oauthAccount.json --
+# corruption that is already sitting in real users' ~/.claude/accounts/*.
+is_valid_json_object_file() {
+  local f="$1"
+  [[ -s "$f" ]] && jq -e 'type == "object"' "$f" >/dev/null 2>&1
+}
+
 # secure_dir <path>: create a directory (if missing) and force mode 700.
 secure_dir() {
   local dir="$1"
@@ -142,15 +155,24 @@ secure_dir() {
 }
 
 # secure_copy <src> <dst>: copy a file and force mode 600 on the destination.
+# Returns non-zero, WITHOUT attempting the chmod, if the cp itself fails --
+# `cp ...; chmod ...` would return chmod's status instead, which can mask a
+# failed cp whenever <dst> already existed (chmod succeeds on the old file,
+# reporting success even though nothing was actually copied).
 secure_copy() {
   local src="$1" dst="$2"
-  cp "$src" "$dst"
+  cp "$src" "$dst" || return 1
   chmod 600 "$dst"
 }
 
 # jq_write <dest> <jq-arg>...: run jq with the given args and replace <dest>
 # with its output ONLY if jq exited 0 AND produced something. Returns non-zero,
 # leaving <dest> untouched, otherwise. Destination ends up mode 600.
+#
+# NOTE: "produced something" is a non-empty-file check, not a shape check --
+# a bare `null` (4 bytes) satisfies it. No current caller emits bare `null`,
+# but a caller that must reject it (e.g. one writing a JSON object) has to
+# assert the type itself, such as with `jq -e 'type == "object"'` on the result.
 #
 # Why this exists: `jq ... >"$tmp"; mv "$tmp" "$dest"` replaces the destination
 # with an EMPTY file whenever jq fails -- a corrupt snapshot, a full disk, a
@@ -206,9 +228,15 @@ file_write() {
 install_credentials() {
   local snapshot="$1" dst="$2"
 
+  # Both secure_copy calls below are explicitly followed by `return 0` rather
+  # than falling through: secure_copy now propagates a failed `cp` (see its
+  # definition), and no caller of install_credentials currently checks its
+  # exit status -- an unhandled failure here has nowhere useful to go, so this
+  # function keeps its pre-existing "always effectively succeeds" contract
+  # rather than starting to surface a status nothing consumes.
   if [[ ! -f "$dst" ]] || ! command -v jq >/dev/null 2>&1; then
     secure_copy "$snapshot" "$dst"
-    return
+    return 0
   fi
 
   if jq_write "$dst" -s '.[0] as $snap | .[1] as $live
@@ -219,6 +247,7 @@ install_credentials() {
     return 0
   fi
   secure_copy "$snapshot" "$dst"
+  return 0
 }
 
 # Active-account identity is anchored on accountUuid, NOT refreshToken.
@@ -257,6 +286,9 @@ mirror_live_to_snapshot() {
     [[ -d "$label_dir" ]] || continue
     label="$(basename "$label_dir")"
     if [[ "$(saved_account_uuid "$label")" == "$live_uuid" ]]; then
+      # `return 0` is unconditional here (not `secure_copy`'s status) --
+      # already true before secure_copy started propagating cp failures, so
+      # that change does not alter what this function returns.
       secure_copy "$CREDENTIALS_FILE" "$label_dir/credentials.json"
       return 0
     fi
@@ -294,6 +326,14 @@ cmd_save() {
   secure_copy "$CREDENTIALS_FILE" "$label_dir/credentials.json"
 
   if ! jq_write "$label_dir/oauthAccount.json" '.oauthAccount // {}' "$CLAUDE_JSON"; then
+    # Do not leave a stale oauthAccount.json behind: on an OVERWRITE save,
+    # jq_write's failure leaves the PREVIOUS account's identity file sitting
+    # next to the NEW account's just-copied credentials.json. That mismatched
+    # pair would otherwise pass the switch pre-flight's existence/content
+    # checks and switch cleanly to the wrong identity. Removing it here makes
+    # this snapshot look like a credentials-only save (no identity available)
+    # instead of a confidently wrong one.
+    rm -f "$label_dir/oauthAccount.json"
     echo "Error: failed to write $label_dir/oauthAccount.json; account '$label' not saved cleanly." >&2
     exit 1
   fi
@@ -361,13 +401,13 @@ cmd_switch() {
   # Validate the snapshot BEFORE touching any live file. A switch that fails
   # half-way (credentials swapped, .claude.json not) leaves the user logged
   # into a mismatched pair, so everything that can be checked up front is.
-  if ! jq empty "$label_dir/credentials.json" >/dev/null 2>&1; then
+  if ! is_valid_json_object_file "$label_dir/credentials.json"; then
     echo "Error: saved account '$label' has an unreadable credentials.json; nothing changed." >&2
     echo "Re-enroll it: log into that account in Claude Code, then run: ccswitch save $label" >&2
     exit 1
   fi
   if [[ -f "$label_dir/oauthAccount.json" ]] \
-    && ! jq empty "$label_dir/oauthAccount.json" >/dev/null 2>&1; then
+    && ! is_valid_json_object_file "$label_dir/oauthAccount.json"; then
     echo "Error: saved account '$label' has an unreadable oauthAccount.json; nothing changed." >&2
     echo "Re-enroll it: log into that account in Claude Code, then run: ccswitch save $label" >&2
     exit 1
@@ -383,20 +423,36 @@ cmd_switch() {
   mkdir -p "$CLAUDE_DIR"
   chmod 700 "$CLAUDE_DIR"
 
+  # Backups are the user's only recovery path if the writes below fail
+  # partway, so a failed backup must abort BEFORE anything live is touched --
+  # not get swallowed by secure_copy's chmod masking a failed cp.
   if [[ -f "$CREDENTIALS_FILE" ]]; then
-    secure_copy "$CREDENTIALS_FILE" "$CREDENTIALS_FILE.bak"
+    if ! secure_copy "$CREDENTIALS_FILE" "$CREDENTIALS_FILE.bak"; then
+      echo "Error: failed to back up $CREDENTIALS_FILE; nothing changed." >&2
+      exit 1
+    fi
   fi
 
-  secure_copy "$CLAUDE_JSON" "$CLAUDE_JSON.bak"
+  if ! secure_copy "$CLAUDE_JSON" "$CLAUDE_JSON.bak"; then
+    echo "Error: failed to back up $CLAUDE_JSON; nothing changed." >&2
+    exit 1
+  fi
 
   install_credentials "$label_dir/credentials.json" "$CREDENTIALS_FILE"
 
   local oauth_account_file="$label_dir/oauthAccount.json"
-  if [[ -f "$oauth_account_file" ]]; then
+  if [[ -s "$oauth_account_file" ]]; then
     if ! jq_write "$CLAUDE_JSON" --slurpfile oauth "$oauth_account_file" '.oauthAccount = $oauth[0]' "$CLAUDE_JSON"; then
       echo "Error: failed to update $CLAUDE_JSON; it is unchanged." >&2
-      echo "Credentials were already swapped -- restore them with:" >&2
-      echo "  cp $CREDENTIALS_FILE.bak $CREDENTIALS_FILE" >&2
+      echo "Credentials were already swapped." >&2
+      # $CREDENTIALS_FILE.bak only exists when there WAS a live credentials
+      # file to back up (see the guard above) -- on a machine with no prior
+      # live credentials, pointing at a .bak that was never created would
+      # send the user chasing a file that isn't there.
+      if [[ -f "$CREDENTIALS_FILE.bak" ]]; then
+        echo "Restore them with:" >&2
+        echo "  cp $CREDENTIALS_FILE.bak $CREDENTIALS_FILE" >&2
+      fi
       exit 1
     fi
   fi
