@@ -329,6 +329,46 @@ case14() {
   rm -rf "$home_dir"
 }
 
+# --- Case 15: the two renderers must agree on the visual language ----------
+# The thresholds and 256-color codes are defined twice: here in
+# statusline-usage.sh and again in ccswitch's usage table with USAGE_ prefixes.
+# The README sells one visual language across both, so drift is a user-visible
+# bug. Deliberately a drift DETECTOR rather than a shared library: extracting
+# one would make the bar source a third installed file at every render, adding
+# a failure mode to the one script whose contract is never-fail.
+case15() {
+  local bar_file usage_file mismatches pair bar_name usage_name bar_val usage_val
+  bar_file="$REPO_DIR/statusline-usage.sh"
+  usage_file="$REPO_DIR/ccswitch"
+  mismatches=""
+
+  # <name in statusline-usage.sh>:<name in ccswitch>
+  for pair in \
+    PCT_OK_MAX:USAGE_PCT_OK_MAX \
+    PCT_WARN_MAX:USAGE_PCT_WARN_MAX \
+    COLOR_OK:USAGE_COLOR_OK \
+    COLOR_WARN:USAGE_COLOR_WARN \
+    COLOR_CRIT:USAGE_COLOR_CRIT \
+    COLOR_DIM:USAGE_COLOR_DIM \
+    COLOR_TRACK:USAGE_COLOR_TRACK; do
+    bar_name="${pair%%:*}"
+    usage_name="${pair##*:}"
+    bar_val="$(sed -n "s/^readonly ${bar_name}=\([0-9]*\).*/\1/p" "$bar_file" | head -1)"
+    usage_val="$(sed -n "s/^${usage_name}=\([0-9]*\).*/\1/p" "$usage_file" | head -1)"
+    if [[ -z "$bar_val" ]] || [[ -z "$usage_val" ]]; then
+      mismatches+=" ${bar_name}/${usage_name}(unreadable:'$bar_val'/'$usage_val')"
+    elif [[ "$bar_val" != "$usage_val" ]]; then
+      mismatches+=" ${bar_name}=${bar_val}!=${usage_name}=${usage_val}"
+    fi
+  done
+
+  if [[ -z "$mismatches" ]]; then
+    pass "case15 bar and usage-table thresholds/colors agree"
+  else
+    fail "case15 visual language drifted:$mismatches"
+  fi
+}
+
 main() {
   if [[ ! -x "$TARGET" ]]; then
     echo "FAIL: target script not found or not executable: $TARGET"
@@ -349,6 +389,7 @@ main() {
   case12
   case13
   case14
+  case15
 
   echo
   echo "----------------------------------------"
