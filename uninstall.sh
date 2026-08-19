@@ -33,6 +33,20 @@ for arg in "$@"; do
   esac
 done
 
+# check_jq: install.sh stays standalone on purpose, so this small guard is
+# duplicated here rather than shared. Without it, a missing jq makes
+# remove_statusline silently give up (see its own jq -e check below) *after*
+# remove_scripts has already deleted the scripts -- leaving a stale
+# statusLine entry pointing at nothing, while the run still reports success.
+# Fail loudly before touching anything instead.
+check_jq() {
+  if ! command -v jq >/dev/null 2>&1; then
+    echo "Error: jq is required but not found on PATH." >&2
+    echo "Install it first, e.g.: 'sudo apt install jq' (Debian/Ubuntu), 'brew install jq' (macOS)." >&2
+    exit 1
+  fi
+}
+
 confirm() {
   local prompt="$1" answer
   read -r -p "$prompt [y/N] " answer
@@ -46,8 +60,11 @@ remove_scripts() {
   local f
   for f in "$CLAUDE_DIR/statusline-usage.sh" "$CLAUDE_DIR/ccswitch"; do
     if [[ -e "$f" ]]; then
-      rm -f "$f"
-      echo "Removed: $f"
+      if rm -f "$f"; then
+        echo "Removed: $f"
+      else
+        echo "Error: failed to remove $f" >&2
+      fi
     else
       echo "Already absent: $f"
     fi
@@ -65,8 +82,11 @@ remove_symlink() {
   local target
   target="$(readlink "$link")"
   if [[ "$target" == "$CLAUDE_DIR/ccswitch" ]]; then
-    rm -f "$link"
-    echo "Removed symlink: $link"
+    if rm -f "$link"; then
+      echo "Removed symlink: $link"
+    else
+      echo "Error: failed to remove symlink $link" >&2
+    fi
   else
     echo "Left alone (points elsewhere: $target): $link"
   fi
@@ -85,6 +105,10 @@ remove_statusline() {
 
   local current
   current="$(jq -r '.statusLine.command // empty' "$SETTINGS_FILE" 2>/dev/null)"
+  if [[ -z "$current" ]]; then
+    echo "No statusLine entry to remove."
+    return 0
+  fi
   if [[ "$current" != "$OUR_STATUSLINE_COMMAND" ]]; then
     echo "statusLine does not point at cc-usage-bar (command='$current') -- leaving it."
     return 0
@@ -144,9 +168,16 @@ main() {
     echo "  $CLAUDE_DIR/ccswitch"
     echo "  $BIN_DIR/ccswitch (only if it symlinks to the above)"
     echo "  the .statusLine key in $SETTINGS_FILE (only if it points at cc-usage-bar)"
-    echo "Would KEEP: $ACCOUNTS_DIR, and the ccw function in your shell rc."
+    if [[ "$PURGE_ACCOUNTS" == "1" ]]; then
+      echo "Would DELETE (after interactive confirmation): $ACCOUNTS_DIR"
+    else
+      echo "Would KEEP: $ACCOUNTS_DIR"
+    fi
+    echo "Would KEEP: the ccw function in your shell rc."
     exit 0
   fi
+
+  check_jq
 
   remove_scripts
   remove_symlink
@@ -155,6 +186,9 @@ main() {
   report_ccw_function
 
   echo
+  if [[ -e "$SETTINGS_FILE.bak" ]]; then
+    echo "Note: $SETTINGS_FILE.bak (your pre-install settings.json) was kept -- remove it by hand if you don't need it."
+  fi
   echo "Done. Restart Claude Code to drop the status line."
 }
 
