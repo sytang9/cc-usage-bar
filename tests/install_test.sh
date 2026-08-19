@@ -60,6 +60,9 @@ main() {
   local command_val interval_val
   command_val="$(jq -r '.statusLine.command // empty' "$settings_file" 2>/dev/null)"
   interval_val="$(jq -r '.statusLine.refreshInterval // empty' "$settings_file" 2>/dev/null)"
+  # Asserting against the literal installer writes (Claude Code expands this
+  # tilde at run time, not bash) -- not a path this test should resolve.
+  # shellcheck disable=SC2088
   if [[ "$command_val" == "~/.claude/statusline-usage.sh" ]] && [[ "$interval_val" == "5" ]]; then
     pass "case2 settings.json created with correct statusLine command + refreshInterval 5"
   else
@@ -89,6 +92,9 @@ main() {
   new_command="$(jq -r '.statusLine.command // empty' "$settings2" 2>/dev/null)"
   backup_preserved="$(jq -r '.unrelatedTopLevelKey // empty' "$backup2" 2>/dev/null)"
 
+  # Asserting against the literal installer writes (Claude Code expands this
+  # tilde at run time, not bash) -- not a path this test should resolve.
+  # shellcheck disable=SC2088
   if [[ "$EXIT_CODE" -eq 0 ]] \
     && [[ "$preserved" == "preserve-me" ]] \
     && [[ "$new_command" == "~/.claude/statusline-usage.sh" ]] \
@@ -234,6 +240,9 @@ main() {
   live_command10="$(jq -r '.statusLine.command // empty' "$settings10" 2>/dev/null)"
   bak_theme10="$(jq -r '.theme // empty' "$backup10" 2>/dev/null)"
 
+  # Asserting against the literal installer writes (Claude Code expands this
+  # tilde at run time, not bash) -- not a path this test should resolve.
+  # shellcheck disable=SC2088
   if [[ "$EXIT_CODE" -eq 0 ]] \
     && [[ "$bak_command10" == "/my/previous/bar.sh" ]] \
     && [[ "$bak_theme10" == "dark" ]] \

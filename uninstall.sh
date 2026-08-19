@@ -16,6 +16,9 @@ SETTINGS_FILE="$CLAUDE_DIR/settings.json"
 BIN_DIR="$HOME/.local/bin"
 ACCOUNTS_DIR="$CLAUDE_DIR/accounts"
 
+# Literal value Claude Code expands at statusline-run time, not a shell path
+# -- $HOME here would write a machine-specific absolute path into settings.json.
+# shellcheck disable=SC2088
 OUR_STATUSLINE_COMMAND="~/.claude/statusline-usage.sh"
 CCW_FUNCTION='ccw() { ~/.claude/ccswitch "$@" --relaunch; }'
 

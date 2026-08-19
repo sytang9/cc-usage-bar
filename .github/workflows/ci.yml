@@ -23,3 +23,17 @@ jobs:
 
       - name: Run test suites
         run: bash tests/run_all.sh
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install shellcheck
+        run: sudo apt-get update && sudo apt-get install -y shellcheck
+
+      # --severity=warning, not the default: `style` findings on a codebase this
+      # deliberate are noise, and a gate that cries wolf gets ignored. Raise it
+      # to `style` only alongside a pass that actually fixes them.
+      - name: shellcheck
+        run: shellcheck --severity=warning --shell=bash ccswitch statusline-usage.sh install.sh uninstall.sh tests/*.sh

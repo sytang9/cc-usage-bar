@@ -228,6 +228,12 @@ installer). No test framework, no network: each suite sandboxes `HOME` under
 nothing ever touches your real `~/.claude` or Anthropic's API. CI runs the same
 command on every push and pull request.
 
+Lint every script (CI runs the same command):
+
+```
+shellcheck --severity=warning --shell=bash ccswitch statusline-usage.sh install.sh uninstall.sh tests/*.sh
+```
+
 ## License
 
 MIT — see [LICENSE](LICENSE).
