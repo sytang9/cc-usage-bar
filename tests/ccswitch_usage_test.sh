@@ -45,6 +45,8 @@ SECRET_TOKENS=(
   TOK_ACT TOK_ACT_OLD REFRESH_ACT_LIVE REFRESH_ACT_SNAP TOK_NEW_L REFRESH_ROT_L TOK_NEW_S REFRESH_ROT_S
   TOK_CNT REFRESH_CNT
   REFRESH_SIGNAL_SECRET TOK_OLD
+  REFRESH_NODE TOK_NODE_OLD
+  REFRESH_SKEW TOK_SKEW_OLD TOK_SKEW_NEW REFRESH_SKEW_ROT
 )
 
 pass() {
@@ -502,6 +504,77 @@ case18b_signal_single_pid_deferred() {
 case18_no_secret_left_after_signal() {
   case18a_signal_process_group
   case18b_signal_single_pid_deferred
+}
+
+# --- Case 19: an unusable node is reported as such, not as "re-login" ------
+# The built-in refresh transport uses fetch(), added in Node 18. On an older
+# node the catch path returned status 000, attempt_refresh returned failure,
+# and the row read "re-login" -- sending the user to re-authenticate an account
+# that was fine. Warn once, on stderr, naming node.
+case19_old_node_is_diagnosed() {
+  local home ctl fakebin
+  home="$(new_home)"
+  ctl="$(new_ctl)"
+  fakebin="$(mktemp -d "${TMPDIR:-/tmp}/ccswitch-usage-test-fakenode.XXXXXX")"
+
+  # A node with no global fetch, i.e. anything older than 18.
+  printf '#!/usr/bin/env bash\nexit 1\n' >"$fakebin/node"
+  chmod +x "$fakebin/node"
+
+  write_claude_json "$home" "UUID_LIVE"
+  write_live_credentials "$home" "REFRESH_LIVE" "TOK_LIVE" "$(future_ms)"
+  write_account_credentials "$home" "acct_node" "REFRESH_NODE" "TOK_NODE_OLD" 1
+  write_account_oauth "$home" "acct_node" "UUID_OTHER"
+
+  # No CCSWITCH_REFRESH_CMD here: this case is specifically about the built-in
+  # node path, so the stub transport must be out of the picture.
+  OUT="$(PATH="$fakebin:$STUB_BIN:$PATH" HOME="$home" CURL_STUB_DIR="$ctl" \
+    bash "$TARGET" usage --no-switch 2>&1)"
+  EXIT_CODE=$?
+  printf '%s\n' "$OUT" >>"$ALL_OUTPUT_LOG"
+
+  if [[ "$EXIT_CODE" -eq 0 ]] \
+    && printf '%s' "$OUT" | grep -qi 'node' \
+    && printf '%s' "$OUT" | grep -qi '18'; then
+    pass "case19 an unusable node is named in a warning instead of blaming the account"
+  else
+    fail "case19 no node diagnostic (exit=$EXIT_CODE): $OUT"
+  fi
+
+  rm -rf "$home" "$ctl" "$fakebin"
+}
+
+# --- Case 20: a token expiring within the skew window is refreshed early ----
+# is_token_expired had no margin, so a token with two seconds left counted as
+# valid: the usage GET 401'd and the 401-retry path paid a second round trip to
+# recover. Refresh proactively inside the skew window instead.
+case20_clock_skew_margin() {
+  local home ctl nearly tokcount
+  home="$(new_home)"
+  ctl="$(new_ctl)"
+  # 30 seconds of life left -- inside the 60s skew window.
+  nearly=$(( ($(date +%s) + 30) * 1000 ))
+
+  write_claude_json "$home" "UUID_LIVE"
+  write_live_credentials "$home" "REFRESH_LIVE" "TOK_LIVE" "$(future_ms)"
+  write_account_credentials "$home" "acct_skew" "REFRESH_SKEW" "TOK_SKEW_OLD" "$nearly"
+  write_account_oauth "$home" "acct_skew" "UUID_OTHER"
+  set_token_response "$ctl" "REFRESH_SKEW" 200 "$(refresh_success_body TOK_SKEW_NEW REFRESH_SKEW_ROT)"
+  set_usage_response "$ctl" "TOK_SKEW_NEW" 200 "$(usage_body 7 8)"
+
+  run_cc "$home" "$ctl" "" --no-switch --refresh
+
+  tokcount="$(token_call_count "$ctl")"
+
+  if [[ "$EXIT_CODE" -eq 0 ]] \
+    && [[ "${tokcount//[[:space:]]/}" == "1" ]] \
+    && printf '%s' "$OUT" | grep -q '7%'; then
+    pass "case20 a token expiring inside the skew window is refreshed before use"
+  else
+    fail "case20 no proactive refresh (exit=$EXIT_CODE tok=$tokcount): $OUT"
+  fi
+
+  rm -rf "$home" "$ctl"
 }
 
 main() {
@@ -1138,6 +1211,8 @@ main() {
 
   case17_counters_are_trustworthy
   case18_no_secret_left_after_signal
+  case19_old_node_is_diagnosed
+  case20_clock_skew_margin
 
   rm -rf "$STUB_BIN" "$ALL_OUTPUT_LOG" "$ALL_ARGV_LOG"
 

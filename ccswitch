@@ -95,6 +95,12 @@ USAGE_CACHE_TTL_SECONDS=600
 USAGE_RATE_LIMIT_BACKOFF_SECONDS=120
 USAGE_METER_WIDTH=12
 
+# Treat a token as expired this many seconds BEFORE its stated expiry. Without
+# a margin, a token with seconds left counts as valid, the usage GET 401s, and
+# the 401-retry path pays a second round trip to recover what one proactive
+# refresh would have handled.
+TOKEN_EXPIRY_SKEW_SECONDS=60
+
 # Set from cmd_usage's --refresh flag. Defaulted here because build_usage_row
 # reads it and `set -u` turns an unset read into a hard exit -- a trap for any
 # future caller that reaches build_usage_row without going through cmd_usage.
@@ -705,14 +711,14 @@ resolve_account_credentials() {
 }
 
 # is_token_expired <expires_at_ms> -> true iff expires_at_ms is a valid
-# epoch-millisecond timestamp that is now (or already past). An unparseable
-# or missing value is treated as "not expired" -- the usage call itself will
-# fail cleanly (row shows dashes) rather than us guessing wrong and forcing
-# an unnecessary refresh.
+# epoch-millisecond timestamp that is now, plus a skew margin (or already
+# past). An unparseable or missing value is treated as "not expired" -- the
+# usage call itself will fail cleanly (row shows dashes) rather than us
+# guessing wrong and forcing an unnecessary refresh.
 is_token_expired() {
   local exp="$1"
   [[ "$exp" =~ ^[0-9]+$ ]] || return 1
-  local now_ms=$(( $(date +%s) * 1000 ))
+  local now_ms=$(( ($(date +%s) + TOKEN_EXPIRY_SKEW_SECONDS) * 1000 ))
   (( exp <= now_ms ))
 }
 
@@ -1093,6 +1099,31 @@ render_usage_cell() {
   esac
 }
 
+# warn_if_refresh_unavailable: print ONE stderr warning per run when the
+# built-in refresh transport cannot work, so an unusable node reads as a node
+# problem instead of surfacing per-account as "re-login".
+#
+# The transport is Node's fetch(), which landed in Node 18; on anything older
+# the refresh POST fails and every expired account looks revoked. Silent when
+# $CCSWITCH_REFRESH_CMD is set -- that override replaces node entirely (it is
+# also how the tests stub the network).
+warn_if_refresh_unavailable() {
+  [[ -n "${CCSWITCH_REFRESH_CMD:-}" ]] && return 0
+
+  if ! command -v node >/dev/null 2>&1; then
+    echo "Warning: node not found on PATH. Expired account tokens cannot be refreshed" >&2
+    echo "(the refresh endpoint is behind Cloudflare, which blocks headless curl), so" >&2
+    echo "rows for expired accounts will show 're-login' until node is installed." >&2
+    return 0
+  fi
+
+  if ! node -e 'process.exit(typeof fetch === "function" ? 0 : 1)' >/dev/null 2>&1; then
+    echo "Warning: this node is too old to refresh tokens -- fetch() requires node 18+." >&2
+    echo "Rows for expired accounts will show 're-login' regardless of account health." >&2
+    echo "Claude Code ships a modern node; putting it first on PATH fixes this." >&2
+  fi
+}
+
 cmd_usage() {
   local no_switch=0 bypass_cache=0 relaunch=""
   local arg
@@ -1115,6 +1146,8 @@ cmd_usage() {
     echo "no saved accounts -- run: ccswitch save <label>"
     return 0
   fi
+
+  warn_if_refresh_unavailable
 
   # Keep the active account's snapshot current on every poll (the CtrlA poller
   # runs this every 5 min), so its refresh token never goes stale behind
