@@ -8,6 +8,12 @@
 #
 # SECURITY: never print token values or credential file contents. All moves
 # use cp/jq, never echo of secret fields.
+
+# Bumped by hand. ccswitch is copied into ~/.claude by install.sh, so an
+# installed copy cannot be traced back to the checkout it came from -- this is
+# the only way to ask one what it is.
+CCSWITCH_VERSION="1.0.0"
+
 set -uo pipefail
 
 : "${HOME:?HOME must be set}"
@@ -106,7 +112,7 @@ TOKEN_EXPIRY_SKEW_SECONDS=60
 # future caller that reaches build_usage_row without going through cmd_usage.
 USAGE_BYPASS_CACHE=0
 
-RESERVED_WORDS=(save delete list usage help refresh-pause refresh-resume)
+RESERVED_WORDS=(save delete list usage help version refresh-pause refresh-resume)
 # Whitelist charset for labels. Deliberately strict: this is what stands
 # between a label and a raw filesystem path ($ACCOUNTS_DIR/$label), so it
 # must reject '/' and '.' outright rather than trying to blocklist "..".
@@ -1224,6 +1230,7 @@ COMMANDS
                                use when the refresh endpoint is rate-limiting
   ccswitch refresh-resume      re-enable token refresh
   ccswitch help                show this help (also -h, --help)
+  ccswitch version             print the version (also --version, -V)
 
 usage FLAGS
   --no-switch   just print the table, do not prompt to switch
@@ -1280,6 +1287,9 @@ main() {
       ;;
     help | -h | --help)
       usage_text
+      ;;
+    version | --version | -V)
+      echo "ccswitch $CCSWITCH_VERSION"
       ;;
     -*)
       echo "Error: unknown option '$cmd'." >&2

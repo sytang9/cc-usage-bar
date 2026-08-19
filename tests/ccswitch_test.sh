@@ -528,6 +528,36 @@ EOF
 
   rm -rf "$home17"
 
+  # --- Case 18: --version reports the installed copy's version --------------
+  # ccswitch is COPIED into ~/.claude by install.sh, so the checkout it came
+  # from is not available to inspect. It has to be able to say what it is.
+  local home18
+  home18="$(make_sandbox)"
+
+  run_cc "$home18" "" --version
+  if [[ "$EXIT_CODE" -eq 0 ]] && printf '%s' "$OUT" | grep -Eq '^ccswitch [0-9]+\.[0-9]+\.[0-9]+$'; then
+    pass "case18 --version prints 'ccswitch <semver>'"
+  else
+    fail "case18 --version wrong (exit=$EXIT_CODE): $OUT"
+  fi
+
+  run_cc "$home18" "" version
+  if [[ "$EXIT_CODE" -eq 0 ]] && printf '%s' "$OUT" | grep -Eq '^ccswitch [0-9]+\.[0-9]+\.[0-9]+$'; then
+    pass "case18b bare 'version' subcommand matches --version"
+  else
+    fail "case18b version subcommand wrong (exit=$EXIT_CODE): $OUT"
+  fi
+
+  # 'version' must be reserved, or it would be ambiguous with a label.
+  run_cc "$home18" "" save version
+  if [[ "$EXIT_CODE" -ne 0 ]] && printf '%s' "$OUT" | grep -q "reserved"; then
+    pass "case18c 'version' is a reserved label"
+  else
+    fail "case18c 'version' not reserved (exit=$EXIT_CODE): $OUT"
+  fi
+
+  rm -rf "$home18"
+
   rm -rf "$home_dir" "$ALL_OUTPUT_LOG"
 
   echo

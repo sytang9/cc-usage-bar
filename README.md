@@ -113,6 +113,9 @@ ccswitch <label>             switch to a saved account
 ccswitch <label> --relaunch  switch, then exec the `claude` CLI (override
                               the command with CCSWITCH_CLAUDE_CMD)
 ccswitch delete <label>      remove a saved account (prompts to confirm)
+ccswitch refresh-pause       stop refreshing tokens (usage stays readable)
+ccswitch refresh-resume      re-enable token refresh
+ccswitch version             print the version (also --version, -V)
 ccswitch help                show the full command guide (also -h, --help)
 ```
 
@@ -156,6 +159,21 @@ Flags:
 - `--refresh` — bypass the 10-minute usage cache and poll live.
 - `--relaunch` — if you do switch from the prompt, exec `claude` afterward
   (same behavior as `ccswitch <label> --relaunch`).
+
+### Pausing token refresh
+
+The token-refresh endpoint rate-limits per machine. If a burst of expired
+accounts has you seeing `rate-limited` rows, stop adding pressure without
+losing the usage view:
+
+```
+ccswitch refresh-pause       # usage still polls; no token refreshes at all
+ccswitch refresh-resume      # back to normal
+```
+
+While paused, an account whose stored token has expired shows `rate-limited`
+rather than being refreshed. The pause is a flag file under
+`~/.claude/accounts/`, so it survives across runs until you resume.
 
 ## Caveats / honest limitations
 
