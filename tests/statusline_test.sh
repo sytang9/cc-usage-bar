@@ -295,6 +295,40 @@ case13() {
   rm -rf "$home_dir"
 }
 
+# --- Case 14: a null resets_at must not render as "0m" --------------------
+# Claude Code's payload declares resets_at as a nullable number and the API
+# returns null for the five-hour window at 0% usage -- there is no window to
+# reset. Rendering that as "↻ 0m" tells the user the window resets this
+# instant. `ccswitch usage` shows a dash for the same case; the bar drops the
+# countdown group entirely (it has no column header to hang a dash under).
+case14() {
+  local home_dir
+  home_dir="$(make_sandbox)"
+
+  run_script "$home_dir" "$FIXTURES/null_five_hour_reset.json"
+
+  local plain
+  plain="$(printf '%s' "$OUT" | sed 's/\x1b\[[0-9;]*m//g')"
+
+  # The weekly window has a real reset and must still show a countdown, so
+  # assert on the 5H segment specifically: everything up to the group separator.
+  local five_segment
+  five_segment="${plain#*5H }"
+  five_segment="${five_segment%%·*}"
+
+  if [[ "$EXIT_CODE" -eq 0 ]] \
+    && [[ "$five_segment" != *"0m"* ]] \
+    && [[ "$five_segment" != *"↻"* ]] \
+    && [[ "$plain" == *"↻"* ]] \
+    && printf '%s' "$plain" | grep -q '31%'; then
+    pass "case14 null five_hour resets_at drops the countdown, weekly countdown survives"
+  else
+    fail "case14 null resets_at rendered wrong (exit=$EXIT_CODE five_segment='$five_segment'): $(printf '%s' "$OUT" | cat -v)"
+  fi
+
+  rm -rf "$home_dir"
+}
+
 main() {
   if [[ ! -x "$TARGET" ]]; then
     echo "FAIL: target script not found or not executable: $TARGET"
@@ -314,6 +348,7 @@ main() {
   case11
   case12
   case13
+  case14
 
   echo
   echo "----------------------------------------"

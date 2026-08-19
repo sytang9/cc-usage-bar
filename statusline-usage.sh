@@ -50,16 +50,20 @@ color_for() {
 # pct via color_for. Empty segments and both wall caps are dim grey.
 render_capsule() {
   local pct="$1"
-  local color
-  color="$(color_for "$pct")"
 
   # Clamp pct into [0, 100] defensively; bad input renders an empty capsule
-  # rather than corrupting arithmetic below.
+  # rather than corrupting arithmetic below. This has to happen BEFORE
+  # color_for: that helper uses (( )) integer arithmetic, which errors on the
+  # fractional or non-numeric values this block is here to absorb, and would
+  # silently fall through to the "ok" color.
   if ! [[ "$pct" =~ ^-?[0-9]+(\.[0-9]+)?$ ]]; then
     pct=0
   fi
   awk -v p="$pct" 'BEGIN { exit !(p < 0) }' && pct=0
   awk -v p="$pct" 'BEGIN { exit !(p > 100) }' && pct=100
+
+  local color
+  color="$(color_for "$pct")"
 
   local filled
   filled="$(awk -v p="$pct" -v n="$SEGMENTS" 'BEGIN {
@@ -87,12 +91,19 @@ render_capsule() {
     "$RESET"
 }
 
-# fmt_reset <epoch_seconds> -> echoes a short human countdown to that epoch.
+# fmt_reset <epoch_seconds> -> echoes a short human countdown to that epoch, or
+# NOTHING when there is no usable epoch.
+#
+# Empty/unparseable and "already elapsed" are deliberately different answers.
+# Claude Code sends resets_at as a nullable number, and the API reports null for
+# the five-hour window whenever usage is 0% -- there is no active window to
+# reset. Printing "0m" for that claimed the window resets this instant; the
+# caller drops the whole countdown group when this returns empty. A real epoch
+# in the past still gives "0m", which is accurate.
 fmt_reset() {
   local epoch="$1"
   if ! [[ "$epoch" =~ ^[0-9]+$ ]]; then
-    echo "0m"
-    return
+    return 0
   fi
 
   local now delta
@@ -210,12 +221,16 @@ main() {
   local row2="" GROUP_SEP
   GROUP_SEP="   $(dim "·")   "
   if [[ "$has_limits" == "1" ]]; then
-    local five_int week_int
+    local five_int week_int five_reset_txt week_reset_txt
     five_int="$(round_pct "$five_hour_pct")"
     week_int="$(round_pct "$week_pct")"
-    row2+="$(tint "$COLOR_LABEL_5H" "5H") $(render_capsule "$five_int") $(dim "$(printf '%3d%%' "$five_int")") $(dim "↻ $(fmt_reset "$five_hour_reset")")"
+    five_reset_txt="$(fmt_reset "$five_hour_reset")"
+    week_reset_txt="$(fmt_reset "$week_reset")"
+    row2+="$(tint "$COLOR_LABEL_5H" "5H") $(render_capsule "$five_int") $(dim "$(printf '%3d%%' "$five_int")")"
+    [[ -n "$five_reset_txt" ]] && row2+=" $(dim "↻ $five_reset_txt")"
     row2+="$GROUP_SEP"
-    row2+="$(tint "$COLOR_LABEL_WK" "WK") $(render_capsule "$week_int") $(dim "$(printf '%3d%%' "$week_int")") $(dim "↻ $(fmt_reset "$week_reset")")"
+    row2+="$(tint "$COLOR_LABEL_WK" "WK") $(render_capsule "$week_int") $(dim "$(printf '%3d%%' "$week_int")")"
+    [[ -n "$week_reset_txt" ]] && row2+=" $(dim "↻ $week_reset_txt")"
   else
     row2+="$(tint "$COLOR_LABEL_5H" "5H") $(dim "—")"
     row2+="$GROUP_SEP"
