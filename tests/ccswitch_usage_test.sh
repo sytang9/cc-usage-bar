@@ -43,6 +43,7 @@ SECRET_TOKENS=(
   TOK_RATELIMIT REFRESH_RATELIMIT
   REFRESH_M_NEW REFRESH_M_OLD TOK_M
   TOK_ACT TOK_ACT_OLD REFRESH_ACT_LIVE REFRESH_ACT_SNAP TOK_NEW_L REFRESH_ROT_L TOK_NEW_S REFRESH_ROT_S
+  TOK_CNT REFRESH_CNT
 )
 
 pass() {
@@ -157,15 +158,20 @@ new_ctl() {
   local ctl
   ctl="$(mktemp -d "${TMPDIR:-/tmp}/ccswitch-usage-test-ctl.XXXXXX")"
   mkdir -p "$ctl/usage" "$ctl/token" "$ctl/calls"
+  # Create both counters empty so "zero calls" is a readable 0 rather than a
+  # missing file. Without this, `wc -l` errors and every `|| echo 0` fallback
+  # turns a broken counter into a silent pass -- see case17.
+  : >"$ctl/calls/usage_count"
+  : >"$ctl/calls/token_count"
   echo "$ctl"
 }
 
 usage_call_count() {
-  wc -l <"$1/calls/usage_count" 2>/dev/null || echo 0
+  wc -l <"$1/calls/usage_count"
 }
 
 token_call_count() {
-  wc -l <"$1/calls/token_count" 2>/dev/null || echo 0
+  wc -l <"$1/calls/token_count"
 }
 
 # run_cc <home> <ctl> <stdin_text> <args...>
@@ -267,6 +273,42 @@ future_ms() {
 
 file_mode() {
   stat -c '%a' "$1" 2>/dev/null
+}
+
+# --- Case 17: the call counters themselves are trustworthy -------------------
+# Both "we did NOT call the endpoint" assertions in this suite (case15, case16)
+# read $ctl/calls/token_count. If the stub never creates that file, `wc -l`
+# fails, `|| echo 0` rescues it, and those cases pass whether or not the
+# mechanism works at all. Assert the counters are readable at zero AND that a
+# real call increments them -- if this case fails, the never-refresh guarantees
+# in case15/case16 are not actually being checked.
+case17_counters_are_trustworthy() {
+  local home ctl before_usage before_token after_usage
+  home="$(new_home)"
+  ctl="$(new_ctl)"
+
+  before_usage="$(usage_call_count "$ctl" 2>/dev/null)"
+  before_token="$(token_call_count "$ctl" 2>/dev/null)"
+
+  write_claude_json "$home" "UUID_CNT"
+  write_live_credentials "$home" "REFRESH_CNT" "TOK_CNT" "$(future_ms)"
+  write_account_credentials "$home" "acct_cnt" "REFRESH_CNT" "TOK_CNT" "$(future_ms)"
+  write_account_oauth "$home" "acct_cnt" "UUID_OTHER"
+  set_usage_response "$ctl" "TOK_CNT" 200 "$(usage_body 10 20)"
+
+  run_cc "$home" "$ctl" "" --no-switch --refresh
+
+  after_usage="$(usage_call_count "$ctl" 2>/dev/null)"
+
+  if [[ "${before_usage//[[:space:]]/}" == "0" ]] \
+    && [[ "${before_token//[[:space:]]/}" == "0" ]] \
+    && [[ "${after_usage//[[:space:]]/}" == "1" ]]; then
+    pass "case17 call counters read 0 before any call and increment on a real one"
+  else
+    fail "case17 counters untrustworthy (before_usage=$before_usage before_token=$before_token after_usage=$after_usage)"
+  fi
+
+  rm -rf "$home" "$ctl"
 }
 
 main() {
@@ -814,7 +856,7 @@ main() {
 
     local pline
     pline="$(printf '%s' "$OUT" | grep 'acct_paused')"
-    tokcount="$(wc -l <"$ctl/calls/token_count" 2>/dev/null || echo 0)"
+    tokcount="$(token_call_count "$ctl")"
 
     if [[ "$EXIT_CODE" -eq 0 ]] \
       && printf '%s' "$pline" | grep -q 'rate-limited' \
@@ -884,7 +926,7 @@ main() {
 
     run_cc "$home" "$ctl" "" --no-switch
 
-    tokcount="$(wc -l <"$ctl/calls/token_count" 2>/dev/null || echo 0)"
+    tokcount="$(token_call_count "$ctl")"
     live_rt="$(jq -r '.claudeAiOauth.refreshToken' "$home/.claude/.credentials.json" 2>/dev/null)"
     snap_rt="$(jq -r '.claudeAiOauth.refreshToken' "$home/.claude/accounts/acct_act/credentials.json" 2>/dev/null)"
 
@@ -900,6 +942,8 @@ main() {
 
     rm -rf "$home" "$ctl"
   }
+
+  case17_counters_are_trustworthy
 
   rm -rf "$STUB_BIN" "$ALL_OUTPUT_LOG" "$ALL_ARGV_LOG"
 
