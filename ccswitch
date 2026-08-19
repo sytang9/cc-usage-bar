@@ -285,15 +285,14 @@ file_write() {
 install_credentials() {
   local snapshot="$1" dst="$2"
 
-  # Both secure_copy calls below are explicitly followed by `return 0` rather
-  # than falling through: secure_copy now propagates a failed `cp` (see its
-  # definition), and no caller of install_credentials currently checks its
-  # exit status -- an unhandled failure here has nowhere useful to go, so this
-  # function keeps its pre-existing "always effectively succeeds" contract
-  # rather than starting to surface a status nothing consumes.
+  # Both fallback branches below return secure_copy's OWN exit status rather
+  # than a hardcoded 0: secure_copy propagates a failed `cp` (see its
+  # definition), and its caller (cmd_switch) now checks this function's
+  # status and aborts rather than reporting "Switched to ..." over a
+  # credential write that never happened.
   if [[ ! -f "$dst" ]] || ! command -v jq >/dev/null 2>&1; then
     secure_copy "$snapshot" "$dst"
-    return 0
+    return $?
   fi
 
   if jq_write "$dst" -s '.[0] as $snap | .[1] as $live
@@ -304,7 +303,7 @@ install_credentials() {
     return 0
   fi
   secure_copy "$snapshot" "$dst"
-  return 0
+  return $?
 }
 
 # Active-account identity is anchored on accountUuid, NOT refreshToken.
@@ -321,18 +320,25 @@ saved_account_uuid() {
 }
 
 # saved_labels: print one label per line for every saved account, nothing at
-# all when there are none.
+# all when there are none. GUARANTEE: every label printed matches
+# LABEL_CHARSET_PATTERN ([A-Za-z0-9_-]) -- this is what makes the unquoted
+# `for label in $(saved_labels)` consumption below safe by construction, not
+# by assumption about how directories got there.
 #
-# This is the ONLY sanctioned way to enumerate accounts. Two traps it closes:
-# emptiness cannot be tested with `ls -A`, because ccswitch keeps its own
-# dot-files (.no-refresh, .refresh-backoff) beside the account directories; and
-# an unmatched `*/` glob is not empty in bash -- without a -d guard the literal
-# pattern reaches basename and renders as an account named '*'.
+# This is the ONLY sanctioned way to enumerate accounts. Three traps it
+# closes: emptiness cannot be tested with `ls -A`, because ccswitch keeps its
+# own dot-files (.no-refresh, .refresh-backoff) beside the account
+# directories; an unmatched `*/` glob is not empty in bash -- without a -d
+# guard the literal pattern reaches basename and renders as an account named
+# '*'; and a directory `ccswitch save` did NOT create can hold whitespace or
+# a glob character that `validate_label` would have rejected -- the charset
+# check below is what keeps such a directory from being enumerated at all.
 saved_labels() {
   local label_dir
   [[ -d "$ACCOUNTS_DIR" ]] || return 0
   for label_dir in "$ACCOUNTS_DIR"/*/; do
     [[ -d "$label_dir" ]] || continue
+    [[ "$(basename "$label_dir")" =~ $LABEL_CHARSET_PATTERN ]] || continue
     basename "$label_dir"
   done
 }
@@ -356,9 +362,7 @@ mirror_live_to_snapshot() {
   live_uuid="$(live_account_uuid)"
   [[ -n "$live_uuid" ]] || return 0
   local label
-  # Unquoted $(saved_labels) is safe and deliberate: validate_label restricts
-  # labels to [A-Za-z0-9_-], so no element can contain whitespace or a glob
-  # character.
+  # Unquoted $(saved_labels) is safe: see saved_labels' GUARANTEE.
   for label in $(saved_labels); do
     if [[ "$(saved_account_uuid "$label")" == "$live_uuid" ]]; then
       # `return 0` is unconditional here (not `secure_copy`'s status) --
@@ -398,7 +402,16 @@ cmd_save() {
   fi
   secure_dir "$label_dir"
 
-  secure_copy "$CREDENTIALS_FILE" "$label_dir/credentials.json"
+  if ! secure_copy "$CREDENTIALS_FILE" "$label_dir/credentials.json"; then
+    # Do not leave a partial/stale credentials.json behind: on an OVERWRITE
+    # save, a failed cp can leave the PREVIOUS account's credentials (or a
+    # truncated file) sitting where the switch pre-flight looks for the NEW
+    # account's snapshot. Removing it here means a present-but-broken copy
+    # cannot masquerade as a healthy save.
+    rm -f "$label_dir/credentials.json"
+    echo "Error: failed to write $label_dir/credentials.json; account '$label' not saved." >&2
+    exit 1
+  fi
 
   if ! jq_write "$label_dir/oauthAccount.json" '.oauthAccount // {}' "$CLAUDE_JSON"; then
     # Do not leave a stale oauthAccount.json behind: on an OVERWRITE save,
@@ -430,8 +443,7 @@ cmd_list() {
   fi
 
   local label
-  # Unquoted $labels is safe and deliberate: validate_label restricts labels
-  # to [A-Za-z0-9_-], so no element can contain whitespace or a glob character.
+  # Unquoted $labels is safe: see saved_labels' GUARANTEE.
   for label in $labels; do
     if [[ -n "$live_uuid" ]] && [[ "$(saved_account_uuid "$label")" == "$live_uuid" ]]; then
       echo "* $label"
@@ -516,7 +528,21 @@ cmd_switch() {
     exit 1
   fi
 
-  install_credentials "$label_dir/credentials.json" "$CREDENTIALS_FILE"
+  # .claude.json is written AFTER this, below -- aborting here on failure
+  # leaves a consistent state (nothing live has changed identity yet).
+  if ! install_credentials "$label_dir/credentials.json" "$CREDENTIALS_FILE"; then
+    echo "Error: failed to write $CREDENTIALS_FILE; nothing else was changed." >&2
+    echo "$CLAUDE_JSON was not touched, so state is consistent." >&2
+    # $CREDENTIALS_FILE.bak only exists when there WAS a live credentials
+    # file to back up (see the guard above) -- on a machine with no prior
+    # live credentials, pointing at a .bak that was never created would
+    # send the user chasing a file that isn't there.
+    if [[ -f "$CREDENTIALS_FILE.bak" ]]; then
+      echo "Restore the previous credentials with:" >&2
+      echo "  cp $CREDENTIALS_FILE.bak $CREDENTIALS_FILE" >&2
+    fi
+    exit 1
+  fi
 
   local oauth_account_file="$label_dir/oauthAccount.json"
   if [[ -s "$oauth_account_file" ]]; then
@@ -1202,9 +1228,8 @@ cmd_usage() {
   # network round trip -- the usage GET -- can overlap, while token refreshes
   # stay strictly serial (see resolve_row_state for why that is not optional).
   #
-  # Unquoted $labels is safe and deliberate throughout: validate_label restricts
-  # labels to [A-Za-z0-9_-], so no element can contain whitespace or a glob
-  # character, and no element can escape the per-label file names below.
+  # Unquoted $labels is safe throughout (see saved_labels' GUARANTEE), and no
+  # element can escape the per-label file names below.
 
   # Phase 1 (serial): resolve each account's token, refreshing where needed.
   # Serial on purpose -- see resolve_row_state.

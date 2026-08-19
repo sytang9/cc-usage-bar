@@ -252,15 +252,6 @@ EOF
     fail "case7g reserved word 'list' not rejected by delete (exit=$EXIT_CODE): $OUT"
   fi
 
-  # --- Case 8: security -- no token ever appears in any captured output -----
-  local combined
-  combined="$(cat "$ALL_OUTPUT_LOG")"
-  if ! printf '%s' "$combined" | grep -q "$SECRET_A" && ! printf '%s' "$combined" | grep -q "$SECRET_B"; then
-    pass "case8 no secret token ever appears in captured output"
-  else
-    fail "case8 SECURITY LEAK: a secret token appeared in output"
-  fi
-
   # --- Case 9: bare `ccswitch` with zero args exercises the no-args branch --
   # (distinct from explicit `list`: this call passes NO subcommand at all)
   run_cc "$home_dir" ""
@@ -557,6 +548,78 @@ EOF
   fi
 
   rm -rf "$home18"
+
+  # --- Case 19: phantom-account regression -- a directory under accounts/
+  # that `ccswitch save` did NOT create (planted by hand, holding whitespace
+  # or a glob character) must not be enumerated by saved_labels. The
+  # pre-saved_labels loop (`for label_dir in "$ACCOUNTS_DIR"/*/`) was immune
+  # to both; unquoted consumption of saved_labels' output reopened them. ----
+  local home19 accounts_dir19
+  home19="$(make_sandbox)"
+  write_claude_json "$home19" "a@x.com" "OrgA" "uuid-a"
+  write_credentials "$home19" "REFRESH_A" "$SECRET_A"
+  accounts_dir19="$home19/.claude/accounts"
+
+  run_cc "$home19" "" save gooduser
+
+  # 19a: a directory name containing whitespace must not split into two
+  # phantom rows ("my" and "account"), and must not disturb the legit
+  # account's listing.
+  mkdir -p "$accounts_dir19/my account"
+  chmod 700 "$accounts_dir19/my account"
+  jq -n '{claudeAiOauth: {accessToken: "X", refreshToken: "Y", expiresAt: 1}}' \
+    >"$accounts_dir19/my account/credentials.json"
+  chmod 600 "$accounts_dir19/my account/credentials.json"
+
+  run_cc "$home19" "" list
+  if [[ "$EXIT_CODE" -eq 0 ]] \
+    && printf '%s' "$OUT" | grep -qx '\* gooduser' \
+    && [[ "$(printf '%s\n' "$OUT" | grep -c .)" -eq 1 ]]; then
+    pass "case19a list ignores a directory name containing whitespace (no phantom 'my'/'account' rows)"
+  else
+    fail "case19a whitespace directory name leaked as phantom account(s) (exit=$EXIT_CODE): $OUT"
+  fi
+
+  rm -rf "$accounts_dir19/my account"
+
+  # 19b: a directory name containing a glob character must not cause
+  # unquoted expansion to leak filenames from the CURRENT WORKING DIRECTORY.
+  mkdir -p "$accounts_dir19/zzz*"
+  chmod 700 "$accounts_dir19/zzz*"
+  jq -n '{claudeAiOauth: {accessToken: "X", refreshToken: "Y", expiresAt: 1}}' \
+    >"$accounts_dir19/zzz*/credentials.json"
+  chmod 600 "$accounts_dir19/zzz*/credentials.json"
+
+  local glob_cwd19 orig_pwd19
+  glob_cwd19="$(make_sandbox)"
+  touch "$glob_cwd19/zzz_should_not_leak.txt"
+  orig_pwd19="$(pwd)"
+  cd "$glob_cwd19" || exit 1
+  run_cc "$home19" "" list
+  cd "$orig_pwd19" || exit 1
+
+  if [[ "$EXIT_CODE" -eq 0 ]] \
+    && printf '%s' "$OUT" | grep -qx '\* gooduser' \
+    && ! printf '%s' "$OUT" | grep -q "zzz_should_not_leak" \
+    && [[ "$(printf '%s\n' "$OUT" | grep -c .)" -eq 1 ]]; then
+    pass "case19b list ignores a directory name containing a glob character (no CWD filename leak)"
+  else
+    fail "case19b glob-char directory name leaked CWD filenames (exit=$EXIT_CODE): $OUT"
+  fi
+
+  rm -rf "$glob_cwd19" "$home19"
+
+  # --- Case 8: security -- no token ever appears in any captured output -----
+  # Runs LAST, after every other case has had a chance to append to
+  # $ALL_OUTPUT_LOG: a scan positioned earlier in main() would silently miss
+  # any case registered after it.
+  local combined
+  combined="$(cat "$ALL_OUTPUT_LOG")"
+  if ! printf '%s' "$combined" | grep -q "$SECRET_A" && ! printf '%s' "$combined" | grep -q "$SECRET_B"; then
+    pass "case8 no secret token ever appears in captured output"
+  else
+    fail "case8 SECURITY LEAK: a secret token appeared in output"
+  fi
 
   rm -rf "$home_dir" "$ALL_OUTPUT_LOG"
 

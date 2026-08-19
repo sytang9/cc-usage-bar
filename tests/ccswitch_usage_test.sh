@@ -969,50 +969,6 @@ main() {
   }
 
   # =========================================================================
-  # Case 8 (security): none of the fake secret tokens ever appear in any
-  # captured output across the whole suite.
-  # =========================================================================
-  {
-    local combined leaked=0 secret
-    combined="$(cat "$ALL_OUTPUT_LOG")"
-    for secret in "${SECRET_TOKENS[@]}"; do
-      if printf '%s' "$combined" | grep -q "$secret"; then
-        leaked=1
-        echo "  leaked secret: $secret"
-      fi
-    done
-    if [[ "$leaked" -eq 0 ]]; then
-      pass "case8 no secret token ever appears in captured output"
-    else
-      fail "case8 SECURITY LEAK: a secret token appeared in output"
-    fi
-  }
-
-  # =========================================================================
-  # Case 9 (security): none of the fake secret tokens ever appear as a
-  # literal curl argv argument across the whole suite. This is the specific
-  # property fetch_usage_raw's --config file and refresh_token's -d @file
-  # exist to guarantee (argv is readable via /proc/<pid>/cmdline on a
-  # shared host; the config/body FILE contents are not argv and are not
-  # checked here -- only what curl was actually invoked with).
-  # =========================================================================
-  {
-    local combined_argv leaked=0 secret
-    combined_argv="$(cat "$ALL_ARGV_LOG")"
-    for secret in "${SECRET_TOKENS[@]}"; do
-      if printf '%s' "$combined_argv" | grep -q "$secret"; then
-        leaked=1
-        echo "  leaked secret in curl argv: $secret"
-      fi
-    done
-    if [[ "$leaked" -eq 0 ]]; then
-      pass "case9 no secret token ever appears in curl argv"
-    else
-      fail "case9 SECURITY LEAK: a secret token appeared in curl argv"
-    fi
-  }
-
-  # =========================================================================
   # Case 10: a 200 body with five_hour.resets_at = null (5h usage 0%) still
   # renders the row -- weekly is valid and must show -- rather than being
   # discarded. RESET(wk) column present; the 5h reset cell shows the em dash.
@@ -1292,6 +1248,53 @@ main() {
   case20_clock_skew_margin
   case21_parallel_usage_is_deterministic
   case22_refreshes_stay_serial
+
+  # =========================================================================
+  # Case 8 (security): none of the fake secret tokens ever appear in any
+  # captured output across the whole suite. Runs LAST, after every other
+  # case has had a chance to append to $ALL_OUTPUT_LOG: a scan positioned
+  # earlier in main() would silently miss any case registered after it.
+  # =========================================================================
+  {
+    local combined leaked=0 secret
+    combined="$(cat "$ALL_OUTPUT_LOG")"
+    for secret in "${SECRET_TOKENS[@]}"; do
+      if printf '%s' "$combined" | grep -q "$secret"; then
+        leaked=1
+        echo "  leaked secret: $secret"
+      fi
+    done
+    if [[ "$leaked" -eq 0 ]]; then
+      pass "case8 no secret token ever appears in captured output"
+    else
+      fail "case8 SECURITY LEAK: a secret token appeared in output"
+    fi
+  }
+
+  # =========================================================================
+  # Case 9 (security): none of the fake secret tokens ever appear as a
+  # literal curl argv argument across the whole suite. This is the specific
+  # property fetch_usage_raw's --config file and refresh_token's -d @file
+  # exist to guarantee (argv is readable via /proc/<pid>/cmdline on a
+  # shared host; the config/body FILE contents are not argv and are not
+  # checked here -- only what curl was actually invoked with). Runs LAST for
+  # the same reason as case8 above.
+  # =========================================================================
+  {
+    local combined_argv leaked=0 secret
+    combined_argv="$(cat "$ALL_ARGV_LOG")"
+    for secret in "${SECRET_TOKENS[@]}"; do
+      if printf '%s' "$combined_argv" | grep -q "$secret"; then
+        leaked=1
+        echo "  leaked secret in curl argv: $secret"
+      fi
+    done
+    if [[ "$leaked" -eq 0 ]]; then
+      pass "case9 no secret token ever appears in curl argv"
+    else
+      fail "case9 SECURITY LEAK: a secret token appeared in curl argv"
+    fi
+  }
 
   rm -rf "$STUB_BIN" "$ALL_OUTPUT_LOG" "$ALL_ARGV_LOG"
 
