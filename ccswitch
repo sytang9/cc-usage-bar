@@ -101,15 +101,21 @@ USAGE_CACHE_TTL_SECONDS=600
 USAGE_RATE_LIMIT_BACKOFF_SECONDS=120
 USAGE_METER_WIDTH=12
 
+# Max concurrent usage GETs. The GET endpoint (api.anthropic.com) is not the
+# rate-limited one -- that is the token endpoint, which is refreshed serially --
+# but firing 20 requests at once for a 20-account setup invites a 429 for no
+# latency gain worth having.
+USAGE_MAX_PARALLEL=4
+
 # Treat a token as expired this many seconds BEFORE its stated expiry. Without
 # a margin, a token with seconds left counts as valid, the usage GET 401s, and
 # the 401-retry path pays a second round trip to recover what one proactive
 # refresh would have handled.
 TOKEN_EXPIRY_SKEW_SECONDS=60
 
-# Set from cmd_usage's --refresh flag. Defaulted here because build_usage_row
+# Set from cmd_usage's --refresh flag. Defaulted here because fetch_row_usage
 # reads it and `set -u` turns an unset read into a hard exit -- a trap for any
-# future caller that reaches build_usage_row without going through cmd_usage.
+# future caller that reaches fetch_row_usage without going through cmd_usage.
 USAGE_BYPASS_CACHE=0
 
 RESERVED_WORDS=(save delete list usage help version refresh-pause refresh-resume)
@@ -989,10 +995,19 @@ usage_reset_cell() {
   usage_dim "$(printf '%s%*s' "$txt" "$pad" "")"
 }
 
-# build_usage_row <label> -> echoes "label|marker|state|five_pct|week_pct|reset_epoch".
-# state is one of: ok, dash, relogin. Never lets one account's failure abort
-# the loop -- every failure mode resolves to a row, not an exit.
-build_usage_row() {
+# --- usage row building: three phases -----------------------------------------
+# The per-account work is one independent HTTP GET, so it fans out (see
+# cmd_usage). Refreshing does NOT: it is serialized deliberately, and the split
+# below is what makes that separation enforceable.
+
+# resolve_row_state <label> -> "<state>|<marker>|<access>|<refresh>|<did_refresh>"
+# state is EMPTY when there is a usable access token; otherwise it is the
+# terminal row state (dash/wait/relogin) and the rest is meaningless.
+#
+# MUST be called serially. It may call attempt_refresh, and the 429 backoff is
+# a single shared file: concurrent callers would each read it before any of
+# them wrote it, which is exactly the re-login storm deb49e6 fixed.
+resolve_row_state() {
   local label="$1"
   local marker="  " active=0
   if is_active_account "$label"; then marker="* "; active=1; fi
@@ -1001,18 +1016,19 @@ build_usage_row() {
   IFS='|' read -r access exp refresh <<<"$(resolve_account_credentials "$label")"
 
   if [[ -z "$access" ]] && [[ -z "$refresh" ]]; then
-    echo "${label}|${marker}|dash||||"
+    echo "dash|${marker}|||0"
     return 0
   fi
 
-  # NEVER refresh the ACTIVE account. Its tokens live in $CREDENTIALS_FILE and are
-  # owned by the running Claude Code, which rotates them there itself. If ccswitch
-  # refreshed it, attempt_refresh would write the rotated token only to the snapshot
-  # and leave the live file holding a now-invalidated refresh token -> Claude Code's
-  # next refresh fails and the logged-in account "expires" (a regression the
-  # live->snapshot mirror made reachable, since the mirrored snapshot token is valid
-  # enough to rotate). So for the active account we only READ its live access token;
-  # a missing/expired one just shows a state and Claude Code refreshes it.
+  # NEVER refresh the ACTIVE account. Its tokens live in $CREDENTIALS_FILE and
+  # are owned by the running Claude Code, which rotates them there itself. If
+  # ccswitch refreshed it, attempt_refresh would write the rotated token only to
+  # the snapshot and leave the live file holding an invalidated refresh token ->
+  # Claude Code's next refresh fails and the logged-in account "expires" (a
+  # regression the live->snapshot mirror made reachable, since the mirrored
+  # snapshot token is valid enough to rotate). So for the active account we only
+  # READ its live access token; a missing/expired one just shows a state and
+  # Claude Code refreshes it.
   local did_refresh=0
   if [[ "$active" != "1" ]] && { [[ -z "$access" ]] || is_token_expired "$exp"; }; then
     local refreshed rc
@@ -1021,27 +1037,49 @@ build_usage_row() {
       access="$refreshed"
       did_refresh=1
     elif [[ "$rc" == "2" ]]; then
-      echo "${label}|${marker}|wait||||"   # rate-limited: transient, not dead
+      echo "wait|${marker}|||0"   # rate-limited: transient, not dead
       return 0
     else
-      echo "${label}|${marker}|relogin||||"
+      echo "relogin|${marker}|||0"
       return 0
     fi
   fi
 
   if [[ -z "$access" ]]; then
-    echo "${label}|${marker}|dash||||"
+    echo "dash|${marker}|||0"
     return 0
   fi
 
-  local p5 p7 p5reset p7reset httpstatus
-  IFS='|' read -r p5 p7 p5reset p7reset httpstatus <<<"$(fetch_and_cache_usage "$label" "$access" "$USAGE_BYPASS_CACHE")"
+  echo "|${marker}|${access}|${refresh}|${did_refresh}"
+}
 
-  # Auth failure on a token we did NOT already refresh: the access token was
-  # rejected (e.g. revoked or rotated by a real Claude Code session) even
-  # though it had not time-expired, so is_token_expired never triggered a
-  # refresh above. Refresh once and retry the fetch. If the refresh itself
-  # fails, the account genuinely needs a re-login.
+# fetch_row_usage <label> <access_token> -> the 5-field string
+# fetch_and_cache_usage returns. Pure GET plus a per-account cache write; no
+# shared state, so this is the part that fans out.
+fetch_row_usage() {
+  fetch_and_cache_usage "$1" "$2" "$USAGE_BYPASS_CACHE"
+}
+
+# finish_row <label> <marker> <access> <refresh> <did_refresh> <fetch_result>
+# -> "label|marker|state|p5|p7|p5reset|p7reset". state is one of: ok, dash,
+# wait, relogin. Never lets one account's failure abort the loop -- every
+# failure mode resolves to a row, not an exit.
+#
+# Called serially, because the 401/403 path refreshes (see resolve_row_state).
+# That path is rare: it only fires when a token was rejected without having
+# time-expired -- revoked, or rotated by a real Claude Code session -- so
+# is_token_expired never triggered a refresh in phase 1.
+finish_row() {
+  local label="$1" marker="$2" access="$3" refresh="$4" did_refresh="$5" fetch_result="$6"
+  local active=0
+  is_active_account "$label" && active=1
+
+  local p5 p7 p5reset p7reset httpstatus
+  IFS='|' read -r p5 p7 p5reset p7reset httpstatus <<<"$fetch_result"
+
+  # Auth failure on a token we did NOT already refresh: refresh once and retry
+  # the fetch. If the refresh itself fails, the account genuinely needs a
+  # re-login.
   if [[ "$active" != "1" ]] && [[ -z "$p5" ]] && [[ "$did_refresh" == "0" ]] \
     && { [[ "$httpstatus" == "401" ]] || [[ "$httpstatus" == "403" ]]; } \
     && [[ -n "$refresh" ]]; then
@@ -1160,11 +1198,72 @@ cmd_usage() {
   # Claude Code's back.
   mirror_live_to_snapshot
 
-  local rows="" headroom_lookup="" label row
-  # Unquoted $labels is safe and deliberate: validate_label restricts labels
-  # to [A-Za-z0-9_-], so no element can contain whitespace or a glob character.
+  # Row building runs in three phases so the one part that is a per-account
+  # network round trip -- the usage GET -- can overlap, while token refreshes
+  # stay strictly serial (see resolve_row_state for why that is not optional).
+  #
+  # Unquoted $labels is safe and deliberate throughout: validate_label restricts
+  # labels to [A-Za-z0-9_-], so no element can contain whitespace or a glob
+  # character, and no element can escape the per-label file names below.
+
+  # Phase 1 (serial): resolve each account's token, refreshing where needed.
+  # Serial on purpose -- see resolve_row_state.
+  local resolve_dir="$CCSWITCH_TMPDIR/resolve"
+  mkdir -p "$resolve_dir" && chmod 700 "$resolve_dir"
+  local label
   for label in $labels; do
-    row="$(build_usage_row "$label")"
+    # Each line carries that account's access AND refresh token, so the file is
+    # created 600 BEFORE anything is written into it -- the same rule
+    # fetch_usage_raw's curl config file follows. $CCSWITCH_TMPDIR is already
+    # 700; this is the second lock, not the only one.
+    : >"$resolve_dir/$label"
+    chmod 600 "$resolve_dir/$label"
+    resolve_row_state "$label" >"$resolve_dir/$label"
+  done
+
+  # Phase 2 (parallel, capped): the usage GET for every account that has a
+  # token. This is the per-account round trip, and it touches nothing shared.
+  # Each job writes its own file -- never stdout, which is the rendered table.
+  # (Background jobs are subshells, so they do NOT inherit the EXIT trap and
+  # cannot delete $CCSWITCH_TMPDIR out from under the run.)
+  local fetch_dir="$CCSWITCH_TMPDIR/fetch"
+  mkdir -p "$fetch_dir" && chmod 700 "$fetch_dir"
+  local inflight=0 state marker access refresh did_refresh
+  for label in $labels; do
+    # Clear FIRST, every iteration. If the redirect below ever fails (a missing
+    # phase-1 file -- only reachable if phase 1 could not write it at all),
+    # `read` never runs, and without the reset these would silently keep the
+    # PREVIOUS label's values: one account's token fetching, and caching,
+    # another account's usage.
+    state=""; marker=""; access=""; refresh=""; did_refresh=""
+    IFS='|' read -r state marker access refresh did_refresh <"$resolve_dir/$label"
+    # A terminal state needs no GET. The empty-token guard is belt-and-braces:
+    # resolve_row_state never emits an empty state with no token, so this only
+    # fires if its file could not be written at all -- and a GET with an empty
+    # bearer is never worth sending.
+    { [[ -n "$state" ]] || [[ -z "$access" ]]; } && continue
+    fetch_row_usage "$label" "$access" >"$fetch_dir/$label" &
+    inflight=$((inflight + 1))
+    if [[ "$inflight" -ge "$USAGE_MAX_PARALLEL" ]]; then
+      wait
+      inflight=0
+    fi
+  done
+  wait
+
+  # Phase 3 (serial): assemble rows in label order, running the rare 401/403
+  # refresh-and-retry. Order is the sorted label order saved_labels produces, so
+  # output does not depend on which fetch finished first.
+  local rows="" headroom_lookup="" row fetch_result
+  for label in $labels; do
+    state=""; marker=""; access=""; refresh=""; did_refresh=""   # see phase 2
+    IFS='|' read -r state marker access refresh did_refresh <"$resolve_dir/$label"
+    if [[ -n "$state" ]]; then
+      row="${label}|${marker}|${state}||||"
+    else
+      fetch_result="$(cat "$fetch_dir/$label" 2>/dev/null)"
+      row="$(finish_row "$label" "$marker" "$access" "$refresh" "$did_refresh" "$fetch_result")"
+    fi
     rows+="${row}"$'\n'
     headroom_lookup+="$(echo "$row" | awk -F'|' '{print $1"|"$3"|"$4"|"$5}')"$'\n'
   done

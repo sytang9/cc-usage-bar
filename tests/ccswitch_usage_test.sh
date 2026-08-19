@@ -47,6 +47,9 @@ SECRET_TOKENS=(
   REFRESH_SIGNAL_SECRET TOK_OLD
   REFRESH_NODE TOK_NODE_OLD
   REFRESH_SKEW TOK_SKEW_OLD TOK_SKEW_NEW REFRESH_SKEW_ROT
+  REFRESH_P1 REFRESH_P2 REFRESH_P3 REFRESH_P4 REFRESH_P5 REFRESH_P6
+  TOK_P1 TOK_P2 TOK_P3 TOK_P4 TOK_P5 TOK_P6
+  REFRESH_S1 REFRESH_S2 TOK_S1_OLD TOK_S2_OLD
 )
 
 pass() {
@@ -572,6 +575,80 @@ case20_clock_skew_margin() {
     pass "case20 a token expiring inside the skew window is refreshed before use"
   else
     fail "case20 no proactive refresh (exit=$EXIT_CODE tok=$tokcount): $OUT"
+  fi
+
+  rm -rf "$home" "$ctl"
+}
+
+
+# --- Case 21: many accounts poll concurrently, output stays deterministic ---
+# The usage GET is the per-account round trip, so it fans out. Refreshes must
+# NOT: the 429 backoff is a single shared file, and concurrent refreshers would
+# each check it before any set it -- the re-login storm deb49e6 fixed. Assert
+# the row order is stable (sorted by label, as the serial version produced) and
+# that every account got exactly one usage call.
+case21_parallel_usage_is_deterministic() {
+  local home ctl i run1 run2 usagecount
+  home="$(new_home)"
+  ctl="$(new_ctl)"
+
+  write_claude_json "$home" "UUID_LIVE"
+  write_live_credentials "$home" "REFRESH_LIVE" "TOK_LIVE" "$(future_ms)"
+
+  # Six healthy non-active accounts -> six parallel GETs, zero refreshes.
+  for i in 1 2 3 4 5 6; do
+    write_account_credentials "$home" "acct_p$i" "REFRESH_P$i" "TOK_P$i" "$(future_ms)"
+    write_account_oauth "$home" "acct_p$i" "UUID_P$i"
+    set_usage_response "$ctl" "TOK_P$i" 200 "$(usage_body "$i" "$((i * 2))")"
+  done
+
+  run_cc "$home" "$ctl" "" --no-switch --refresh
+  run1="$(printf '%s' "$OUT" | sed 's/\x1b\[[0-9;]*m//g' | grep -o 'acct_p[0-9]' | tr '\n' ' ')"
+  usagecount="$(usage_call_count "$ctl")"
+
+  run_cc "$home" "$ctl" "" --no-switch --refresh
+  run2="$(printf '%s' "$OUT" | sed 's/\x1b\[[0-9;]*m//g' | grep -o 'acct_p[0-9]' | tr '\n' ' ')"
+
+  if [[ "$EXIT_CODE" -eq 0 ]] \
+    && [[ "$run1" == "acct_p1 acct_p2 acct_p3 acct_p4 acct_p5 acct_p6 " ]] \
+    && [[ "$run1" == "$run2" ]] \
+    && [[ "${usagecount//[[:space:]]/}" == "6" ]] \
+    && [[ "$(token_call_count "$ctl" | tr -d '[:space:]')" == "0" ]]; then
+    pass "case21 six accounts poll concurrently: stable sorted order, one GET each, no refreshes"
+  else
+    fail "case21 parallel polling wrong (exit=$EXIT_CODE run1='$run1' run2='$run2' usage=$usagecount): $OUT"
+  fi
+
+  rm -rf "$home" "$ctl"
+}
+
+# --- Case 22: refreshes stay serial even when every account needs one -------
+# Two expired accounts and a token endpoint that 429s: the FIRST refresh must
+# set the shared backoff and the second must not call the endpoint at all. If
+# refreshes ever go parallel this drops to two calls and the storm is back.
+case22_refreshes_stay_serial() {
+  local home ctl tokcount
+  home="$(new_home)"
+  ctl="$(new_ctl)"
+
+  write_claude_json "$home" "UUID_LIVE"
+  write_live_credentials "$home" "REFRESH_LIVE" "TOK_LIVE" "$(future_ms)"
+  write_account_credentials "$home" "acct_s1" "REFRESH_S1" "TOK_S1_OLD" 1
+  write_account_oauth "$home" "acct_s1" "UUID_S1"
+  write_account_credentials "$home" "acct_s2" "REFRESH_S2" "TOK_S2_OLD" 1
+  write_account_oauth "$home" "acct_s2" "UUID_S2"
+  set_token_response "$ctl" "REFRESH_S1" 429 '{"error":"rate_limited"}'
+  set_token_response "$ctl" "REFRESH_S2" 429 '{"error":"rate_limited"}'
+
+  run_cc "$home" "$ctl" "" --no-switch --refresh
+  tokcount="$(token_call_count "$ctl")"
+
+  if [[ "$EXIT_CODE" -eq 0 ]] \
+    && [[ "${tokcount//[[:space:]]/}" == "1" ]] \
+    && [[ "$(printf '%s' "$OUT" | grep -c 'rate-limited')" -eq 2 ]]; then
+    pass "case22 a 429 on the first refresh stops the second (backoff still honored)"
+  else
+    fail "case22 refresh storm regression (exit=$EXIT_CODE tok=$tokcount): $OUT"
   fi
 
   rm -rf "$home" "$ctl"
@@ -1213,6 +1290,8 @@ main() {
   case18_no_secret_left_after_signal
   case19_old_node_is_diagnosed
   case20_clock_skew_margin
+  case21_parallel_usage_is_deterministic
+  case22_refreshes_stay_serial
 
   rm -rf "$STUB_BIN" "$ALL_OUTPUT_LOG" "$ALL_ARGV_LOG"
 
