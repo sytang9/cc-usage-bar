@@ -183,6 +183,20 @@ committed by anything here. Saved accounts live under `~/.claude/accounts/`
 with the directory at mode `700` and every credential file inside it at mode
 `600`.
 
+## Development
+
+Run every test suite:
+
+```
+bash tests/run_all.sh
+```
+
+Four self-contained bash suites (statusline, ccswitch, ccswitch usage,
+installer). No test framework, no network: each suite sandboxes `HOME` under
+`mktemp -d` and the usage suite answers HTTP from a stub `curl` on `PATH`, so
+nothing ever touches your real `~/.claude` or Anthropic's API. CI runs the same
+command on every push and pull request.
+
 ## License
 
 MIT — see [LICENSE](LICENSE).
