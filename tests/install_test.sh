@@ -215,6 +215,36 @@ main() {
 
   rm -rf "$home7"
 
+  # --- Case 10: re-running the installer must not destroy the FIRST backup ---
+  # The backup exists to answer "what did my settings.json look like before
+  # cc-usage-bar?". Copying unconditionally meant run 2 overwrote it with the
+  # post-install file, so the original statusLine was gone for good.
+  local home10 settings10 backup10
+  home10="$(make_sandbox)"
+  mkdir -p "$home10/.claude"
+  settings10="$home10/.claude/settings.json"
+  backup10="$home10/.claude/settings.json.bak"
+  jq -n '{statusLine: {type: "command", command: "/my/previous/bar.sh"}, theme: "dark"}' >"$settings10"
+
+  run_install "$home10" "n"
+  run_install "$home10" "n"
+
+  local bak_command10 live_command10 bak_theme10
+  bak_command10="$(jq -r '.statusLine.command // empty' "$backup10" 2>/dev/null)"
+  live_command10="$(jq -r '.statusLine.command // empty' "$settings10" 2>/dev/null)"
+  bak_theme10="$(jq -r '.theme // empty' "$backup10" 2>/dev/null)"
+
+  if [[ "$EXIT_CODE" -eq 0 ]] \
+    && [[ "$bak_command10" == "/my/previous/bar.sh" ]] \
+    && [[ "$bak_theme10" == "dark" ]] \
+    && [[ "$live_command10" == "~/.claude/statusline-usage.sh" ]]; then
+    pass "case10 re-running the installer preserves the pre-install settings.json backup"
+  else
+    fail "case10 backup clobbered on re-run (bak_command=$bak_command10 live_command=$live_command10): $OUT"
+  fi
+
+  rm -rf "$home10"
+
   echo
   echo "----------------------------------------"
   echo "Passed: $PASS_COUNT  Failed: $FAIL_COUNT"
