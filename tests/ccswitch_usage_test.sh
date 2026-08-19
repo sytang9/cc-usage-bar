@@ -276,16 +276,22 @@ file_mode() {
 }
 
 # --- Case 17: the call counters themselves are trustworthy -------------------
-# Both "we did NOT call the endpoint" assertions in this suite (case15, case16)
-# read $ctl/calls/token_count. If the stub never creates that file, `wc -l`
-# fails, `|| echo 0` rescues it, and those cases pass whether or not the
-# mechanism works at all. Assert the counters are readable at zero AND that a
-# real call increments them -- if this case fails, the never-refresh guarantees
-# in case15/case16 are not actually being checked.
+# Assert that counter files are created up front and that a real call increments
+# them correctly. This guards against two classes of regression:
+# 1. If new_ctl stops creating the counter files, those files won't exist.
+# 2. If the accessor functions (usage_call_count / token_call_count) gain a
+#    fallback (e.g., `|| echo 0`), a missing file would be silently masked, and
+#    case15/case16 would pass even if their "never-refresh" guarantees are broken.
+# Both the file-existence check AND the value checks must pass for case17 to pass.
 case17_counters_are_trustworthy() {
   local home ctl before_usage before_token after_usage
   home="$(new_home)"
   ctl="$(new_ctl)"
+
+  # Assert that both counter files exist on disk (independent of accessor functions).
+  local files_exist=1
+  [[ -f "$ctl/calls/usage_count" ]] || files_exist=0
+  [[ -f "$ctl/calls/token_count" ]] || files_exist=0
 
   before_usage="$(usage_call_count "$ctl" 2>/dev/null)"
   before_token="$(token_call_count "$ctl" 2>/dev/null)"
@@ -300,12 +306,13 @@ case17_counters_are_trustworthy() {
 
   after_usage="$(usage_call_count "$ctl" 2>/dev/null)"
 
-  if [[ "${before_usage//[[:space:]]/}" == "0" ]] \
+  if [[ "$files_exist" -eq 1 ]] \
+    && [[ "${before_usage//[[:space:]]/}" == "0" ]] \
     && [[ "${before_token//[[:space:]]/}" == "0" ]] \
     && [[ "${after_usage//[[:space:]]/}" == "1" ]]; then
     pass "case17 call counters read 0 before any call and increment on a real one"
   else
-    fail "case17 counters untrustworthy (before_usage=$before_usage before_token=$before_token after_usage=$after_usage)"
+    fail "case17 counters untrustworthy (files_exist=$files_exist before_usage=$before_usage before_token=$before_token after_usage=$after_usage)"
   fi
 
   rm -rf "$home" "$ctl"
