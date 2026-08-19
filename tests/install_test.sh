@@ -245,6 +245,57 @@ main() {
 
   rm -rf "$home10"
 
+  # --- Case 11: uninstall reverses the install and spares the accounts ------
+  local home11
+  home11="$(make_sandbox)"
+  mkdir -p "$home11/.claude"
+  jq -n '{theme: "dark"}' >"$home11/.claude/settings.json"
+
+  run_install "$home11" "y"
+
+  # Enrolled account + a live credential file the uninstaller must not touch.
+  mkdir -p "$home11/.claude/accounts/work"
+  chmod 700 "$home11/.claude/accounts/work"
+  jq -n '{claudeAiOauth: {accessToken: "KEEP_ME", refreshToken: "KEEP_ME_TOO"}}' \
+    >"$home11/.claude/accounts/work/credentials.json"
+
+  OUT="$(HOME="$home11" SHELL=/bin/bash bash "$REPO_DIR/uninstall.sh" <<<"" 2>&1)"
+  EXIT_CODE=$?
+
+  local statusline_key11 theme11
+  statusline_key11="$(jq -r 'has("statusLine")' "$home11/.claude/settings.json" 2>/dev/null)"
+  theme11="$(jq -r '.theme // empty' "$home11/.claude/settings.json" 2>/dev/null)"
+
+  if [[ "$EXIT_CODE" -eq 0 ]] \
+    && [[ ! -e "$home11/.claude/statusline-usage.sh" ]] \
+    && [[ ! -e "$home11/.claude/ccswitch" ]] \
+    && [[ ! -e "$home11/.local/bin/ccswitch" ]] \
+    && [[ "$statusline_key11" == "false" ]] \
+    && [[ "$theme11" == "dark" ]] \
+    && [[ -f "$home11/.claude/accounts/work/credentials.json" ]] \
+    && [[ "$(jq -r '.claudeAiOauth.accessToken' "$home11/.claude/accounts/work/credentials.json")" == "KEEP_ME" ]]; then
+    pass "case11 uninstall removes scripts/symlink/statusLine, keeps other settings and all saved accounts"
+  else
+    fail "case11 uninstall wrong (exit=$EXIT_CODE statusLine=$statusline_key11 theme=$theme11): $OUT"
+  fi
+
+  # The accounts dir is the one thing that needs an explicit opt-in.
+  if printf '%s' "$OUT" | grep -q 'accounts'; then
+    pass "case11b uninstall tells the user their saved accounts were left in place"
+  else
+    fail "case11b uninstall silent about saved accounts: $OUT"
+  fi
+
+  OUT="$(HOME="$home11" SHELL=/bin/bash bash "$REPO_DIR/uninstall.sh" --purge-accounts <<<"y" 2>&1)"
+  EXIT_CODE=$?
+  if [[ "$EXIT_CODE" -eq 0 ]] && [[ ! -d "$home11/.claude/accounts" ]]; then
+    pass "case11c --purge-accounts removes saved accounts after confirmation"
+  else
+    fail "case11c --purge-accounts did not remove accounts (exit=$EXIT_CODE): $OUT"
+  fi
+
+  rm -rf "$home11"
+
   echo
   echo "----------------------------------------"
   echo "Passed: $PASS_COUNT  Failed: $FAIL_COUNT"

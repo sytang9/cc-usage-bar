@@ -207,6 +207,8 @@ main() {
   print_snippets
   echo
 
+  echo "To undo all of this later: ./uninstall.sh"
+
   offer_ccw_function
 }
 
