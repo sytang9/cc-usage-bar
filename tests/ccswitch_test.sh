@@ -489,6 +489,45 @@ EOF
 
   rm -rf "$home16"
 
+  # --- Case 17: dotfiles beside the accounts are not accounts ---------------
+  # The emptiness check used `ls -A`, which counts the dot-files ccswitch keeps
+  # in the accounts dir (.no-refresh, .refresh-backoff), while the loop globbed
+  # */ with no nullglob and no -d guard -- so an unmatched glob reached
+  # basename and printed a phantom account literally named '*'.
+  local home17
+  home17="$(make_sandbox)"
+  write_claude_json "$home17" "a@x.com" "OrgA" "uuid-a"
+  write_credentials "$home17" "REFRESH_A" "$SECRET_A"
+
+  run_cc "$home17" "" refresh-pause
+  run_cc "$home17" "" list
+
+  if [[ "$EXIT_CODE" -eq 0 ]] \
+    && printf '%s' "$OUT" | grep -q "no saved accounts" \
+    && ! printf '%s' "$OUT" | grep -q '\*'; then
+    pass "case17 list ignores dot-files in the accounts dir (no phantom '*' account)"
+  else
+    fail "case17 phantom account from dot-file (exit=$EXIT_CODE): $OUT"
+  fi
+
+  # A stray regular file must not become an account either (.DS_Store on macOS).
+  : >"$home17/.claude/accounts/.DS_Store"
+  run_cc "$home17" "" save real
+  run_cc "$home17" "" list
+
+  local label_lines17
+  label_lines17="$(printf '%s\n' "$OUT" | grep -c 'real$')"
+  if [[ "$EXIT_CODE" -eq 0 ]] \
+    && [[ "$label_lines17" -eq 1 ]] \
+    && ! printf '%s' "$OUT" | grep -q 'DS_Store' \
+    && [[ "$(printf '%s\n' "$OUT" | grep -c .)" -eq 1 ]]; then
+    pass "case17b list shows exactly the one real account beside a stray file"
+  else
+    fail "case17b stray file leaked into list (exit=$EXIT_CODE): $OUT"
+  fi
+
+  rm -rf "$home17"
+
   rm -rf "$home_dir" "$ALL_OUTPUT_LOG"
 
   echo

@@ -95,6 +95,11 @@ USAGE_CACHE_TTL_SECONDS=600
 USAGE_RATE_LIMIT_BACKOFF_SECONDS=120
 USAGE_METER_WIDTH=12
 
+# Set from cmd_usage's --refresh flag. Defaulted here because build_usage_row
+# reads it and `set -u` turns an unset read into a hard exit -- a trap for any
+# future caller that reaches build_usage_row without going through cmd_usage.
+USAGE_BYPASS_CACHE=0
+
 RESERVED_WORDS=(save delete list usage help refresh-pause refresh-resume)
 # Whitelist charset for labels. Deliberately strict: this is what stands
 # between a label and a raw filesystem path ($ACCOUNTS_DIR/$label), so it
@@ -297,6 +302,23 @@ saved_account_uuid() {
   jq -r '.accountUuid // empty' "$ACCOUNTS_DIR/$label/oauthAccount.json" 2>/dev/null
 }
 
+# saved_labels: print one label per line for every saved account, nothing at
+# all when there are none.
+#
+# This is the ONLY sanctioned way to enumerate accounts. Two traps it closes:
+# emptiness cannot be tested with `ls -A`, because ccswitch keeps its own
+# dot-files (.no-refresh, .refresh-backoff) beside the account directories; and
+# an unmatched `*/` glob is not empty in bash -- without a -d guard the literal
+# pattern reaches basename and renders as an account named '*'.
+saved_labels() {
+  local label_dir
+  [[ -d "$ACCOUNTS_DIR" ]] || return 0
+  for label_dir in "$ACCOUNTS_DIR"/*/; do
+    [[ -d "$label_dir" ]] || continue
+    basename "$label_dir"
+  done
+}
+
 # mirror_live_to_snapshot: keep the ACTIVE account's saved snapshot in sync with
 # the live credential file. Claude Code rotates the active account's refresh
 # token inside $CREDENTIALS_FILE on its own schedule (single-use rotation),
@@ -315,15 +337,16 @@ mirror_live_to_snapshot() {
   local live_uuid
   live_uuid="$(live_account_uuid)"
   [[ -n "$live_uuid" ]] || return 0
-  local label_dir label
-  for label_dir in "$ACCOUNTS_DIR"/*/; do
-    [[ -d "$label_dir" ]] || continue
-    label="$(basename "$label_dir")"
+  local label
+  # Unquoted $(saved_labels) is safe and deliberate: validate_label restricts
+  # labels to [A-Za-z0-9_-], so no element can contain whitespace or a glob
+  # character.
+  for label in $(saved_labels); do
     if [[ "$(saved_account_uuid "$label")" == "$live_uuid" ]]; then
       # `return 0` is unconditional here (not `secure_copy`'s status) --
       # already true before secure_copy started propagating cp failures, so
       # that change does not alter what this function returns.
-      secure_copy "$CREDENTIALS_FILE" "$label_dir/credentials.json"
+      secure_copy "$CREDENTIALS_FILE" "$ACCOUNTS_DIR/$label/credentials.json"
       return 0
     fi
   done
@@ -376,7 +399,9 @@ cmd_save() {
 }
 
 cmd_list() {
-  if [[ ! -d "$ACCOUNTS_DIR" ]] || [[ -z "$(ls -A "$ACCOUNTS_DIR" 2>/dev/null)" ]]; then
+  local labels
+  labels="$(saved_labels)"
+  if [[ -z "$labels" ]]; then
     echo "no saved accounts -- run: ccswitch save <label>"
     return 0
   fi
@@ -386,9 +411,10 @@ cmd_list() {
     live_uuid="$(live_account_uuid)"
   fi
 
-  local label_dir label
-  for label_dir in "$ACCOUNTS_DIR"/*/; do
-    label="$(basename "$label_dir")"
+  local label
+  # Unquoted $labels is safe and deliberate: validate_label restricts labels
+  # to [A-Za-z0-9_-], so no element can contain whitespace or a glob character.
+  for label in $labels; do
     if [[ -n "$live_uuid" ]] && [[ "$(saved_account_uuid "$label")" == "$live_uuid" ]]; then
       echo "* $label"
     else
@@ -1083,7 +1109,9 @@ cmd_usage() {
   done
   USAGE_BYPASS_CACHE="$bypass_cache"
 
-  if [[ ! -d "$ACCOUNTS_DIR" ]] || [[ -z "$(ls -A "$ACCOUNTS_DIR" 2>/dev/null)" ]]; then
+  local labels
+  labels="$(saved_labels)"
+  if [[ -z "$labels" ]]; then
     echo "no saved accounts -- run: ccswitch save <label>"
     return 0
   fi
@@ -1093,9 +1121,10 @@ cmd_usage() {
   # Claude Code's back.
   mirror_live_to_snapshot
 
-  local rows="" headroom_lookup="" label_dir label row
-  for label_dir in "$ACCOUNTS_DIR"/*/; do
-    label="$(basename "$label_dir")"
+  local rows="" headroom_lookup="" label row
+  # Unquoted $labels is safe and deliberate: validate_label restricts labels
+  # to [A-Za-z0-9_-], so no element can contain whitespace or a glob character.
+  for label in $labels; do
     row="$(build_usage_row "$label")"
     rows+="${row}"$'\n'
     headroom_lookup+="$(echo "$row" | awk -F'|' '{print $1"|"$3"|"$4"|"$5}')"$'\n'
