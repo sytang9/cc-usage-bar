@@ -3,9 +3,9 @@
 # $HOME/.claude, wires up the statusLine entry in $HOME/.claude/settings.json,
 # and optionally adds a `ccw` shell shortcut.
 #
-# Safe to re-run: every step is idempotent. settings.json is backed up before
-# it is ever touched; the ccw shell function is only appended once (grep
-# guard). Nothing here requires network access.
+# Safe to re-run: every step is idempotent. settings.json is backed up once on
+# the first run that finds an existing file (never overwritten); the ccw shell
+# function is only appended once (grep guard). Nothing here requires network access.
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -100,8 +100,17 @@ configure_settings() {
   mkdir -p "$CLAUDE_DIR"
 
   if [[ ! -f "$SETTINGS_FILE" ]]; then
-    echo "$SETTINGS_SNIPPET" | jq . >"$SETTINGS_FILE"
-    echo "Created $SETTINGS_FILE with the statusLine entry"
+    local tmp
+    tmp="$(mktemp "$CLAUDE_DIR/.cc-usage-bar-settings.XXXXXX")"
+    if echo "$SETTINGS_SNIPPET" | jq . >"$tmp" 2>/dev/null \
+      && [[ -s "$tmp" ]]; then
+      mv "$tmp" "$SETTINGS_FILE"
+      echo "Created $SETTINGS_FILE with the statusLine entry"
+    else
+      rm -f "$tmp"
+      echo "Error: failed to create $SETTINGS_FILE." >&2
+      exit 1
+    fi
     return 0
   fi
 
@@ -119,7 +128,10 @@ configure_settings() {
   if [[ -e "$SETTINGS_FILE.bak" ]]; then
     echo "Keeping existing $SETTINGS_FILE.bak (your pre-cc-usage-bar settings)"
   else
-    cp "$SETTINGS_FILE" "$SETTINGS_FILE.bak"
+    if ! cp "$SETTINGS_FILE" "$SETTINGS_FILE.bak"; then
+      echo "Error: failed to back up $SETTINGS_FILE to $SETTINGS_FILE.bak." >&2
+      exit 1
+    fi
     echo "Backed up existing settings.json to $SETTINGS_FILE.bak"
   fi
 
