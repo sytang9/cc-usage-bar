@@ -44,7 +44,7 @@ SECRET_TOKENS=(
   REFRESH_M_NEW REFRESH_M_OLD TOK_M
   TOK_ACT TOK_ACT_OLD REFRESH_ACT_LIVE REFRESH_ACT_SNAP TOK_NEW_L REFRESH_ROT_L TOK_NEW_S REFRESH_ROT_S
   TOK_CNT REFRESH_CNT
-  REFRESH_SIGNAL_SECRET
+  REFRESH_SIGNAL_SECRET TOK_OLD
 )
 
 pass() {
@@ -276,6 +276,32 @@ file_mode() {
   stat -c '%a' "$1" 2>/dev/null
 }
 
+# wait_for_refresh_body <dir> -> echoes 1 if a refresh-body temp file appears
+# under <dir> within the poll budget, 0 otherwise. Polls via `compgen -G`, a
+# shell builtin (no fork per iteration), so the full cap is both fast AND
+# generous: measured, the file normally appears within ~1000 iterations
+# (~30ms); the 200000 cap gives ~200x headroom for a loaded/cold-cache CI box
+# while still bounding the worst case (file never appears, e.g. a regression)
+# to under two seconds -- contrast an equivalent loop around `find`, which
+# forks a process every iteration and at this same iteration count could take
+# minutes.
+# Two patterns: the pre-fix layout wrote directly under $TMPDIR
+# (ccswitch-refresh-body.*); the fixed layout nests it one level inside the
+# process-scoped scratch dir (*/refresh-body.*). Checking both means this
+# poll works whether or not the fix is in place yet.
+wait_for_refresh_body() {
+  local dir="$1" n=0 found=0
+  while [[ "$n" -lt 200000 ]]; do
+    if compgen -G "$dir"/ccswitch-refresh-body.* >/dev/null \
+      || compgen -G "$dir"/*/refresh-body.* >/dev/null; then
+      found=1
+      break
+    fi
+    n=$((n + 1))
+  done
+  echo "$found"
+}
+
 # --- Case 17: the call counters themselves are trustworthy -------------------
 # Assert that counter files are created up front and that a real call increments
 # them correctly. This guards against two classes of regression:
@@ -324,15 +350,40 @@ case17_counters_are_trustworthy() {
 # so the secret stays out of argv, then deletes it after the call returns. With
 # no trap, a Ctrl-C or SIGTERM during the network call -- likely, since `usage`
 # polls every account over the network -- left that file in $TMPDIR forever.
-case18_no_secret_left_after_signal() {
-  local home ctl tmphome slow leftovers n pid found
+#
+# Two distinct signal-delivery paths, both asserted below:
+#
+#   case18a (primary, faithful Ctrl-C simulation): a real Ctrl-C delivers
+#   SIGINT to the entire foreground PROCESS GROUP, not just the shell -- so
+#   the hung network-call child dies in the same instant as ccswitch itself.
+#   This is the scenario the fix exists for. `set -m` job control is enabled
+#   just long enough to background ccswitch as its own process-group leader
+#   (macOS has no `setsid`, so this is the portable way to get a group of our
+#   own), then `kill -TERM -"$pid"` (a NEGATIVE pid = the whole process
+#   group) signals shell and child at once. The case verifies -- not just
+#   assumes -- that the hung child is actually a member of that group before
+#   signaling, and that the whole group is actually gone immediately after
+#   (via `pgrep -g`, plus a wall-clock check that this took nowhere near the
+#   stub's full hang duration): a survivor would mean this case was not
+#   actually proving the Ctrl-C path.
+#
+#   case18b (secondary, cheap): `kill -TERM "$pid"` sent to ONLY ccswitch's
+#   own pid (e.g. an external monitor or `kill <pid>`, NOT a terminal
+#   Ctrl-C). bash defers a pending TERM trap until the current foreground
+#   child exits when the signal targets just the shell's own pid, so cleanup
+#   here only runs once the hung refresh transport returns on its own. That
+#   used to be simulated with a 30s hang, which made the WHOLE SUITE take
+#   ~33s on every push for a path that is not even the primary scenario the
+#   fix targets. A 2s hang keeps this deferred-trap path covered for about
+#   two seconds instead.
+case18a_signal_process_group() {
+  local home ctl tmphome slow pid found group_before group_after start end leftovers p n
   home="$(new_home)"
   ctl="$(new_ctl)"
   tmphome="$(mktemp -d "${TMPDIR:-/tmp}/ccswitch-usage-test-tmpdir.XXXXXX")"
 
-  # A refresh transport that hangs, so we can signal ccswitch mid-call.
   slow="$tmphome/slow-refresh"
-  printf '#!/usr/bin/env bash\nexec sleep 30\n' >"$slow"
+  printf '#!/usr/bin/env bash\nexec sleep 2\n' >"$slow"
   chmod +x "$slow"
 
   write_claude_json "$home" "UUID_LIVE"
@@ -341,55 +392,116 @@ case18_no_secret_left_after_signal() {
   write_account_credentials "$home" "acct_sig" "REFRESH_SIGNAL_SECRET" "TOK_OLD" 1
   write_account_oauth "$home" "acct_sig" "UUID_OTHER"
 
+  # set -m makes the backgrounded job its own process-group leader (its pgid
+  # becomes its own pid), which is what lets -"$pid" below address the whole
+  # group rather than just the one process.
+  set -m
   TMPDIR="$tmphome" HOME="$home" CURL_STUB_DIR="$ctl" CCSWITCH_REFRESH_CMD="$slow" \
     bash "$TARGET" usage --no-switch >/dev/null 2>&1 &
   pid=$!
+  set +m
 
-  # Bounded wait for the body file to appear. compgen -G is a shell builtin
-  # (no fork per check), so the full cap below is both fast AND generous:
-  # measured, the file normally appears within ~1000 iterations (~30ms); the
-  # 200000 cap gives ~200x headroom for a loaded/cold-cache CI box while still
-  # bounding the worst case (file never appears, e.g. a regression) to under
-  # two seconds -- contrast an equivalent loop around `find`, which forks a
-  # process every iteration and at this same iteration count could take
-  # minutes.
-  # Two patterns: the pre-fix layout wrote directly under $TMPDIR
-  # (ccswitch-refresh-body.*); the fixed layout nests it one level inside the
-  # process-scoped scratch dir (*/refresh-body.*). Checking both means this
-  # poll works whether or not the fix is in place yet.
-  found=0
-  n=0
-  while [[ "$n" -lt 200000 ]]; do
-    if compgen -G "$tmphome"/ccswitch-refresh-body.* >/dev/null \
-      || compgen -G "$tmphome"/*/refresh-body.* >/dev/null; then
-      found=1
-      break
-    fi
-    n=$((n + 1))
-  done
-
+  found="$(wait_for_refresh_body "$tmphome")"
   if [[ "$found" -eq 0 ]]; then
-    fail "case18 refresh-body file never appeared under $tmphome within the poll budget; cannot exercise the signal path"
-    kill -TERM "$pid" 2>/dev/null
+    fail "case18a refresh-body file never appeared under $tmphome within the poll budget; cannot exercise the signal path"
+    kill -TERM -"$pid" 2>/dev/null
     wait "$pid" 2>/dev/null
-    pkill -f "$slow" >/dev/null 2>&1
     rm -rf "$home" "$ctl" "$tmphome"
     return
   fi
 
+  # Confirm, BEFORE signaling, that the hung refresh transport really has
+  # joined this process group (a short bounded retry: the child is forked
+  # just after the body file is written, so there is a brief window where
+  # the file exists but the fork has not happened yet). Without this check,
+  # a group-directed kill could "pass" without ever proving the group
+  # actually had more than one member.
+  group_before=0
+  n=0
+  while [[ "$n" -lt 50 ]]; do
+    group_before="$(pgrep -g "$pid" 2>/dev/null | wc -l)"
+    [[ "${group_before//[[:space:]]/}" -gt 1 ]] && break
+    n=$((n + 1))
+  done
+
+  start="$(date +%s)"
+  kill -TERM -"$pid" 2>/dev/null
+  wait "$pid" 2>/dev/null
+  end="$(date +%s)"
+
+  group_after="$(pgrep -g "$pid" 2>/dev/null | wc -l)"
+
+  # Regardless of pass/fail below, make sure nothing from this attempt
+  # survives the case -- a regression here must not leak a live `sleep`
+  # process into the rest of the suite.
+  for p in $(pgrep -g "$pid" 2>/dev/null); do
+    kill -9 "$p" 2>/dev/null
+  done
+
+  leftovers="$(grep -rl 'REFRESH_SIGNAL_SECRET' "$tmphome" 2>/dev/null)"
+
+  if [[ "${group_before//[[:space:]]/}" -gt 1 ]] \
+    && [[ "${group_after//[[:space:]]/}" -eq 0 ]] \
+    && [[ $((end - start)) -lt 2 ]] \
+    && [[ -z "$leftovers" ]]; then
+    pass "case18a Ctrl-C-style process-group SIGTERM kills the hung child immediately (took $((end - start))s, well under the 2s stub hang) and leaves no token-bearing temp file"
+  else
+    fail "case18a process-group signal (group_before=$group_before group_after=$group_after elapsed=$((end - start))s leftovers=$leftovers)"
+  fi
+
+  rm -rf "$home" "$ctl" "$tmphome"
+}
+
+case18b_signal_single_pid_deferred() {
+  local home ctl tmphome slow pid found leftovers
+  home="$(new_home)"
+  ctl="$(new_ctl)"
+  tmphome="$(mktemp -d "${TMPDIR:-/tmp}/ccswitch-usage-test-tmpdir.XXXXXX")"
+
+  slow="$tmphome/slow-refresh"
+  printf '#!/usr/bin/env bash\nexec sleep 2\n' >"$slow"
+  chmod +x "$slow"
+
+  write_claude_json "$home" "UUID_LIVE"
+  write_live_credentials "$home" "REFRESH_LIVE" "TOK_LIVE" "$(future_ms)"
+  write_account_credentials "$home" "acct_sig" "REFRESH_SIGNAL_SECRET" "TOK_OLD" 1
+  write_account_oauth "$home" "acct_sig" "UUID_OTHER"
+
+  TMPDIR="$tmphome" HOME="$home" CURL_STUB_DIR="$ctl" CCSWITCH_REFRESH_CMD="$slow" \
+    bash "$TARGET" usage --no-switch >/dev/null 2>&1 &
+  pid=$!
+
+  found="$(wait_for_refresh_body "$tmphome")"
+  if [[ "$found" -eq 0 ]]; then
+    fail "case18b refresh-body file never appeared under $tmphome within the poll budget; cannot exercise the signal path"
+    kill -TERM "$pid" 2>/dev/null
+    wait "$pid" 2>/dev/null
+    rm -rf "$home" "$ctl" "$tmphome"
+    return
+  fi
+
+  # No process group here -- signaling only ccswitch's own pid, exactly like
+  # an external `kill <pid>` (not a terminal Ctrl-C). bash defers this TERM
+  # until the hung foreground child (the 2s stub) returns on its own, so this
+  # assertion legitimately costs ~2s -- that IS the deferred-trap behavior it
+  # exists to cover.
   kill -TERM "$pid" 2>/dev/null
   wait "$pid" 2>/dev/null
 
   leftovers="$(grep -rl 'REFRESH_SIGNAL_SECRET' "$tmphome" 2>/dev/null)"
 
   if [[ -z "$leftovers" ]]; then
-    pass "case18 SIGTERM during a refresh leaves no token-bearing temp file"
+    pass "case18b external bare-PID SIGTERM (deferred-trap path) leaves no token-bearing temp file"
   else
-    fail "case18 secret left on disk after SIGTERM: $leftovers"
+    fail "case18b secret left on disk after bare-PID SIGTERM: $leftovers"
   fi
 
-  pkill -f "$slow" >/dev/null 2>&1
   rm -rf "$home" "$ctl" "$tmphome"
+}
+
+case18_no_secret_left_after_signal() {
+  case18a_signal_process_group
+  case18b_signal_single_pid_deferred
 }
 
 main() {

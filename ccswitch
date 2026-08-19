@@ -25,8 +25,14 @@ ACCOUNTS_DIR="$CLAUDE_DIR/accounts"
 #
 # Files that get RENAMED into place do NOT belong here -- they go in the
 # destination's own directory via jq_write/file_write, so the rename is atomic.
-CCSWITCH_TMPDIR="$(mktemp -d "${TMPDIR:-/tmp}/ccswitch.XXXXXX")"
-chmod 700 "$CCSWITCH_TMPDIR"
+CCSWITCH_TMPDIR="$(mktemp -d "${TMPDIR:-/tmp}/ccswitch.XXXXXX")" || {
+  echo "Error: failed to create ccswitch's scratch temp directory (mktemp -d failed)." >&2
+  exit 1
+}
+if ! chmod 700 "$CCSWITCH_TMPDIR"; then
+  echo "Error: failed to secure ccswitch's scratch temp directory $CCSWITCH_TMPDIR (chmod 700 failed)." >&2
+  exit 1
+fi
 
 # EXIT covers normal returns and every `exit 1` path; INT/TERM cover Ctrl-C and
 # kill during a network call, which is the case that used to leak.
