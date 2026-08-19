@@ -378,6 +378,72 @@ EOF
   fi
   rm -rf "$n_home"
 
+  # --- Case 14: a corrupt snapshot must NOT destroy ~/.claude.json -----------
+  # jq failing mid-switch used to leave an EMPTY .claude.json behind (the write
+  # was `jq ... >"$tmp"; mv "$tmp" "$dest"` with no status check), while
+  # ccswitch still printed "Switched to ..." and exited 0. .claude.json holds
+  # project history, mcpServers and onboarding state, so that is total config
+  # loss on a switch to one bad account.
+  local home14 corrupt_dir before14
+  home14="$(make_sandbox)"
+  write_claude_json "$home14" "a@x.com" "OrgA" "uuid-a"
+  write_credentials "$home14" "REFRESH_A" "$SECRET_A"
+  run_cc "$home14" "" save good
+  corrupt_dir="$home14/.claude/accounts/broken"
+  mkdir -p "$corrupt_dir"
+  chmod 700 "$corrupt_dir"
+  jq -n '{claudeAiOauth: {accessToken: "X", refreshToken: "Y", expiresAt: 1}}' >"$corrupt_dir/credentials.json"
+  # Truncated file -- exactly what an interrupted or disk-full `save` leaves.
+  printf '{"accountUuid": "uuid-bro' >"$corrupt_dir/oauthAccount.json"
+  before14="$(cat "$home14/.claude.json")"
+
+  run_cc "$home14" "" broken
+
+  local after14 still_valid14 preserved14
+  after14="$(cat "$home14/.claude.json")"
+  still_valid14="$(jq -e . "$home14/.claude.json" >/dev/null 2>&1 && echo yes || echo no)"
+  preserved14="$(jq -r '.unrelatedTopLevelKey // empty' "$home14/.claude.json" 2>/dev/null)"
+
+  if [[ "$EXIT_CODE" -ne 0 ]] \
+    && [[ "$still_valid14" == "yes" ]] \
+    && [[ "$after14" == "$before14" ]] \
+    && [[ "$preserved14" == "preserve-me" ]] \
+    && ! printf '%s' "$OUT" | grep -q "Switched to"; then
+    pass "case14 switch to a corrupt snapshot fails loudly and leaves .claude.json byte-identical"
+  else
+    fail "case14 corrupt snapshot damaged .claude.json (exit=$EXIT_CODE valid=$still_valid14 preserved=$preserved14): $OUT"
+  fi
+
+  rm -rf "$home14"
+
+  # --- Case 15: a healthy switch backs up .claude.json ----------------------
+  # .credentials.json has always been backed up before being overwritten;
+  # .claude.json was not, so there was nothing to recover from.
+  local home15
+  home15="$(make_sandbox)"
+  write_claude_json "$home15" "a@x.com" "OrgA" "uuid-a"
+  write_credentials "$home15" "REFRESH_A" "$SECRET_A"
+  run_cc "$home15" "" save first
+  write_claude_json "$home15" "b@y.com" "OrgB" "uuid-b"
+  write_credentials "$home15" "REFRESH_B" "$SECRET_B"
+  run_cc "$home15" "" save second
+  run_cc "$home15" "" first
+
+  local bak15 bak_email15
+  bak15="$home15/.claude.json.bak"
+  bak_email15="$(jq -r '.oauthAccount.emailAddress // empty' "$bak15" 2>/dev/null)"
+
+  if [[ "$EXIT_CODE" -eq 0 ]] \
+    && [[ -f "$bak15" ]] \
+    && [[ "$bak_email15" == "b@y.com" ]] \
+    && [[ "$(file_mode "$bak15")" == "600" ]]; then
+    pass "case15 switch backs up .claude.json (pre-switch identity, mode 600)"
+  else
+    fail "case15 .claude.json backup missing/wrong (exit=$EXIT_CODE bak_email=$bak_email15 mode=$(file_mode "$bak15")): $OUT"
+  fi
+
+  rm -rf "$home15"
+
   rm -rf "$home_dir" "$ALL_OUTPUT_LOG"
 
   echo
