@@ -44,6 +44,7 @@ SECRET_TOKENS=(
   REFRESH_M_NEW REFRESH_M_OLD TOK_M
   TOK_ACT TOK_ACT_OLD REFRESH_ACT_LIVE REFRESH_ACT_SNAP TOK_NEW_L REFRESH_ROT_L TOK_NEW_S REFRESH_ROT_S
   TOK_CNT REFRESH_CNT
+  REFRESH_SIGNAL_SECRET
 )
 
 pass() {
@@ -316,6 +317,79 @@ case17_counters_are_trustworthy() {
   fi
 
   rm -rf "$home" "$ctl"
+}
+
+# --- Case 18: interrupting a refresh must not leave the token on disk -------
+# refresh_token writes the POST body (refresh_token + client_id) to a temp file
+# so the secret stays out of argv, then deletes it after the call returns. With
+# no trap, a Ctrl-C or SIGTERM during the network call -- likely, since `usage`
+# polls every account over the network -- left that file in $TMPDIR forever.
+case18_no_secret_left_after_signal() {
+  local home ctl tmphome slow leftovers n pid found
+  home="$(new_home)"
+  ctl="$(new_ctl)"
+  tmphome="$(mktemp -d "${TMPDIR:-/tmp}/ccswitch-usage-test-tmpdir.XXXXXX")"
+
+  # A refresh transport that hangs, so we can signal ccswitch mid-call.
+  slow="$tmphome/slow-refresh"
+  printf '#!/usr/bin/env bash\nexec sleep 30\n' >"$slow"
+  chmod +x "$slow"
+
+  write_claude_json "$home" "UUID_LIVE"
+  write_live_credentials "$home" "REFRESH_LIVE" "TOK_LIVE" "$(future_ms)"
+  # Non-active account (different uuid) with an EXPIRED token -> forces refresh.
+  write_account_credentials "$home" "acct_sig" "REFRESH_SIGNAL_SECRET" "TOK_OLD" 1
+  write_account_oauth "$home" "acct_sig" "UUID_OTHER"
+
+  TMPDIR="$tmphome" HOME="$home" CURL_STUB_DIR="$ctl" CCSWITCH_REFRESH_CMD="$slow" \
+    bash "$TARGET" usage --no-switch >/dev/null 2>&1 &
+  pid=$!
+
+  # Bounded wait for the body file to appear. compgen -G is a shell builtin
+  # (no fork per check), so the full cap below is both fast AND generous:
+  # measured, the file normally appears within ~1000 iterations (~30ms); the
+  # 200000 cap gives ~200x headroom for a loaded/cold-cache CI box while still
+  # bounding the worst case (file never appears, e.g. a regression) to under
+  # two seconds -- contrast an equivalent loop around `find`, which forks a
+  # process every iteration and at this same iteration count could take
+  # minutes.
+  # Two patterns: the pre-fix layout wrote directly under $TMPDIR
+  # (ccswitch-refresh-body.*); the fixed layout nests it one level inside the
+  # process-scoped scratch dir (*/refresh-body.*). Checking both means this
+  # poll works whether or not the fix is in place yet.
+  found=0
+  n=0
+  while [[ "$n" -lt 200000 ]]; do
+    if compgen -G "$tmphome"/ccswitch-refresh-body.* >/dev/null \
+      || compgen -G "$tmphome"/*/refresh-body.* >/dev/null; then
+      found=1
+      break
+    fi
+    n=$((n + 1))
+  done
+
+  if [[ "$found" -eq 0 ]]; then
+    fail "case18 refresh-body file never appeared under $tmphome within the poll budget; cannot exercise the signal path"
+    kill -TERM "$pid" 2>/dev/null
+    wait "$pid" 2>/dev/null
+    pkill -f "$slow" >/dev/null 2>&1
+    rm -rf "$home" "$ctl" "$tmphome"
+    return
+  fi
+
+  kill -TERM "$pid" 2>/dev/null
+  wait "$pid" 2>/dev/null
+
+  leftovers="$(grep -rl 'REFRESH_SIGNAL_SECRET' "$tmphome" 2>/dev/null)"
+
+  if [[ -z "$leftovers" ]]; then
+    pass "case18 SIGTERM during a refresh leaves no token-bearing temp file"
+  else
+    fail "case18 secret left on disk after SIGTERM: $leftovers"
+  fi
+
+  pkill -f "$slow" >/dev/null 2>&1
+  rm -rf "$home" "$ctl" "$tmphome"
 }
 
 main() {
@@ -951,6 +1025,7 @@ main() {
   }
 
   case17_counters_are_trustworthy
+  case18_no_secret_left_after_signal
 
   rm -rf "$STUB_BIN" "$ALL_OUTPUT_LOG" "$ALL_ARGV_LOG"
 

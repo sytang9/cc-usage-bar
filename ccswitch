@@ -17,6 +17,34 @@ CLAUDE_JSON="$HOME/.claude.json"
 CREDENTIALS_FILE="$CLAUDE_DIR/.credentials.json"
 ACCOUNTS_DIR="$CLAUDE_DIR/accounts"
 
+# Scratch dir for files that must NEVER outlive this process: the curl --config
+# file (bearer token) and the refresh POST body (refresh token). Both are
+# written to disk only to keep the secret out of argv, where /proc/<pid>/cmdline
+# would expose it; leaking them to $TMPDIR instead just trades one exposure for
+# a longer-lived one.
+#
+# Files that get RENAMED into place do NOT belong here -- they go in the
+# destination's own directory via jq_write/file_write, so the rename is atomic.
+CCSWITCH_TMPDIR="$(mktemp -d "${TMPDIR:-/tmp}/ccswitch.XXXXXX")"
+chmod 700 "$CCSWITCH_TMPDIR"
+
+# EXIT covers normal returns and every `exit 1` path; INT/TERM cover Ctrl-C and
+# kill during a network call, which is the case that used to leak.
+#
+# Two things to know before touching this:
+#  - bash does NOT run an EXIT trap when a command-substitution subshell
+#    finishes, so the many `$(...)` calls in this script cannot delete the dir
+#    out from under the run. (Verified; do not add a PID guard, which would
+#    need BASHPID and break bash 3.2 on macOS.)
+#  - `exec` does NOT fire EXIT, so cmd_switch calls cleanup_tmpdir explicitly
+#    before its exec.
+cleanup_tmpdir() {
+  rm -rf "$CCSWITCH_TMPDIR"
+}
+trap 'cleanup_tmpdir' EXIT
+trap 'cleanup_tmpdir; exit 130' INT
+trap 'cleanup_tmpdir; exit 143' TERM
+
 # --- `usage` subcommand: OAuth endpoint constants ---------------------------
 # Reverse-engineered from third-party community projects (Anthropic does not
 # publish this API). Sources checked 2026-07-19:
@@ -460,6 +488,9 @@ cmd_switch() {
   echo "Switched to $label. Restart Claude Code to apply."
 
   if [[ "$relaunch" == "--relaunch" ]]; then
+    # exec replaces this process, so the EXIT trap never runs.
+    cleanup_tmpdir
+
     # Intentionally unquoted: CCSWITCH_CLAUDE_CMD may hold a command plus
     # arguments (e.g. "claude --resume"), and relying on word-splitting here
     # is how those arguments reach exec. Do not "fix" this by quoting it.
@@ -493,7 +524,7 @@ cmd_switch() {
 fetch_usage_raw() {
   local token="$1"
   local cfgfile
-  cfgfile="$(mktemp "${TMPDIR:-/tmp}/ccswitch-usage-cfg.XXXXXX")"
+  cfgfile="$(mktemp "$CCSWITCH_TMPDIR/usage-cfg.XXXXXX")"
   chmod 600 "$cfgfile"
   {
     printf 'header = "Authorization: Bearer %s"\n' "$token"
@@ -518,7 +549,7 @@ refresh_token() {
   local req_body bodyfile
   req_body="$(jq -cn --arg rt "$rt" --arg cid "$OAUTH_CLIENT_ID" \
     '{grant_type: "refresh_token", refresh_token: $rt, client_id: $cid}')"
-  bodyfile="$(mktemp "${TMPDIR:-/tmp}/ccswitch-refresh-body.XXXXXX")"
+  bodyfile="$(mktemp "$CCSWITCH_TMPDIR/refresh-body.XXXXXX")"
   chmod 600 "$bodyfile"
   printf '%s' "$req_body" >"$bodyfile"
 
