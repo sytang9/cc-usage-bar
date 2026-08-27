@@ -81,6 +81,19 @@ To wire up the statusLine by hand instead, merge this into
 }
 ```
 
+### Uninstall
+
+```
+./uninstall.sh
+```
+
+Removes the two scripts from `~/.claude`, the `~/.local/bin/ccswitch` symlink,
+and the `statusLine` entry from `settings.json` — each only if it is still
+ours, so a `statusLine` you have since repointed at your own script survives.
+Your saved accounts under `~/.claude/accounts/` are **kept**: they are live
+OAuth credentials that exist nowhere else. Add `--purge-accounts` to delete
+them too (it asks first). `--print-only` shows what it would do.
+
 ## Usage — the bar
 
 Once the statusLine is configured, Claude Code renders two rows above the
@@ -113,6 +126,9 @@ ccswitch <label>             switch to a saved account
 ccswitch <label> --relaunch  switch, then exec the `claude` CLI (override
                               the command with CCSWITCH_CLAUDE_CMD)
 ccswitch delete <label>      remove a saved account (prompts to confirm)
+ccswitch refresh-pause       stop refreshing tokens (usage stays readable)
+ccswitch refresh-resume      re-enable token refresh
+ccswitch version             print the version (also --version, -V)
 ccswitch help                show the full command guide (also -h, --help)
 ```
 
@@ -157,6 +173,21 @@ Flags:
 - `--relaunch` — if you do switch from the prompt, exec `claude` afterward
   (same behavior as `ccswitch <label> --relaunch`).
 
+### Pausing token refresh
+
+The token-refresh endpoint rate-limits per machine. If a burst of expired
+accounts has you seeing `rate-limited` rows, stop adding pressure without
+losing the usage view:
+
+```
+ccswitch refresh-pause       # usage still polls; no token refreshes at all
+ccswitch refresh-resume      # back to normal
+```
+
+While paused, an account whose stored token has expired shows `rate-limited`
+rather than being refreshed. The pause is a flag file under
+`~/.claude/accounts/`, so it survives across runs until you resume.
+
 ## Caveats / honest limitations
 
 - **Switching requires restarting Claude Code.** A running session caches
@@ -182,6 +213,26 @@ OAuth tokens never leave your machine — they are never printed, logged, or
 committed by anything here. Saved accounts live under `~/.claude/accounts/`
 with the directory at mode `700` and every credential file inside it at mode
 `600`.
+
+## Development
+
+Run every test suite:
+
+```
+bash tests/run_all.sh
+```
+
+Four self-contained bash suites (statusline, ccswitch, ccswitch usage,
+installer). No test framework, no network: each suite sandboxes `HOME` under
+`mktemp -d` and the usage suite answers HTTP from a stub `curl` on `PATH`, so
+nothing ever touches your real `~/.claude` or Anthropic's API. CI runs the same
+command on every push and pull request.
+
+Lint every script (CI runs the same command):
+
+```
+shellcheck --severity=warning --shell=bash ccswitch statusline-usage.sh install.sh uninstall.sh tests/*.sh
+```
 
 ## License
 

@@ -43,6 +43,13 @@ SECRET_TOKENS=(
   TOK_RATELIMIT REFRESH_RATELIMIT
   REFRESH_M_NEW REFRESH_M_OLD TOK_M
   TOK_ACT TOK_ACT_OLD REFRESH_ACT_LIVE REFRESH_ACT_SNAP TOK_NEW_L REFRESH_ROT_L TOK_NEW_S REFRESH_ROT_S
+  TOK_CNT REFRESH_CNT
+  REFRESH_SIGNAL_SECRET TOK_OLD
+  REFRESH_NODE TOK_NODE_OLD
+  REFRESH_SKEW TOK_SKEW_OLD TOK_SKEW_NEW REFRESH_SKEW_ROT
+  REFRESH_P1 REFRESH_P2 REFRESH_P3 REFRESH_P4 REFRESH_P5 REFRESH_P6
+  TOK_P1 TOK_P2 TOK_P3 TOK_P4 TOK_P5 TOK_P6
+  REFRESH_S1 REFRESH_S2 TOK_S1_OLD TOK_S2_OLD
 )
 
 pass() {
@@ -157,15 +164,20 @@ new_ctl() {
   local ctl
   ctl="$(mktemp -d "${TMPDIR:-/tmp}/ccswitch-usage-test-ctl.XXXXXX")"
   mkdir -p "$ctl/usage" "$ctl/token" "$ctl/calls"
+  # Create both counters empty so "zero calls" is a readable 0 rather than a
+  # missing file. Without this, `wc -l` errors and every `|| echo 0` fallback
+  # turns a broken counter into a silent pass -- see case17.
+  : >"$ctl/calls/usage_count"
+  : >"$ctl/calls/token_count"
   echo "$ctl"
 }
 
 usage_call_count() {
-  wc -l <"$1/calls/usage_count" 2>/dev/null || echo 0
+  wc -l <"$1/calls/usage_count"
 }
 
 token_call_count() {
-  wc -l <"$1/calls/token_count" 2>/dev/null || echo 0
+  wc -l <"$1/calls/token_count"
 }
 
 # run_cc <home> <ctl> <stdin_text> <args...>
@@ -267,6 +279,379 @@ future_ms() {
 
 file_mode() {
   stat -c '%a' "$1" 2>/dev/null
+}
+
+# wait_for_refresh_body <dir> -> echoes 1 if a refresh-body temp file appears
+# under <dir> within the poll budget, 0 otherwise. Polls via `compgen -G`, a
+# shell builtin (no fork per iteration), so the full cap is both fast AND
+# generous: measured, the file normally appears within ~1000 iterations
+# (~30ms); the 200000 cap gives ~200x headroom for a loaded/cold-cache CI box
+# while still bounding the worst case (file never appears, e.g. a regression)
+# to under two seconds -- contrast an equivalent loop around `find`, which
+# forks a process every iteration and at this same iteration count could take
+# minutes.
+# Two patterns: the pre-fix layout wrote directly under $TMPDIR
+# (ccswitch-refresh-body.*); the fixed layout nests it one level inside the
+# process-scoped scratch dir (*/refresh-body.*). Checking both means this
+# poll works whether or not the fix is in place yet.
+wait_for_refresh_body() {
+  local dir="$1" n=0 found=0
+  while [[ "$n" -lt 200000 ]]; do
+    if compgen -G "$dir"/ccswitch-refresh-body.* >/dev/null \
+      || compgen -G "$dir"/*/refresh-body.* >/dev/null; then
+      found=1
+      break
+    fi
+    n=$((n + 1))
+  done
+  echo "$found"
+}
+
+# --- Case 17: the call counters themselves are trustworthy -------------------
+# Assert that counter files are created up front and that a real call increments
+# them correctly. This guards against two classes of regression:
+# 1. If new_ctl stops creating the counter files, those files won't exist.
+# 2. If the accessor functions (usage_call_count / token_call_count) gain a
+#    fallback (e.g., `|| echo 0`), a missing file would be silently masked, and
+#    case15/case16 would pass even if their "never-refresh" guarantees are broken.
+# Both the file-existence check AND the value checks must pass for case17 to pass.
+case17_counters_are_trustworthy() {
+  local home ctl before_usage before_token after_usage
+  home="$(new_home)"
+  ctl="$(new_ctl)"
+
+  # Assert that both counter files exist on disk (independent of accessor functions).
+  local files_exist=1
+  [[ -f "$ctl/calls/usage_count" ]] || files_exist=0
+  [[ -f "$ctl/calls/token_count" ]] || files_exist=0
+
+  before_usage="$(usage_call_count "$ctl" 2>/dev/null)"
+  before_token="$(token_call_count "$ctl" 2>/dev/null)"
+
+  write_claude_json "$home" "UUID_CNT"
+  write_live_credentials "$home" "REFRESH_CNT" "TOK_CNT" "$(future_ms)"
+  write_account_credentials "$home" "acct_cnt" "REFRESH_CNT" "TOK_CNT" "$(future_ms)"
+  write_account_oauth "$home" "acct_cnt" "UUID_OTHER"
+  set_usage_response "$ctl" "TOK_CNT" 200 "$(usage_body 10 20)"
+
+  run_cc "$home" "$ctl" "" --no-switch --refresh
+
+  after_usage="$(usage_call_count "$ctl" 2>/dev/null)"
+
+  if [[ "$files_exist" -eq 1 ]] \
+    && [[ "${before_usage//[[:space:]]/}" == "0" ]] \
+    && [[ "${before_token//[[:space:]]/}" == "0" ]] \
+    && [[ "${after_usage//[[:space:]]/}" == "1" ]]; then
+    pass "case17 call counters read 0 before any call and increment on a real one"
+  else
+    fail "case17 counters untrustworthy (files_exist=$files_exist before_usage=$before_usage before_token=$before_token after_usage=$after_usage)"
+  fi
+
+  rm -rf "$home" "$ctl"
+}
+
+# --- Case 18: interrupting a refresh must not leave the token on disk -------
+# refresh_token writes the POST body (refresh_token + client_id) to a temp file
+# so the secret stays out of argv, then deletes it after the call returns. With
+# no trap, a Ctrl-C or SIGTERM during the network call -- likely, since `usage`
+# polls every account over the network -- left that file in $TMPDIR forever.
+#
+# Two distinct signal-delivery paths, both asserted below:
+#
+#   case18a (primary, faithful Ctrl-C simulation): a real Ctrl-C delivers
+#   SIGINT to the entire foreground PROCESS GROUP, not just the shell -- so
+#   the hung network-call child dies in the same instant as ccswitch itself.
+#   This is the scenario the fix exists for. `set -m` job control is enabled
+#   just long enough to background ccswitch as its own process-group leader
+#   (macOS has no `setsid`, so this is the portable way to get a group of our
+#   own), then `kill -TERM -"$pid"` (a NEGATIVE pid = the whole process
+#   group) signals shell and child at once. The case verifies -- not just
+#   assumes -- that the hung child is actually a member of that group before
+#   signaling, and that the whole group is actually gone immediately after
+#   (via `pgrep -g`, plus a wall-clock check that this took nowhere near the
+#   stub's full hang duration): a survivor would mean this case was not
+#   actually proving the Ctrl-C path.
+#
+#   case18b (secondary, cheap): `kill -TERM "$pid"` sent to ONLY ccswitch's
+#   own pid (e.g. an external monitor or `kill <pid>`, NOT a terminal
+#   Ctrl-C). bash defers a pending TERM trap until the current foreground
+#   child exits when the signal targets just the shell's own pid, so cleanup
+#   here only runs once the hung refresh transport returns on its own. That
+#   used to be simulated with a 30s hang, which made the WHOLE SUITE take
+#   ~33s on every push for a path that is not even the primary scenario the
+#   fix targets. A 2s hang keeps this deferred-trap path covered for about
+#   two seconds instead.
+case18a_signal_process_group() {
+  local home ctl tmphome slow pid found group_before group_after start end leftovers p n
+  home="$(new_home)"
+  ctl="$(new_ctl)"
+  tmphome="$(mktemp -d "${TMPDIR:-/tmp}/ccswitch-usage-test-tmpdir.XXXXXX")"
+
+  slow="$tmphome/slow-refresh"
+  printf '#!/usr/bin/env bash\nexec sleep 2\n' >"$slow"
+  chmod +x "$slow"
+
+  write_claude_json "$home" "UUID_LIVE"
+  write_live_credentials "$home" "REFRESH_LIVE" "TOK_LIVE" "$(future_ms)"
+  # Non-active account (different uuid) with an EXPIRED token -> forces refresh.
+  write_account_credentials "$home" "acct_sig" "REFRESH_SIGNAL_SECRET" "TOK_OLD" 1
+  write_account_oauth "$home" "acct_sig" "UUID_OTHER"
+
+  # set -m makes the backgrounded job its own process-group leader (its pgid
+  # becomes its own pid), which is what lets -"$pid" below address the whole
+  # group rather than just the one process.
+  set -m
+  TMPDIR="$tmphome" HOME="$home" CURL_STUB_DIR="$ctl" CCSWITCH_REFRESH_CMD="$slow" \
+    bash "$TARGET" usage --no-switch >/dev/null 2>&1 &
+  pid=$!
+  set +m
+
+  found="$(wait_for_refresh_body "$tmphome")"
+  if [[ "$found" -eq 0 ]]; then
+    fail "case18a refresh-body file never appeared under $tmphome within the poll budget; cannot exercise the signal path"
+    kill -TERM -"$pid" 2>/dev/null
+    wait "$pid" 2>/dev/null
+    rm -rf "$home" "$ctl" "$tmphome"
+    return
+  fi
+
+  # Confirm, BEFORE signaling, that the hung refresh transport really has
+  # joined this process group (a short bounded retry: the child is forked
+  # just after the body file is written, so there is a brief window where
+  # the file exists but the fork has not happened yet). Without this check,
+  # a group-directed kill could "pass" without ever proving the group
+  # actually had more than one member.
+  group_before=0
+  n=0
+  while [[ "$n" -lt 50 ]]; do
+    group_before="$(pgrep -g "$pid" 2>/dev/null | wc -l)"
+    [[ "${group_before//[[:space:]]/}" -gt 1 ]] && break
+    n=$((n + 1))
+  done
+
+  start="$(date +%s)"
+  kill -TERM -"$pid" 2>/dev/null
+  wait "$pid" 2>/dev/null
+  end="$(date +%s)"
+
+  group_after="$(pgrep -g "$pid" 2>/dev/null | wc -l)"
+
+  # Regardless of pass/fail below, make sure nothing from this attempt
+  # survives the case -- a regression here must not leak a live `sleep`
+  # process into the rest of the suite.
+  for p in $(pgrep -g "$pid" 2>/dev/null); do
+    kill -9 "$p" 2>/dev/null
+  done
+
+  leftovers="$(grep -rl 'REFRESH_SIGNAL_SECRET' "$tmphome" 2>/dev/null)"
+
+  if [[ "${group_before//[[:space:]]/}" -gt 1 ]] \
+    && [[ "${group_after//[[:space:]]/}" -eq 0 ]] \
+    && [[ $((end - start)) -lt 2 ]] \
+    && [[ -z "$leftovers" ]]; then
+    pass "case18a Ctrl-C-style process-group SIGTERM kills the hung child immediately (took $((end - start))s, well under the 2s stub hang) and leaves no token-bearing temp file"
+  else
+    fail "case18a process-group signal (group_before=$group_before group_after=$group_after elapsed=$((end - start))s leftovers=$leftovers)"
+  fi
+
+  rm -rf "$home" "$ctl" "$tmphome"
+}
+
+case18b_signal_single_pid_deferred() {
+  local home ctl tmphome slow pid found leftovers
+  home="$(new_home)"
+  ctl="$(new_ctl)"
+  tmphome="$(mktemp -d "${TMPDIR:-/tmp}/ccswitch-usage-test-tmpdir.XXXXXX")"
+
+  slow="$tmphome/slow-refresh"
+  printf '#!/usr/bin/env bash\nexec sleep 2\n' >"$slow"
+  chmod +x "$slow"
+
+  write_claude_json "$home" "UUID_LIVE"
+  write_live_credentials "$home" "REFRESH_LIVE" "TOK_LIVE" "$(future_ms)"
+  write_account_credentials "$home" "acct_sig" "REFRESH_SIGNAL_SECRET" "TOK_OLD" 1
+  write_account_oauth "$home" "acct_sig" "UUID_OTHER"
+
+  TMPDIR="$tmphome" HOME="$home" CURL_STUB_DIR="$ctl" CCSWITCH_REFRESH_CMD="$slow" \
+    bash "$TARGET" usage --no-switch >/dev/null 2>&1 &
+  pid=$!
+
+  found="$(wait_for_refresh_body "$tmphome")"
+  if [[ "$found" -eq 0 ]]; then
+    fail "case18b refresh-body file never appeared under $tmphome within the poll budget; cannot exercise the signal path"
+    kill -TERM "$pid" 2>/dev/null
+    wait "$pid" 2>/dev/null
+    rm -rf "$home" "$ctl" "$tmphome"
+    return
+  fi
+
+  # No process group here -- signaling only ccswitch's own pid, exactly like
+  # an external `kill <pid>` (not a terminal Ctrl-C). bash defers this TERM
+  # until the hung foreground child (the 2s stub) returns on its own, so this
+  # assertion legitimately costs ~2s -- that IS the deferred-trap behavior it
+  # exists to cover.
+  kill -TERM "$pid" 2>/dev/null
+  wait "$pid" 2>/dev/null
+
+  leftovers="$(grep -rl 'REFRESH_SIGNAL_SECRET' "$tmphome" 2>/dev/null)"
+
+  if [[ -z "$leftovers" ]]; then
+    pass "case18b external bare-PID SIGTERM (deferred-trap path) leaves no token-bearing temp file"
+  else
+    fail "case18b secret left on disk after bare-PID SIGTERM: $leftovers"
+  fi
+
+  rm -rf "$home" "$ctl" "$tmphome"
+}
+
+case18_no_secret_left_after_signal() {
+  case18a_signal_process_group
+  case18b_signal_single_pid_deferred
+}
+
+# --- Case 19: an unusable node is reported as such, not as "re-login" ------
+# The built-in refresh transport uses fetch(), added in Node 18. On an older
+# node the catch path returned status 000, attempt_refresh returned failure,
+# and the row read "re-login" -- sending the user to re-authenticate an account
+# that was fine. Warn once, on stderr, naming node.
+case19_old_node_is_diagnosed() {
+  local home ctl fakebin
+  home="$(new_home)"
+  ctl="$(new_ctl)"
+  fakebin="$(mktemp -d "${TMPDIR:-/tmp}/ccswitch-usage-test-fakenode.XXXXXX")"
+
+  # A node with no global fetch, i.e. anything older than 18.
+  printf '#!/usr/bin/env bash\nexit 1\n' >"$fakebin/node"
+  chmod +x "$fakebin/node"
+
+  write_claude_json "$home" "UUID_LIVE"
+  write_live_credentials "$home" "REFRESH_LIVE" "TOK_LIVE" "$(future_ms)"
+  write_account_credentials "$home" "acct_node" "REFRESH_NODE" "TOK_NODE_OLD" 1
+  write_account_oauth "$home" "acct_node" "UUID_OTHER"
+
+  # No CCSWITCH_REFRESH_CMD here: this case is specifically about the built-in
+  # node path, so the stub transport must be out of the picture.
+  OUT="$(PATH="$fakebin:$STUB_BIN:$PATH" HOME="$home" CURL_STUB_DIR="$ctl" \
+    bash "$TARGET" usage --no-switch 2>&1)"
+  EXIT_CODE=$?
+  printf '%s\n' "$OUT" >>"$ALL_OUTPUT_LOG"
+
+  if [[ "$EXIT_CODE" -eq 0 ]] \
+    && printf '%s' "$OUT" | grep -qi 'node' \
+    && printf '%s' "$OUT" | grep -qi '18'; then
+    pass "case19 an unusable node is named in a warning instead of blaming the account"
+  else
+    fail "case19 no node diagnostic (exit=$EXIT_CODE): $OUT"
+  fi
+
+  rm -rf "$home" "$ctl" "$fakebin"
+}
+
+# --- Case 20: a token expiring within the skew window is refreshed early ----
+# is_token_expired had no margin, so a token with two seconds left counted as
+# valid: the usage GET 401'd and the 401-retry path paid a second round trip to
+# recover. Refresh proactively inside the skew window instead.
+case20_clock_skew_margin() {
+  local home ctl nearly tokcount
+  home="$(new_home)"
+  ctl="$(new_ctl)"
+  # 30 seconds of life left -- inside the 60s skew window.
+  nearly=$(( ($(date +%s) + 30) * 1000 ))
+
+  write_claude_json "$home" "UUID_LIVE"
+  write_live_credentials "$home" "REFRESH_LIVE" "TOK_LIVE" "$(future_ms)"
+  write_account_credentials "$home" "acct_skew" "REFRESH_SKEW" "TOK_SKEW_OLD" "$nearly"
+  write_account_oauth "$home" "acct_skew" "UUID_OTHER"
+  set_token_response "$ctl" "REFRESH_SKEW" 200 "$(refresh_success_body TOK_SKEW_NEW REFRESH_SKEW_ROT)"
+  set_usage_response "$ctl" "TOK_SKEW_NEW" 200 "$(usage_body 7 8)"
+
+  run_cc "$home" "$ctl" "" --no-switch --refresh
+
+  tokcount="$(token_call_count "$ctl")"
+
+  if [[ "$EXIT_CODE" -eq 0 ]] \
+    && [[ "${tokcount//[[:space:]]/}" == "1" ]] \
+    && printf '%s' "$OUT" | grep -q '7%'; then
+    pass "case20 a token expiring inside the skew window is refreshed before use"
+  else
+    fail "case20 no proactive refresh (exit=$EXIT_CODE tok=$tokcount): $OUT"
+  fi
+
+  rm -rf "$home" "$ctl"
+}
+
+
+# --- Case 21: many accounts poll concurrently, output stays deterministic ---
+# The usage GET is the per-account round trip, so it fans out. Refreshes must
+# NOT: the 429 backoff is a single shared file, and concurrent refreshers would
+# each check it before any set it -- the re-login storm deb49e6 fixed. Assert
+# the row order is stable (sorted by label, as the serial version produced) and
+# that every account got exactly one usage call.
+case21_parallel_usage_is_deterministic() {
+  local home ctl i run1 run2 usagecount
+  home="$(new_home)"
+  ctl="$(new_ctl)"
+
+  write_claude_json "$home" "UUID_LIVE"
+  write_live_credentials "$home" "REFRESH_LIVE" "TOK_LIVE" "$(future_ms)"
+
+  # Six healthy non-active accounts -> six parallel GETs, zero refreshes.
+  for i in 1 2 3 4 5 6; do
+    write_account_credentials "$home" "acct_p$i" "REFRESH_P$i" "TOK_P$i" "$(future_ms)"
+    write_account_oauth "$home" "acct_p$i" "UUID_P$i"
+    set_usage_response "$ctl" "TOK_P$i" 200 "$(usage_body "$i" "$((i * 2))")"
+  done
+
+  run_cc "$home" "$ctl" "" --no-switch --refresh
+  run1="$(printf '%s' "$OUT" | sed 's/\x1b\[[0-9;]*m//g' | grep -o 'acct_p[0-9]' | tr '\n' ' ')"
+  usagecount="$(usage_call_count "$ctl")"
+
+  run_cc "$home" "$ctl" "" --no-switch --refresh
+  run2="$(printf '%s' "$OUT" | sed 's/\x1b\[[0-9;]*m//g' | grep -o 'acct_p[0-9]' | tr '\n' ' ')"
+
+  if [[ "$EXIT_CODE" -eq 0 ]] \
+    && [[ "$run1" == "acct_p1 acct_p2 acct_p3 acct_p4 acct_p5 acct_p6 " ]] \
+    && [[ "$run1" == "$run2" ]] \
+    && [[ "${usagecount//[[:space:]]/}" == "6" ]] \
+    && [[ "$(token_call_count "$ctl" | tr -d '[:space:]')" == "0" ]]; then
+    pass "case21 six accounts poll concurrently: stable sorted order, one GET each, no refreshes"
+  else
+    fail "case21 parallel polling wrong (exit=$EXIT_CODE run1='$run1' run2='$run2' usage=$usagecount): $OUT"
+  fi
+
+  rm -rf "$home" "$ctl"
+}
+
+# --- Case 22: refreshes stay serial even when every account needs one -------
+# Two expired accounts and a token endpoint that 429s: the FIRST refresh must
+# set the shared backoff and the second must not call the endpoint at all. If
+# refreshes ever go parallel this drops to two calls and the storm is back.
+case22_refreshes_stay_serial() {
+  local home ctl tokcount
+  home="$(new_home)"
+  ctl="$(new_ctl)"
+
+  write_claude_json "$home" "UUID_LIVE"
+  write_live_credentials "$home" "REFRESH_LIVE" "TOK_LIVE" "$(future_ms)"
+  write_account_credentials "$home" "acct_s1" "REFRESH_S1" "TOK_S1_OLD" 1
+  write_account_oauth "$home" "acct_s1" "UUID_S1"
+  write_account_credentials "$home" "acct_s2" "REFRESH_S2" "TOK_S2_OLD" 1
+  write_account_oauth "$home" "acct_s2" "UUID_S2"
+  set_token_response "$ctl" "REFRESH_S1" 429 '{"error":"rate_limited"}'
+  set_token_response "$ctl" "REFRESH_S2" 429 '{"error":"rate_limited"}'
+
+  run_cc "$home" "$ctl" "" --no-switch --refresh
+  tokcount="$(token_call_count "$ctl")"
+
+  if [[ "$EXIT_CODE" -eq 0 ]] \
+    && [[ "${tokcount//[[:space:]]/}" == "1" ]] \
+    && [[ "$(printf '%s' "$OUT" | grep -c 'rate-limited')" -eq 2 ]]; then
+    pass "case22 a 429 on the first refresh stops the second (backoff still honored)"
+  else
+    fail "case22 refresh storm regression (exit=$EXIT_CODE tok=$tokcount): $OUT"
+  fi
+
+  rm -rf "$home" "$ctl"
 }
 
 main() {
@@ -584,50 +969,6 @@ main() {
   }
 
   # =========================================================================
-  # Case 8 (security): none of the fake secret tokens ever appear in any
-  # captured output across the whole suite.
-  # =========================================================================
-  {
-    local combined leaked=0 secret
-    combined="$(cat "$ALL_OUTPUT_LOG")"
-    for secret in "${SECRET_TOKENS[@]}"; do
-      if printf '%s' "$combined" | grep -q "$secret"; then
-        leaked=1
-        echo "  leaked secret: $secret"
-      fi
-    done
-    if [[ "$leaked" -eq 0 ]]; then
-      pass "case8 no secret token ever appears in captured output"
-    else
-      fail "case8 SECURITY LEAK: a secret token appeared in output"
-    fi
-  }
-
-  # =========================================================================
-  # Case 9 (security): none of the fake secret tokens ever appear as a
-  # literal curl argv argument across the whole suite. This is the specific
-  # property fetch_usage_raw's --config file and refresh_token's -d @file
-  # exist to guarantee (argv is readable via /proc/<pid>/cmdline on a
-  # shared host; the config/body FILE contents are not argv and are not
-  # checked here -- only what curl was actually invoked with).
-  # =========================================================================
-  {
-    local combined_argv leaked=0 secret
-    combined_argv="$(cat "$ALL_ARGV_LOG")"
-    for secret in "${SECRET_TOKENS[@]}"; do
-      if printf '%s' "$combined_argv" | grep -q "$secret"; then
-        leaked=1
-        echo "  leaked secret in curl argv: $secret"
-      fi
-    done
-    if [[ "$leaked" -eq 0 ]]; then
-      pass "case9 no secret token ever appears in curl argv"
-    else
-      fail "case9 SECURITY LEAK: a secret token appeared in curl argv"
-    fi
-  }
-
-  # =========================================================================
   # Case 10: a 200 body with five_hour.resets_at = null (5h usage 0%) still
   # renders the row -- weekly is valid and must show -- rather than being
   # discarded. RESET(wk) column present; the 5h reset cell shows the em dash.
@@ -814,7 +1155,7 @@ main() {
 
     local pline
     pline="$(printf '%s' "$OUT" | grep 'acct_paused')"
-    tokcount="$(wc -l <"$ctl/calls/token_count" 2>/dev/null || echo 0)"
+    tokcount="$(token_call_count "$ctl")"
 
     if [[ "$EXIT_CODE" -eq 0 ]] \
       && printf '%s' "$pline" | grep -q 'rate-limited' \
@@ -884,7 +1225,7 @@ main() {
 
     run_cc "$home" "$ctl" "" --no-switch
 
-    tokcount="$(wc -l <"$ctl/calls/token_count" 2>/dev/null || echo 0)"
+    tokcount="$(token_call_count "$ctl")"
     live_rt="$(jq -r '.claudeAiOauth.refreshToken' "$home/.claude/.credentials.json" 2>/dev/null)"
     snap_rt="$(jq -r '.claudeAiOauth.refreshToken' "$home/.claude/accounts/acct_act/credentials.json" 2>/dev/null)"
 
@@ -899,6 +1240,60 @@ main() {
     fi
 
     rm -rf "$home" "$ctl"
+  }
+
+  case17_counters_are_trustworthy
+  case18_no_secret_left_after_signal
+  case19_old_node_is_diagnosed
+  case20_clock_skew_margin
+  case21_parallel_usage_is_deterministic
+  case22_refreshes_stay_serial
+
+  # =========================================================================
+  # Case 8 (security): none of the fake secret tokens ever appear in any
+  # captured output across the whole suite. Runs LAST, after every other
+  # case has had a chance to append to $ALL_OUTPUT_LOG: a scan positioned
+  # earlier in main() would silently miss any case registered after it.
+  # =========================================================================
+  {
+    local combined leaked=0 secret
+    combined="$(cat "$ALL_OUTPUT_LOG")"
+    for secret in "${SECRET_TOKENS[@]}"; do
+      if printf '%s' "$combined" | grep -q "$secret"; then
+        leaked=1
+        echo "  leaked secret: $secret"
+      fi
+    done
+    if [[ "$leaked" -eq 0 ]]; then
+      pass "case8 no secret token ever appears in captured output"
+    else
+      fail "case8 SECURITY LEAK: a secret token appeared in output"
+    fi
+  }
+
+  # =========================================================================
+  # Case 9 (security): none of the fake secret tokens ever appear as a
+  # literal curl argv argument across the whole suite. This is the specific
+  # property fetch_usage_raw's --config file and refresh_token's -d @file
+  # exist to guarantee (argv is readable via /proc/<pid>/cmdline on a
+  # shared host; the config/body FILE contents are not argv and are not
+  # checked here -- only what curl was actually invoked with). Runs LAST for
+  # the same reason as case8 above.
+  # =========================================================================
+  {
+    local combined_argv leaked=0 secret
+    combined_argv="$(cat "$ALL_ARGV_LOG")"
+    for secret in "${SECRET_TOKENS[@]}"; do
+      if printf '%s' "$combined_argv" | grep -q "$secret"; then
+        leaked=1
+        echo "  leaked secret in curl argv: $secret"
+      fi
+    done
+    if [[ "$leaked" -eq 0 ]]; then
+      pass "case9 no secret token ever appears in curl argv"
+    else
+      fail "case9 SECURITY LEAK: a secret token appeared in curl argv"
+    fi
   }
 
   rm -rf "$STUB_BIN" "$ALL_OUTPUT_LOG" "$ALL_ARGV_LOG"

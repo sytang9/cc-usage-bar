@@ -8,6 +8,12 @@
 #
 # SECURITY: never print token values or credential file contents. All moves
 # use cp/jq, never echo of secret fields.
+
+# Bumped by hand. ccswitch is copied into ~/.claude by install.sh, so an
+# installed copy cannot be traced back to the checkout it came from -- this is
+# the only way to ask one what it is.
+CCSWITCH_VERSION="1.0.0"
+
 set -uo pipefail
 
 : "${HOME:?HOME must be set}"
@@ -16,6 +22,40 @@ CLAUDE_DIR="$HOME/.claude"
 CLAUDE_JSON="$HOME/.claude.json"
 CREDENTIALS_FILE="$CLAUDE_DIR/.credentials.json"
 ACCOUNTS_DIR="$CLAUDE_DIR/accounts"
+
+# Scratch dir for files that must NEVER outlive this process: the curl --config
+# file (bearer token) and the refresh POST body (refresh token). Both are
+# written to disk only to keep the secret out of argv, where /proc/<pid>/cmdline
+# would expose it; leaking them to $TMPDIR instead just trades one exposure for
+# a longer-lived one.
+#
+# Files that get RENAMED into place do NOT belong here -- they go in the
+# destination's own directory via jq_write/file_write, so the rename is atomic.
+CCSWITCH_TMPDIR="$(mktemp -d "${TMPDIR:-/tmp}/ccswitch.XXXXXX")" || {
+  echo "Error: failed to create ccswitch's scratch temp directory (mktemp -d failed)." >&2
+  exit 1
+}
+if ! chmod 700 "$CCSWITCH_TMPDIR"; then
+  echo "Error: failed to secure ccswitch's scratch temp directory $CCSWITCH_TMPDIR (chmod 700 failed)." >&2
+  exit 1
+fi
+
+# EXIT covers normal returns and every `exit 1` path; INT/TERM cover Ctrl-C and
+# kill during a network call, which is the case that used to leak.
+#
+# Two things to know before touching this:
+#  - bash does NOT run an EXIT trap when a command-substitution subshell
+#    finishes, so the many `$(...)` calls in this script cannot delete the dir
+#    out from under the run. (Verified; do not add a PID guard, which would
+#    need BASHPID and break bash 3.2 on macOS.)
+#  - `exec` does NOT fire EXIT, so cmd_switch calls cleanup_tmpdir explicitly
+#    before its exec.
+cleanup_tmpdir() {
+  rm -rf "$CCSWITCH_TMPDIR"
+}
+trap 'cleanup_tmpdir' EXIT
+trap 'cleanup_tmpdir; exit 130' INT
+trap 'cleanup_tmpdir; exit 143' TERM
 
 # --- `usage` subcommand: OAuth endpoint constants ---------------------------
 # Reverse-engineered from third-party community projects (Anthropic does not
@@ -61,7 +101,24 @@ USAGE_CACHE_TTL_SECONDS=600
 USAGE_RATE_LIMIT_BACKOFF_SECONDS=120
 USAGE_METER_WIDTH=12
 
-RESERVED_WORDS=(save delete list usage help refresh-pause refresh-resume)
+# Max concurrent usage GETs. The GET endpoint (api.anthropic.com) is not the
+# rate-limited one -- that is the token endpoint, which is refreshed serially --
+# but firing 20 requests at once for a 20-account setup invites a 429 for no
+# latency gain worth having.
+USAGE_MAX_PARALLEL=4
+
+# Treat a token as expired this many seconds BEFORE its stated expiry. Without
+# a margin, a token with seconds left counts as valid, the usage GET 401s, and
+# the 401-retry path pays a second round trip to recover what one proactive
+# refresh would have handled.
+TOKEN_EXPIRY_SKEW_SECONDS=60
+
+# Set from cmd_usage's --refresh flag. Defaulted here because fetch_row_usage
+# reads it and `set -u` turns an unset read into a hard exit -- a trap for any
+# future caller that reaches fetch_row_usage without going through cmd_usage.
+USAGE_BYPASS_CACHE=0
+
+RESERVED_WORDS=(save delete list usage help version refresh-pause refresh-resume)
 # Whitelist charset for labels. Deliberately strict: this is what stands
 # between a label and a raw filesystem path ($ACCOUNTS_DIR/$label), so it
 # must reject '/' and '.' outright rather than trying to blocklist "..".
@@ -134,6 +191,19 @@ require_live_credentials() {
   fi
 }
 
+# is_valid_json_object_file <path>: true iff the file is non-empty AND its
+# top-level JSON value is an object. `jq empty` alone is NOT enough for this --
+# it exits 0 on a zero-byte file ("zero JSON documents" is valid JSON to jq),
+# so a bare `jq empty` check lets a 0-byte snapshot sail through. That matters
+# here specifically because the OLD unchecked `cmd_save` wrote
+# `jq '.oauthAccount // {}' >"$tmp"` with no status check, so a failed,
+# killed, or disk-full save produced exactly a 0-byte oauthAccount.json --
+# corruption that is already sitting in real users' ~/.claude/accounts/*.
+is_valid_json_object_file() {
+  local f="$1"
+  [[ -s "$f" ]] && jq -e 'type == "object"' "$f" >/dev/null 2>&1
+}
+
 # secure_dir <path>: create a directory (if missing) and force mode 700.
 secure_dir() {
   local dir="$1"
@@ -142,10 +212,64 @@ secure_dir() {
 }
 
 # secure_copy <src> <dst>: copy a file and force mode 600 on the destination.
+# Returns non-zero, WITHOUT attempting the chmod, if the cp itself fails --
+# `cp ...; chmod ...` would return chmod's status instead, which can mask a
+# failed cp whenever <dst> already existed (chmod succeeds on the old file,
+# reporting success even though nothing was actually copied).
 secure_copy() {
   local src="$1" dst="$2"
-  cp "$src" "$dst"
+  cp "$src" "$dst" || return 1
   chmod 600 "$dst"
+}
+
+# jq_write <dest> <jq-arg>...: run jq with the given args and replace <dest>
+# with its output ONLY if jq exited 0 AND produced something. Returns non-zero,
+# leaving <dest> untouched, otherwise. Destination ends up mode 600.
+#
+# NOTE: "produced something" is a non-empty-file check, not a shape check --
+# a bare `null` (4 bytes) satisfies it. No current caller emits bare `null`,
+# but a caller that must reject it (e.g. one writing a JSON object) has to
+# assert the type itself, such as with `jq -e 'type == "object"'` on the result.
+#
+# Why this exists: `jq ... >"$tmp"; mv "$tmp" "$dest"` replaces the destination
+# with an EMPTY file whenever jq fails -- a corrupt snapshot, a full disk, a
+# killed process. That is how a truncated oauthAccount.json used to zero out
+# ~/.claude.json while ccswitch still printed "Switched to ...". Never write a
+# JSON file any other way.
+#
+# The temp file goes in the DESTINATION's own directory, not $TMPDIR, so the
+# final mv is a same-filesystem rename and therefore atomic. $TMPDIR is a
+# separate tmpfs on many systems, which silently degrades mv to a non-atomic
+# copy+unlink -- a crash mid-copy leaves a half-written credential file.
+# Scratch files that are NEVER renamed into place do not belong here; they go
+# in $CCSWITCH_TMPDIR (see the trap block).
+jq_write() {
+  local dest="$1"
+  shift
+  local dest_dir tmp
+  dest_dir="$(dirname "$dest")"
+  tmp="$(mktemp "$dest_dir/.ccswitch-write.XXXXXX")" || return 1
+  chmod 600 "$tmp"
+  if jq "$@" >"$tmp" 2>/dev/null && [[ -s "$tmp" ]]; then
+    mv "$tmp" "$dest" && return 0
+  fi
+  rm -f "$tmp"
+  return 1
+}
+
+# file_write <dest> <content>: same atomic-replace guarantee as jq_write for
+# content that is already built (no jq run). Refuses to write empty content.
+file_write() {
+  local dest="$1" content="$2"
+  [[ -n "$content" ]] || return 1
+  local tmp
+  tmp="$(mktemp "$(dirname "$dest")/.ccswitch-write.XXXXXX")" || return 1
+  chmod 600 "$tmp"
+  if printf '%s' "$content" >"$tmp" && [[ -s "$tmp" ]]; then
+    mv "$tmp" "$dest" && return 0
+  fi
+  rm -f "$tmp"
+  return 1
 }
 
 # install_credentials <snapshot> <dst>: write the snapshot's credentials to dst,
@@ -161,25 +285,25 @@ secure_copy() {
 install_credentials() {
   local snapshot="$1" dst="$2"
 
+  # Both fallback branches below return secure_copy's OWN exit status rather
+  # than a hardcoded 0: secure_copy propagates a failed `cp` (see its
+  # definition), and its caller (cmd_switch) now checks this function's
+  # status and aborts rather than reporting "Switched to ..." over a
+  # credential write that never happened.
   if [[ ! -f "$dst" ]] || ! command -v jq >/dev/null 2>&1; then
     secure_copy "$snapshot" "$dst"
-    return
+    return $?
   fi
 
-  local tmp
-  tmp="$(mktemp "${TMPDIR:-/tmp}/ccswitch-creds.XXXXXX")"
-  chmod 600 "$tmp"
-  if jq -s '.[0] as $snap | .[1] as $live
+  if jq_write "$dst" -s '.[0] as $snap | .[1] as $live
             | $snap
             + (if ($live.mcpOAuth // {}) == {} then {}
                else {mcpOAuth: (($snap.mcpOAuth // {}) + $live.mcpOAuth)} end)' \
-       "$snapshot" "$dst" >"$tmp" 2>/dev/null && [[ -s "$tmp" ]]; then
-    mv "$tmp" "$dst"
-    chmod 600 "$dst"
-  else
-    rm -f "$tmp"
-    secure_copy "$snapshot" "$dst"
+       "$snapshot" "$dst"; then
+    return 0
   fi
+  secure_copy "$snapshot" "$dst"
+  return $?
 }
 
 # Active-account identity is anchored on accountUuid, NOT refreshToken.
@@ -193,6 +317,30 @@ live_account_uuid() {
 saved_account_uuid() {
   local label="$1"
   jq -r '.accountUuid // empty' "$ACCOUNTS_DIR/$label/oauthAccount.json" 2>/dev/null
+}
+
+# saved_labels: print one label per line for every saved account, nothing at
+# all when there are none. GUARANTEE: every label printed matches
+# LABEL_CHARSET_PATTERN ([A-Za-z0-9_-]) -- this is what makes the unquoted
+# `for label in $(saved_labels)` consumption below safe by construction, not
+# by assumption about how directories got there.
+#
+# This is the ONLY sanctioned way to enumerate accounts. Three traps it
+# closes: emptiness cannot be tested with `ls -A`, because ccswitch keeps its
+# own dot-files (.no-refresh, .refresh-backoff) beside the account
+# directories; an unmatched `*/` glob is not empty in bash -- without a -d
+# guard the literal pattern reaches basename and renders as an account named
+# '*'; and a directory `ccswitch save` did NOT create can hold whitespace or
+# a glob character that `validate_label` would have rejected -- the charset
+# check below is what keeps such a directory from being enumerated at all.
+saved_labels() {
+  local label_dir
+  [[ -d "$ACCOUNTS_DIR" ]] || return 0
+  for label_dir in "$ACCOUNTS_DIR"/*/; do
+    [[ -d "$label_dir" ]] || continue
+    [[ "$(basename "$label_dir")" =~ $LABEL_CHARSET_PATTERN ]] || continue
+    basename "$label_dir"
+  done
 }
 
 # mirror_live_to_snapshot: keep the ACTIVE account's saved snapshot in sync with
@@ -213,12 +361,14 @@ mirror_live_to_snapshot() {
   local live_uuid
   live_uuid="$(live_account_uuid)"
   [[ -n "$live_uuid" ]] || return 0
-  local label_dir label
-  for label_dir in "$ACCOUNTS_DIR"/*/; do
-    [[ -d "$label_dir" ]] || continue
-    label="$(basename "$label_dir")"
+  local label
+  # Unquoted $(saved_labels) is safe: see saved_labels' GUARANTEE.
+  for label in $(saved_labels); do
     if [[ "$(saved_account_uuid "$label")" == "$live_uuid" ]]; then
-      secure_copy "$CREDENTIALS_FILE" "$label_dir/credentials.json"
+      # `return 0` is unconditional here (not `secure_copy`'s status) --
+      # already true before secure_copy started propagating cp failures, so
+      # that change does not alter what this function returns.
+      secure_copy "$CREDENTIALS_FILE" "$ACCOUNTS_DIR/$label/credentials.json"
       return 0
     fi
   done
@@ -252,19 +402,37 @@ cmd_save() {
   fi
   secure_dir "$label_dir"
 
-  secure_copy "$CREDENTIALS_FILE" "$label_dir/credentials.json"
+  if ! secure_copy "$CREDENTIALS_FILE" "$label_dir/credentials.json"; then
+    # Do not leave a partial/stale credentials.json behind: on an OVERWRITE
+    # save, a failed cp can leave the PREVIOUS account's credentials (or a
+    # truncated file) sitting where the switch pre-flight looks for the NEW
+    # account's snapshot. Removing it here means a present-but-broken copy
+    # cannot masquerade as a healthy save.
+    rm -f "$label_dir/credentials.json"
+    echo "Error: failed to write $label_dir/credentials.json; account '$label' not saved." >&2
+    exit 1
+  fi
 
-  local tmp_oauth
-  tmp_oauth="$(mktemp "${TMPDIR:-/tmp}/ccswitch-oauth.XXXXXX")"
-  jq '.oauthAccount // {}' "$CLAUDE_JSON" >"$tmp_oauth"
-  secure_copy "$tmp_oauth" "$label_dir/oauthAccount.json"
-  rm -f "$tmp_oauth"
+  if ! jq_write "$label_dir/oauthAccount.json" '.oauthAccount // {}' "$CLAUDE_JSON"; then
+    # Do not leave a stale oauthAccount.json behind: on an OVERWRITE save,
+    # jq_write's failure leaves the PREVIOUS account's identity file sitting
+    # next to the NEW account's just-copied credentials.json. That mismatched
+    # pair would otherwise pass the switch pre-flight's existence/content
+    # checks and switch cleanly to the wrong identity. Removing it here makes
+    # this snapshot look like a credentials-only save (no identity available)
+    # instead of a confidently wrong one.
+    rm -f "$label_dir/oauthAccount.json"
+    echo "Error: failed to write $label_dir/oauthAccount.json; account '$label' not saved cleanly." >&2
+    exit 1
+  fi
 
   echo "Saved account '$label'."
 }
 
 cmd_list() {
-  if [[ ! -d "$ACCOUNTS_DIR" ]] || [[ -z "$(ls -A "$ACCOUNTS_DIR" 2>/dev/null)" ]]; then
+  local labels
+  labels="$(saved_labels)"
+  if [[ -z "$labels" ]]; then
     echo "no saved accounts -- run: ccswitch save <label>"
     return 0
   fi
@@ -274,9 +442,9 @@ cmd_list() {
     live_uuid="$(live_account_uuid)"
   fi
 
-  local label_dir label
-  for label_dir in "$ACCOUNTS_DIR"/*/; do
-    label="$(basename "$label_dir")"
+  local label
+  # Unquoted $labels is safe: see saved_labels' GUARANTEE.
+  for label in $labels; do
     if [[ -n "$live_uuid" ]] && [[ "$(saved_account_uuid "$label")" == "$live_uuid" ]]; then
       echo "* $label"
     else
@@ -320,6 +488,21 @@ cmd_switch() {
     exit 1
   fi
 
+  # Validate the snapshot BEFORE touching any live file. A switch that fails
+  # half-way (credentials swapped, .claude.json not) leaves the user logged
+  # into a mismatched pair, so everything that can be checked up front is.
+  if ! is_valid_json_object_file "$label_dir/credentials.json"; then
+    echo "Error: saved account '$label' has an unreadable credentials.json; nothing changed." >&2
+    echo "Re-enroll it: log into that account in Claude Code, then run: ccswitch save $label" >&2
+    exit 1
+  fi
+  if [[ -f "$label_dir/oauthAccount.json" ]] \
+    && ! is_valid_json_object_file "$label_dir/oauthAccount.json"; then
+    echo "Error: saved account '$label' has an unreadable oauthAccount.json; nothing changed." >&2
+    echo "Re-enroll it: log into that account in Claude Code, then run: ccswitch save $label" >&2
+    exit 1
+  fi
+
   require_claude_json
 
   # Save-on-leave: before we overwrite the live file, snapshot the account we
@@ -330,23 +513,60 @@ cmd_switch() {
   mkdir -p "$CLAUDE_DIR"
   chmod 700 "$CLAUDE_DIR"
 
+  # Backups are the user's only recovery path if the writes below fail
+  # partway, so a failed backup must abort BEFORE anything live is touched --
+  # not get swallowed by secure_copy's chmod masking a failed cp.
   if [[ -f "$CREDENTIALS_FILE" ]]; then
-    secure_copy "$CREDENTIALS_FILE" "$CREDENTIALS_FILE.bak"
+    if ! secure_copy "$CREDENTIALS_FILE" "$CREDENTIALS_FILE.bak"; then
+      echo "Error: failed to back up $CREDENTIALS_FILE; nothing changed." >&2
+      exit 1
+    fi
   fi
 
-  install_credentials "$label_dir/credentials.json" "$CREDENTIALS_FILE"
+  if ! secure_copy "$CLAUDE_JSON" "$CLAUDE_JSON.bak"; then
+    echo "Error: failed to back up $CLAUDE_JSON; nothing changed." >&2
+    exit 1
+  fi
+
+  # .claude.json is written AFTER this, below -- aborting here on failure
+  # leaves a consistent state (nothing live has changed identity yet).
+  if ! install_credentials "$label_dir/credentials.json" "$CREDENTIALS_FILE"; then
+    echo "Error: failed to write $CREDENTIALS_FILE; nothing else was changed." >&2
+    echo "$CLAUDE_JSON was not touched, so state is consistent." >&2
+    # $CREDENTIALS_FILE.bak only exists when there WAS a live credentials
+    # file to back up (see the guard above) -- on a machine with no prior
+    # live credentials, pointing at a .bak that was never created would
+    # send the user chasing a file that isn't there.
+    if [[ -f "$CREDENTIALS_FILE.bak" ]]; then
+      echo "Restore the previous credentials with:" >&2
+      echo "  cp $CREDENTIALS_FILE.bak $CREDENTIALS_FILE" >&2
+    fi
+    exit 1
+  fi
 
   local oauth_account_file="$label_dir/oauthAccount.json"
-  if [[ -f "$oauth_account_file" ]]; then
-    local tmp_claude_json
-    tmp_claude_json="$(mktemp "${TMPDIR:-/tmp}/ccswitch-claude.XXXXXX")"
-    jq --slurpfile oauth "$oauth_account_file" '.oauthAccount = $oauth[0]' "$CLAUDE_JSON" >"$tmp_claude_json"
-    mv "$tmp_claude_json" "$CLAUDE_JSON"
+  if [[ -s "$oauth_account_file" ]]; then
+    if ! jq_write "$CLAUDE_JSON" --slurpfile oauth "$oauth_account_file" '.oauthAccount = $oauth[0]' "$CLAUDE_JSON"; then
+      echo "Error: failed to update $CLAUDE_JSON; it is unchanged." >&2
+      echo "Credentials were already swapped." >&2
+      # $CREDENTIALS_FILE.bak only exists when there WAS a live credentials
+      # file to back up (see the guard above) -- on a machine with no prior
+      # live credentials, pointing at a .bak that was never created would
+      # send the user chasing a file that isn't there.
+      if [[ -f "$CREDENTIALS_FILE.bak" ]]; then
+        echo "Restore them with:" >&2
+        echo "  cp $CREDENTIALS_FILE.bak $CREDENTIALS_FILE" >&2
+      fi
+      exit 1
+    fi
   fi
 
   echo "Switched to $label. Restart Claude Code to apply."
 
   if [[ "$relaunch" == "--relaunch" ]]; then
+    # exec replaces this process, so the EXIT trap never runs.
+    cleanup_tmpdir
+
     # Intentionally unquoted: CCSWITCH_CLAUDE_CMD may hold a command plus
     # arguments (e.g. "claude --resume"), and relying on word-splitting here
     # is how those arguments reach exec. Do not "fix" this by quoting it.
@@ -380,7 +600,7 @@ cmd_switch() {
 fetch_usage_raw() {
   local token="$1"
   local cfgfile
-  cfgfile="$(mktemp "${TMPDIR:-/tmp}/ccswitch-usage-cfg.XXXXXX")"
+  cfgfile="$(mktemp "$CCSWITCH_TMPDIR/usage-cfg.XXXXXX")"
   chmod 600 "$cfgfile"
   {
     printf 'header = "Authorization: Bearer %s"\n' "$token"
@@ -405,7 +625,7 @@ refresh_token() {
   local req_body bodyfile
   req_body="$(jq -cn --arg rt "$rt" --arg cid "$OAUTH_CLIENT_ID" \
     '{grant_type: "refresh_token", refresh_token: $rt, client_id: $cid}')"
-  bodyfile="$(mktemp "${TMPDIR:-/tmp}/ccswitch-refresh-body.XXXXXX")"
+  bodyfile="$(mktemp "$CCSWITCH_TMPDIR/refresh-body.XXXXXX")"
   chmod 600 "$bodyfile"
   printf '%s' "$req_body" >"$bodyfile"
 
@@ -529,14 +749,14 @@ resolve_account_credentials() {
 }
 
 # is_token_expired <expires_at_ms> -> true iff expires_at_ms is a valid
-# epoch-millisecond timestamp that is now (or already past). An unparseable
-# or missing value is treated as "not expired" -- the usage call itself will
-# fail cleanly (row shows dashes) rather than us guessing wrong and forcing
-# an unnecessary refresh.
+# epoch-millisecond timestamp that is now, plus a skew margin (or already
+# past). An unparseable or missing value is treated as "not expired" -- the
+# usage call itself will fail cleanly (row shows dashes) rather than us
+# guessing wrong and forcing an unnecessary refresh.
 is_token_expired() {
   local exp="$1"
   [[ "$exp" =~ ^[0-9]+$ ]] || return 1
-  local now_ms=$(( $(date +%s) * 1000 ))
+  local now_ms=$(( ($(date +%s) + TOKEN_EXPIRY_SKEW_SECONDS) * 1000 ))
   (( exp <= now_ms ))
 }
 
@@ -601,18 +821,11 @@ attempt_refresh() {
 
   local new_expires_at_ms=$(( $(date +%s) * 1000 + new_expires_in * 1000 ))
   local snapshot_file="$ACCOUNTS_DIR/$label/credentials.json"
-  local tmp
-  tmp="$(mktemp "${TMPDIR:-/tmp}/ccswitch-refresh.XXXXXX")"
-  if ! jq --arg at "$new_access" --argjson exp "$new_expires_at_ms" --arg rt "$new_refresh" \
+  jq_write "$snapshot_file" --arg at "$new_access" --argjson exp "$new_expires_at_ms" --arg rt "$new_refresh" \
     '.claudeAiOauth.accessToken = $at
      | .claudeAiOauth.expiresAt = $exp
      | if ($rt != "") then .claudeAiOauth.refreshToken = $rt else . end' \
-    "$snapshot_file" >"$tmp" 2>/dev/null; then
-    rm -f "$tmp"
-    return 1
-  fi
-  mv "$tmp" "$snapshot_file"
-  chmod 600 "$snapshot_file"
+    "$snapshot_file" || return 1
 
   echo "$new_access"
 }
@@ -638,12 +851,7 @@ read_usage_cache() {
 # never observes a partially-written cache file.
 write_usage_cache() {
   local label="$1" json="$2"
-  local cache_file tmp
-  cache_file="$(usage_cache_file "$label")"
-  tmp="$(mktemp "${TMPDIR:-/tmp}/ccswitch-cache.XXXXXX")"
-  printf '%s' "$json" >"$tmp"
-  chmod 600 "$tmp"
-  mv "$tmp" "$cache_file"
+  file_write "$(usage_cache_file "$label")" "$json"
 }
 
 # fetch_and_cache_usage <label> <access_token> <bypass_cache: 0|1> -> echoes
@@ -813,10 +1021,19 @@ usage_reset_cell() {
   usage_dim "$(printf '%s%*s' "$txt" "$pad" "")"
 }
 
-# build_usage_row <label> -> echoes "label|marker|state|five_pct|week_pct|reset_epoch".
-# state is one of: ok, dash, relogin. Never lets one account's failure abort
-# the loop -- every failure mode resolves to a row, not an exit.
-build_usage_row() {
+# --- usage row building: three phases -----------------------------------------
+# The per-account work is one independent HTTP GET, so it fans out (see
+# cmd_usage). Refreshing does NOT: it is serialized deliberately, and the split
+# below is what makes that separation enforceable.
+
+# resolve_row_state <label> -> "<state>|<marker>|<access>|<refresh>|<did_refresh>"
+# state is EMPTY when there is a usable access token; otherwise it is the
+# terminal row state (dash/wait/relogin) and the rest is meaningless.
+#
+# MUST be called serially. It may call attempt_refresh, and the 429 backoff is
+# a single shared file: concurrent callers would each read it before any of
+# them wrote it, which is exactly the re-login storm deb49e6 fixed.
+resolve_row_state() {
   local label="$1"
   local marker="  " active=0
   if is_active_account "$label"; then marker="* "; active=1; fi
@@ -825,18 +1042,19 @@ build_usage_row() {
   IFS='|' read -r access exp refresh <<<"$(resolve_account_credentials "$label")"
 
   if [[ -z "$access" ]] && [[ -z "$refresh" ]]; then
-    echo "${label}|${marker}|dash||||"
+    echo "dash|${marker}|||0"
     return 0
   fi
 
-  # NEVER refresh the ACTIVE account. Its tokens live in $CREDENTIALS_FILE and are
-  # owned by the running Claude Code, which rotates them there itself. If ccswitch
-  # refreshed it, attempt_refresh would write the rotated token only to the snapshot
-  # and leave the live file holding a now-invalidated refresh token -> Claude Code's
-  # next refresh fails and the logged-in account "expires" (a regression the
-  # live->snapshot mirror made reachable, since the mirrored snapshot token is valid
-  # enough to rotate). So for the active account we only READ its live access token;
-  # a missing/expired one just shows a state and Claude Code refreshes it.
+  # NEVER refresh the ACTIVE account. Its tokens live in $CREDENTIALS_FILE and
+  # are owned by the running Claude Code, which rotates them there itself. If
+  # ccswitch refreshed it, attempt_refresh would write the rotated token only to
+  # the snapshot and leave the live file holding an invalidated refresh token ->
+  # Claude Code's next refresh fails and the logged-in account "expires" (a
+  # regression the live->snapshot mirror made reachable, since the mirrored
+  # snapshot token is valid enough to rotate). So for the active account we only
+  # READ its live access token; a missing/expired one just shows a state and
+  # Claude Code refreshes it.
   local did_refresh=0
   if [[ "$active" != "1" ]] && { [[ -z "$access" ]] || is_token_expired "$exp"; }; then
     local refreshed rc
@@ -845,27 +1063,49 @@ build_usage_row() {
       access="$refreshed"
       did_refresh=1
     elif [[ "$rc" == "2" ]]; then
-      echo "${label}|${marker}|wait||||"   # rate-limited: transient, not dead
+      echo "wait|${marker}|||0"   # rate-limited: transient, not dead
       return 0
     else
-      echo "${label}|${marker}|relogin||||"
+      echo "relogin|${marker}|||0"
       return 0
     fi
   fi
 
   if [[ -z "$access" ]]; then
-    echo "${label}|${marker}|dash||||"
+    echo "dash|${marker}|||0"
     return 0
   fi
 
-  local p5 p7 p5reset p7reset httpstatus
-  IFS='|' read -r p5 p7 p5reset p7reset httpstatus <<<"$(fetch_and_cache_usage "$label" "$access" "$USAGE_BYPASS_CACHE")"
+  echo "|${marker}|${access}|${refresh}|${did_refresh}"
+}
 
-  # Auth failure on a token we did NOT already refresh: the access token was
-  # rejected (e.g. revoked or rotated by a real Claude Code session) even
-  # though it had not time-expired, so is_token_expired never triggered a
-  # refresh above. Refresh once and retry the fetch. If the refresh itself
-  # fails, the account genuinely needs a re-login.
+# fetch_row_usage <label> <access_token> -> the 5-field string
+# fetch_and_cache_usage returns. Pure GET plus a per-account cache write; no
+# shared state, so this is the part that fans out.
+fetch_row_usage() {
+  fetch_and_cache_usage "$1" "$2" "$USAGE_BYPASS_CACHE"
+}
+
+# finish_row <label> <marker> <access> <refresh> <did_refresh> <fetch_result>
+# -> "label|marker|state|p5|p7|p5reset|p7reset". state is one of: ok, dash,
+# wait, relogin. Never lets one account's failure abort the loop -- every
+# failure mode resolves to a row, not an exit.
+#
+# Called serially, because the 401/403 path refreshes (see resolve_row_state).
+# That path is rare: it only fires when a token was rejected without having
+# time-expired -- revoked, or rotated by a real Claude Code session -- so
+# is_token_expired never triggered a refresh in phase 1.
+finish_row() {
+  local label="$1" marker="$2" access="$3" refresh="$4" did_refresh="$5" fetch_result="$6"
+  local active=0
+  is_active_account "$label" && active=1
+
+  local p5 p7 p5reset p7reset httpstatus
+  IFS='|' read -r p5 p7 p5reset p7reset httpstatus <<<"$fetch_result"
+
+  # Auth failure on a token we did NOT already refresh: refresh once and retry
+  # the fetch. If the refresh itself fails, the account genuinely needs a
+  # re-login.
   if [[ "$active" != "1" ]] && [[ -z "$p5" ]] && [[ "$did_refresh" == "0" ]] \
     && { [[ "$httpstatus" == "401" ]] || [[ "$httpstatus" == "403" ]]; } \
     && [[ -n "$refresh" ]]; then
@@ -929,6 +1169,31 @@ render_usage_cell() {
   esac
 }
 
+# warn_if_refresh_unavailable: print ONE stderr warning per run when the
+# built-in refresh transport cannot work, so an unusable node reads as a node
+# problem instead of surfacing per-account as "re-login".
+#
+# The transport is Node's fetch(), which landed in Node 18; on anything older
+# the refresh POST fails and every expired account looks revoked. Silent when
+# $CCSWITCH_REFRESH_CMD is set -- that override replaces node entirely (it is
+# also how the tests stub the network).
+warn_if_refresh_unavailable() {
+  [[ -n "${CCSWITCH_REFRESH_CMD:-}" ]] && return 0
+
+  if ! command -v node >/dev/null 2>&1; then
+    echo "Warning: node not found on PATH. Expired account tokens cannot be refreshed" >&2
+    echo "(the refresh endpoint is behind Cloudflare, which blocks headless curl), so" >&2
+    echo "rows for expired accounts will show 're-login' until node is installed." >&2
+    return 0
+  fi
+
+  if ! node -e 'process.exit(typeof fetch === "function" ? 0 : 1)' >/dev/null 2>&1; then
+    echo "Warning: this node is too old to refresh tokens -- fetch() requires node 18+." >&2
+    echo "Rows for expired accounts will show 're-login' regardless of account health." >&2
+    echo "Claude Code ships a modern node; putting it first on PATH fixes this." >&2
+  fi
+}
+
 cmd_usage() {
   local no_switch=0 bypass_cache=0 relaunch=""
   local arg
@@ -945,20 +1210,85 @@ cmd_usage() {
   done
   USAGE_BYPASS_CACHE="$bypass_cache"
 
-  if [[ ! -d "$ACCOUNTS_DIR" ]] || [[ -z "$(ls -A "$ACCOUNTS_DIR" 2>/dev/null)" ]]; then
+  local labels
+  labels="$(saved_labels)"
+  if [[ -z "$labels" ]]; then
     echo "no saved accounts -- run: ccswitch save <label>"
     return 0
   fi
+
+  warn_if_refresh_unavailable
 
   # Keep the active account's snapshot current on every poll (the CtrlA poller
   # runs this every 5 min), so its refresh token never goes stale behind
   # Claude Code's back.
   mirror_live_to_snapshot
 
-  local rows="" headroom_lookup="" label_dir label row
-  for label_dir in "$ACCOUNTS_DIR"/*/; do
-    label="$(basename "$label_dir")"
-    row="$(build_usage_row "$label")"
+  # Row building runs in three phases so the one part that is a per-account
+  # network round trip -- the usage GET -- can overlap, while token refreshes
+  # stay strictly serial (see resolve_row_state for why that is not optional).
+  #
+  # Unquoted $labels is safe throughout (see saved_labels' GUARANTEE), and no
+  # element can escape the per-label file names below.
+
+  # Phase 1 (serial): resolve each account's token, refreshing where needed.
+  # Serial on purpose -- see resolve_row_state.
+  local resolve_dir="$CCSWITCH_TMPDIR/resolve"
+  mkdir -p "$resolve_dir" && chmod 700 "$resolve_dir"
+  local label
+  for label in $labels; do
+    # Each line carries that account's access AND refresh token, so the file is
+    # created 600 BEFORE anything is written into it -- the same rule
+    # fetch_usage_raw's curl config file follows. $CCSWITCH_TMPDIR is already
+    # 700; this is the second lock, not the only one.
+    : >"$resolve_dir/$label"
+    chmod 600 "$resolve_dir/$label"
+    resolve_row_state "$label" >"$resolve_dir/$label"
+  done
+
+  # Phase 2 (parallel, capped): the usage GET for every account that has a
+  # token. This is the per-account round trip, and it touches nothing shared.
+  # Each job writes its own file -- never stdout, which is the rendered table.
+  # (Background jobs are subshells, so they do NOT inherit the EXIT trap and
+  # cannot delete $CCSWITCH_TMPDIR out from under the run.)
+  local fetch_dir="$CCSWITCH_TMPDIR/fetch"
+  mkdir -p "$fetch_dir" && chmod 700 "$fetch_dir"
+  local inflight=0 state marker access refresh did_refresh
+  for label in $labels; do
+    # Clear FIRST, every iteration. If the redirect below ever fails (a missing
+    # phase-1 file -- only reachable if phase 1 could not write it at all),
+    # `read` never runs, and without the reset these would silently keep the
+    # PREVIOUS label's values: one account's token fetching, and caching,
+    # another account's usage.
+    state=""; marker=""; access=""; refresh=""; did_refresh=""
+    IFS='|' read -r state marker access refresh did_refresh <"$resolve_dir/$label"
+    # A terminal state needs no GET. The empty-token guard is belt-and-braces:
+    # resolve_row_state never emits an empty state with no token, so this only
+    # fires if its file could not be written at all -- and a GET with an empty
+    # bearer is never worth sending.
+    { [[ -n "$state" ]] || [[ -z "$access" ]]; } && continue
+    fetch_row_usage "$label" "$access" >"$fetch_dir/$label" &
+    inflight=$((inflight + 1))
+    if [[ "$inflight" -ge "$USAGE_MAX_PARALLEL" ]]; then
+      wait
+      inflight=0
+    fi
+  done
+  wait
+
+  # Phase 3 (serial): assemble rows in label order, running the rare 401/403
+  # refresh-and-retry. Order is the sorted label order saved_labels produces, so
+  # output does not depend on which fetch finished first.
+  local rows="" headroom_lookup="" row fetch_result
+  for label in $labels; do
+    state=""; marker=""; access=""; refresh=""; did_refresh=""   # see phase 2
+    IFS='|' read -r state marker access refresh did_refresh <"$resolve_dir/$label"
+    if [[ -n "$state" ]]; then
+      row="${label}|${marker}|${state}||||"
+    else
+      fetch_result="$(cat "$fetch_dir/$label" 2>/dev/null)"
+      row="$(finish_row "$label" "$marker" "$access" "$refresh" "$did_refresh" "$fetch_result")"
+    fi
     rows+="${row}"$'\n'
     headroom_lookup+="$(echo "$row" | awk -F'|' '{print $1"|"$3"|"$4"|"$5}')"$'\n'
   done
@@ -1024,6 +1354,7 @@ COMMANDS
                                use when the refresh endpoint is rate-limiting
   ccswitch refresh-resume      re-enable token refresh
   ccswitch help                show this help (also -h, --help)
+  ccswitch version             print the version (also --version, -V)
 
 usage FLAGS
   --no-switch   just print the table, do not prompt to switch
@@ -1080,6 +1411,9 @@ main() {
       ;;
     help | -h | --help)
       usage_text
+      ;;
+    version | --version | -V)
+      echo "ccswitch $CCSWITCH_VERSION"
       ;;
     -*)
       echo "Error: unknown option '$cmd'." >&2

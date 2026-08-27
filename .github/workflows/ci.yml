@@ -1,0 +1,39 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # jq, curl, node and bash are all preinstalled on ubuntu-latest runners.
+      # Printed so a future runner-image change that drops one is obvious in the
+      # log instead of surfacing as a confusing suite failure.
+      - name: Show tool versions
+        run: |
+          bash --version | head -1
+          jq --version
+          curl --version | head -1
+          node --version
+
+      - name: Run test suites
+        run: bash tests/run_all.sh
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install shellcheck
+        run: sudo apt-get update && sudo apt-get install -y shellcheck
+
+      # --severity=warning, not the default: `style` findings on a codebase this
+      # deliberate are noise, and a gate that cries wolf gets ignored. Raise it
+      # to `style` only alongside a pass that actually fixes them.
+      - name: shellcheck
+        run: shellcheck --severity=warning --shell=bash ccswitch statusline-usage.sh install.sh uninstall.sh tests/*.sh

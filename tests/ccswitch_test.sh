@@ -252,15 +252,6 @@ EOF
     fail "case7g reserved word 'list' not rejected by delete (exit=$EXIT_CODE): $OUT"
   fi
 
-  # --- Case 8: security -- no token ever appears in any captured output -----
-  local combined
-  combined="$(cat "$ALL_OUTPUT_LOG")"
-  if ! printf '%s' "$combined" | grep -q "$SECRET_A" && ! printf '%s' "$combined" | grep -q "$SECRET_B"; then
-    pass "case8 no secret token ever appears in captured output"
-  else
-    fail "case8 SECURITY LEAK: a secret token appeared in output"
-  fi
-
   # --- Case 9: bare `ccswitch` with zero args exercises the no-args branch --
   # (distinct from explicit `list`: this call passes NO subcommand at all)
   run_cc "$home_dir" ""
@@ -377,6 +368,258 @@ EOF
     fail "case13 mcpOAuth preservation (exit=$EXIT_CODE grant=$kept_grant refresh=$switched_refresh): $OUT"
   fi
   rm -rf "$n_home"
+
+  # --- Case 14: a corrupt snapshot must NOT destroy ~/.claude.json -----------
+  # jq failing mid-switch used to leave an EMPTY .claude.json behind (the write
+  # was `jq ... >"$tmp"; mv "$tmp" "$dest"` with no status check), while
+  # ccswitch still printed "Switched to ..." and exited 0. .claude.json holds
+  # project history, mcpServers and onboarding state, so that is total config
+  # loss on a switch to one bad account.
+  local home14 corrupt_dir before14
+  home14="$(make_sandbox)"
+  write_claude_json "$home14" "a@x.com" "OrgA" "uuid-a"
+  write_credentials "$home14" "REFRESH_A" "$SECRET_A"
+  run_cc "$home14" "" save good
+  corrupt_dir="$home14/.claude/accounts/broken"
+  mkdir -p "$corrupt_dir"
+  chmod 700 "$corrupt_dir"
+  jq -n '{claudeAiOauth: {accessToken: "X", refreshToken: "Y", expiresAt: 1}}' >"$corrupt_dir/credentials.json"
+  # Truncated file -- exactly what an interrupted or disk-full `save` leaves.
+  printf '{"accountUuid": "uuid-bro' >"$corrupt_dir/oauthAccount.json"
+  before14="$(cat "$home14/.claude.json")"
+
+  run_cc "$home14" "" broken
+
+  local after14 still_valid14 preserved14
+  after14="$(cat "$home14/.claude.json")"
+  still_valid14="$(jq -e . "$home14/.claude.json" >/dev/null 2>&1 && echo yes || echo no)"
+  preserved14="$(jq -r '.unrelatedTopLevelKey // empty' "$home14/.claude.json" 2>/dev/null)"
+
+  if [[ "$EXIT_CODE" -ne 0 ]] \
+    && [[ "$still_valid14" == "yes" ]] \
+    && [[ "$after14" == "$before14" ]] \
+    && [[ "$preserved14" == "preserve-me" ]] \
+    && ! printf '%s' "$OUT" | grep -q "Switched to"; then
+    pass "case14 switch to a corrupt snapshot fails loudly and leaves .claude.json byte-identical"
+  else
+    fail "case14 corrupt snapshot damaged .claude.json (exit=$EXIT_CODE valid=$still_valid14 preserved=$preserved14): $OUT"
+  fi
+
+  rm -rf "$home14"
+
+  # --- Case 15: a healthy switch backs up .claude.json ----------------------
+  # .credentials.json has always been backed up before being overwritten;
+  # .claude.json was not, so there was nothing to recover from.
+  local home15
+  home15="$(make_sandbox)"
+  write_claude_json "$home15" "a@x.com" "OrgA" "uuid-a"
+  write_credentials "$home15" "REFRESH_A" "$SECRET_A"
+  run_cc "$home15" "" save first
+  write_claude_json "$home15" "b@y.com" "OrgB" "uuid-b"
+  write_credentials "$home15" "REFRESH_B" "$SECRET_B"
+  run_cc "$home15" "" save second
+  run_cc "$home15" "" first
+
+  local bak15 bak_email15 live_email15
+  bak15="$home15/.claude.json.bak"
+  bak_email15="$(jq -r '.oauthAccount.emailAddress // empty' "$bak15" 2>/dev/null)"
+  # Not enough to check the .bak holds the PRE-switch identity -- confirm the
+  # switch actually landed the TARGET identity in the live .claude.json too,
+  # or a broken write that left .bak correct but .claude.json untouched would
+  # pass this case anyway.
+  live_email15="$(jq -r '.oauthAccount.emailAddress // empty' "$home15/.claude.json" 2>/dev/null)"
+
+  if [[ "$EXIT_CODE" -eq 0 ]] \
+    && [[ -f "$bak15" ]] \
+    && [[ "$bak_email15" == "b@y.com" ]] \
+    && [[ "$(file_mode "$bak15")" == "600" ]] \
+    && [[ "$live_email15" == "a@x.com" ]]; then
+    pass "case15 switch backs up .claude.json (pre-switch identity, mode 600) and updates it to the target identity"
+  else
+    fail "case15 .claude.json backup/update wrong (exit=$EXIT_CODE bak_email=$bak_email15 live_email=$live_email15 mode=$(file_mode "$bak15")): $OUT"
+  fi
+
+  rm -rf "$home15"
+
+  # --- Case 16: a 0-byte oauthAccount.json must NOT pass the switch
+  # pre-flight. `jq empty` exits 0 on a zero-byte file ("zero JSON documents"
+  # is valid JSON to jq), so a bare `jq empty` check lets a 0-byte snapshot
+  # through. This is not hypothetical: the OLD unchecked `cmd_save` wrote
+  # `jq '.oauthAccount // {}' >"$tmp"` with no status check, so a failed,
+  # killed, or disk-full save produced exactly a 0-byte oauthAccount.json --
+  # corruption that is already sitting in real users' ~/.claude/accounts/*.
+  # A 0-byte oauthAccount.json passing the pre-flight means
+  # `jq --slurpfile oauth <empty-file> '.oauthAccount = $oauth[0]'` happily
+  # writes `"oauthAccount": null` into .claude.json while ccswitch prints
+  # "Switched to ..." and exits 0 -- silent identity loss.
+  local home16
+  home16="$(make_sandbox)"
+  write_claude_json "$home16" "a@x.com" "OrgA" "uuid-a"
+  write_credentials "$home16" "REFRESH_A" "$SECRET_A"
+  run_cc "$home16" "" save good16
+  : >"$home16/.claude/accounts/good16/oauthAccount.json"   # 0-byte, planted after a healthy save
+
+  local before16
+  before16="$(cat "$home16/.claude.json")"
+
+  run_cc "$home16" "" good16
+
+  local after16 after_oauth16
+  after16="$(cat "$home16/.claude.json")"
+  after_oauth16="$(jq -r '.oauthAccount // "MISSING"' "$home16/.claude.json" 2>/dev/null)"
+
+  if [[ "$EXIT_CODE" -ne 0 ]] \
+    && [[ "$after16" == "$before16" ]] \
+    && [[ "$after_oauth16" != "null" ]] \
+    && [[ "$after_oauth16" != "MISSING" ]] \
+    && ! printf '%s' "$OUT" | grep -q "Switched to"; then
+    pass "case16 a 0-byte oauthAccount.json fails the switch pre-flight and leaves .claude.json's oauthAccount intact (not null)"
+  else
+    fail "case16 0-byte oauthAccount.json not rejected (exit=$EXIT_CODE oauth=$after_oauth16): $OUT"
+  fi
+
+  rm -rf "$home16"
+
+  # --- Case 17: dotfiles beside the accounts are not accounts ---------------
+  # The emptiness check used `ls -A`, which counts the dot-files ccswitch keeps
+  # in the accounts dir (.no-refresh, .refresh-backoff), while the loop globbed
+  # */ with no nullglob and no -d guard -- so an unmatched glob reached
+  # basename and printed a phantom account literally named '*'.
+  local home17
+  home17="$(make_sandbox)"
+  write_claude_json "$home17" "a@x.com" "OrgA" "uuid-a"
+  write_credentials "$home17" "REFRESH_A" "$SECRET_A"
+
+  run_cc "$home17" "" refresh-pause
+  run_cc "$home17" "" list
+
+  if [[ "$EXIT_CODE" -eq 0 ]] \
+    && printf '%s' "$OUT" | grep -q "no saved accounts" \
+    && ! printf '%s' "$OUT" | grep -q '\*'; then
+    pass "case17 list ignores dot-files in the accounts dir (no phantom '*' account)"
+  else
+    fail "case17 phantom account from dot-file (exit=$EXIT_CODE): $OUT"
+  fi
+
+  # A stray regular file must not become an account either (.DS_Store on macOS).
+  : >"$home17/.claude/accounts/.DS_Store"
+  run_cc "$home17" "" save real
+  run_cc "$home17" "" list
+
+  local label_lines17
+  label_lines17="$(printf '%s\n' "$OUT" | grep -c 'real$')"
+  if [[ "$EXIT_CODE" -eq 0 ]] \
+    && [[ "$label_lines17" -eq 1 ]] \
+    && ! printf '%s' "$OUT" | grep -q 'DS_Store' \
+    && [[ "$(printf '%s\n' "$OUT" | grep -c .)" -eq 1 ]]; then
+    pass "case17b list shows exactly the one real account beside a stray file"
+  else
+    fail "case17b stray file leaked into list (exit=$EXIT_CODE): $OUT"
+  fi
+
+  rm -rf "$home17"
+
+  # --- Case 18: --version reports the installed copy's version --------------
+  # ccswitch is COPIED into ~/.claude by install.sh, so the checkout it came
+  # from is not available to inspect. It has to be able to say what it is.
+  local home18
+  home18="$(make_sandbox)"
+
+  run_cc "$home18" "" --version
+  if [[ "$EXIT_CODE" -eq 0 ]] && printf '%s' "$OUT" | grep -Eq '^ccswitch [0-9]+\.[0-9]+\.[0-9]+$'; then
+    pass "case18 --version prints 'ccswitch <semver>'"
+  else
+    fail "case18 --version wrong (exit=$EXIT_CODE): $OUT"
+  fi
+
+  run_cc "$home18" "" version
+  if [[ "$EXIT_CODE" -eq 0 ]] && printf '%s' "$OUT" | grep -Eq '^ccswitch [0-9]+\.[0-9]+\.[0-9]+$'; then
+    pass "case18b bare 'version' subcommand matches --version"
+  else
+    fail "case18b version subcommand wrong (exit=$EXIT_CODE): $OUT"
+  fi
+
+  # 'version' must be reserved, or it would be ambiguous with a label.
+  run_cc "$home18" "" save version
+  if [[ "$EXIT_CODE" -ne 0 ]] && printf '%s' "$OUT" | grep -q "reserved"; then
+    pass "case18c 'version' is a reserved label"
+  else
+    fail "case18c 'version' not reserved (exit=$EXIT_CODE): $OUT"
+  fi
+
+  rm -rf "$home18"
+
+  # --- Case 19: phantom-account regression -- a directory under accounts/
+  # that `ccswitch save` did NOT create (planted by hand, holding whitespace
+  # or a glob character) must not be enumerated by saved_labels. The
+  # pre-saved_labels loop (`for label_dir in "$ACCOUNTS_DIR"/*/`) was immune
+  # to both; unquoted consumption of saved_labels' output reopened them. ----
+  local home19 accounts_dir19
+  home19="$(make_sandbox)"
+  write_claude_json "$home19" "a@x.com" "OrgA" "uuid-a"
+  write_credentials "$home19" "REFRESH_A" "$SECRET_A"
+  accounts_dir19="$home19/.claude/accounts"
+
+  run_cc "$home19" "" save gooduser
+
+  # 19a: a directory name containing whitespace must not split into two
+  # phantom rows ("my" and "account"), and must not disturb the legit
+  # account's listing.
+  mkdir -p "$accounts_dir19/my account"
+  chmod 700 "$accounts_dir19/my account"
+  jq -n '{claudeAiOauth: {accessToken: "X", refreshToken: "Y", expiresAt: 1}}' \
+    >"$accounts_dir19/my account/credentials.json"
+  chmod 600 "$accounts_dir19/my account/credentials.json"
+
+  run_cc "$home19" "" list
+  if [[ "$EXIT_CODE" -eq 0 ]] \
+    && printf '%s' "$OUT" | grep -qx '\* gooduser' \
+    && [[ "$(printf '%s\n' "$OUT" | grep -c .)" -eq 1 ]]; then
+    pass "case19a list ignores a directory name containing whitespace (no phantom 'my'/'account' rows)"
+  else
+    fail "case19a whitespace directory name leaked as phantom account(s) (exit=$EXIT_CODE): $OUT"
+  fi
+
+  rm -rf "$accounts_dir19/my account"
+
+  # 19b: a directory name containing a glob character must not cause
+  # unquoted expansion to leak filenames from the CURRENT WORKING DIRECTORY.
+  mkdir -p "$accounts_dir19/zzz*"
+  chmod 700 "$accounts_dir19/zzz*"
+  jq -n '{claudeAiOauth: {accessToken: "X", refreshToken: "Y", expiresAt: 1}}' \
+    >"$accounts_dir19/zzz*/credentials.json"
+  chmod 600 "$accounts_dir19/zzz*/credentials.json"
+
+  local glob_cwd19 orig_pwd19
+  glob_cwd19="$(make_sandbox)"
+  touch "$glob_cwd19/zzz_should_not_leak.txt"
+  orig_pwd19="$(pwd)"
+  cd "$glob_cwd19" || exit 1
+  run_cc "$home19" "" list
+  cd "$orig_pwd19" || exit 1
+
+  if [[ "$EXIT_CODE" -eq 0 ]] \
+    && printf '%s' "$OUT" | grep -qx '\* gooduser' \
+    && ! printf '%s' "$OUT" | grep -q "zzz_should_not_leak" \
+    && [[ "$(printf '%s\n' "$OUT" | grep -c .)" -eq 1 ]]; then
+    pass "case19b list ignores a directory name containing a glob character (no CWD filename leak)"
+  else
+    fail "case19b glob-char directory name leaked CWD filenames (exit=$EXIT_CODE): $OUT"
+  fi
+
+  rm -rf "$glob_cwd19" "$home19"
+
+  # --- Case 8: security -- no token ever appears in any captured output -----
+  # Runs LAST, after every other case has had a chance to append to
+  # $ALL_OUTPUT_LOG: a scan positioned earlier in main() would silently miss
+  # any case registered after it.
+  local combined
+  combined="$(cat "$ALL_OUTPUT_LOG")"
+  if ! printf '%s' "$combined" | grep -q "$SECRET_A" && ! printf '%s' "$combined" | grep -q "$SECRET_B"; then
+    pass "case8 no secret token ever appears in captured output"
+  else
+    fail "case8 SECURITY LEAK: a secret token appeared in output"
+  fi
 
   rm -rf "$home_dir" "$ALL_OUTPUT_LOG"
 

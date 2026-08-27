@@ -60,6 +60,9 @@ main() {
   local command_val interval_val
   command_val="$(jq -r '.statusLine.command // empty' "$settings_file" 2>/dev/null)"
   interval_val="$(jq -r '.statusLine.refreshInterval // empty' "$settings_file" 2>/dev/null)"
+  # Asserting against the literal installer writes (Claude Code expands this
+  # tilde at run time, not bash) -- not a path this test should resolve.
+  # shellcheck disable=SC2088
   if [[ "$command_val" == "~/.claude/statusline-usage.sh" ]] && [[ "$interval_val" == "5" ]]; then
     pass "case2 settings.json created with correct statusLine command + refreshInterval 5"
   else
@@ -89,6 +92,9 @@ main() {
   new_command="$(jq -r '.statusLine.command // empty' "$settings2" 2>/dev/null)"
   backup_preserved="$(jq -r '.unrelatedTopLevelKey // empty' "$backup2" 2>/dev/null)"
 
+  # Asserting against the literal installer writes (Claude Code expands this
+  # tilde at run time, not bash) -- not a path this test should resolve.
+  # shellcheck disable=SC2088
   if [[ "$EXIT_CODE" -eq 0 ]] \
     && [[ "$preserved" == "preserve-me" ]] \
     && [[ "$new_command" == "~/.claude/statusline-usage.sh" ]] \
@@ -214,6 +220,166 @@ main() {
   fi
 
   rm -rf "$home7"
+
+  # --- Case 10: re-running the installer must not destroy the FIRST backup ---
+  # The backup exists to answer "what did my settings.json look like before
+  # cc-usage-bar?". Copying unconditionally meant run 2 overwrote it with the
+  # post-install file, so the original statusLine was gone for good.
+  local home10 settings10 backup10
+  home10="$(make_sandbox)"
+  mkdir -p "$home10/.claude"
+  settings10="$home10/.claude/settings.json"
+  backup10="$home10/.claude/settings.json.bak"
+  jq -n '{statusLine: {type: "command", command: "/my/previous/bar.sh"}, theme: "dark"}' >"$settings10"
+
+  run_install "$home10" "n"
+  run_install "$home10" "n"
+
+  local bak_command10 live_command10 bak_theme10
+  bak_command10="$(jq -r '.statusLine.command // empty' "$backup10" 2>/dev/null)"
+  live_command10="$(jq -r '.statusLine.command // empty' "$settings10" 2>/dev/null)"
+  bak_theme10="$(jq -r '.theme // empty' "$backup10" 2>/dev/null)"
+
+  # Asserting against the literal installer writes (Claude Code expands this
+  # tilde at run time, not bash) -- not a path this test should resolve.
+  # shellcheck disable=SC2088
+  if [[ "$EXIT_CODE" -eq 0 ]] \
+    && [[ "$bak_command10" == "/my/previous/bar.sh" ]] \
+    && [[ "$bak_theme10" == "dark" ]] \
+    && [[ "$live_command10" == "~/.claude/statusline-usage.sh" ]]; then
+    pass "case10 re-running the installer preserves the pre-install settings.json backup"
+  else
+    fail "case10 backup clobbered on re-run (bak_command=$bak_command10 live_command=$live_command10): $OUT"
+  fi
+
+  rm -rf "$home10"
+
+  # --- Case 11: uninstall reverses the install and spares the accounts ------
+  local home11
+  home11="$(make_sandbox)"
+  mkdir -p "$home11/.claude"
+  jq -n '{theme: "dark"}' >"$home11/.claude/settings.json"
+
+  run_install "$home11" "y"
+
+  # Enrolled account + a live credential file the uninstaller must not touch.
+  mkdir -p "$home11/.claude/accounts/work"
+  chmod 700 "$home11/.claude/accounts/work"
+  jq -n '{claudeAiOauth: {accessToken: "KEEP_ME", refreshToken: "KEEP_ME_TOO"}}' \
+    >"$home11/.claude/accounts/work/credentials.json"
+
+  OUT="$(HOME="$home11" SHELL=/bin/bash bash "$REPO_DIR/uninstall.sh" <<<"" 2>&1)"
+  EXIT_CODE=$?
+
+  local statusline_key11 theme11 link11
+  statusline_key11="$(jq -r 'has("statusLine")' "$home11/.claude/settings.json" 2>/dev/null)"
+  theme11="$(jq -r '.theme // empty' "$home11/.claude/settings.json" 2>/dev/null)"
+  link11="$home11/.local/bin/ccswitch"
+
+  # NOTE: uninstall.sh deletes ~/.claude/ccswitch (the symlink target) before
+  # unlinking $link11 itself, so a *dangling* symlink left behind by a bug
+  # still reads `-e` false (it follows the link to a target that's now gone).
+  # Checking `-L` too closes that hole: a surviving symlink, dangling or not,
+  # must fail this assertion.
+  if [[ "$EXIT_CODE" -eq 0 ]] \
+    && [[ ! -e "$home11/.claude/statusline-usage.sh" ]] \
+    && [[ ! -e "$home11/.claude/ccswitch" ]] \
+    && [[ ! -e "$link11" ]] \
+    && [[ ! -L "$link11" ]] \
+    && [[ "$statusline_key11" == "false" ]] \
+    && [[ "$theme11" == "dark" ]] \
+    && [[ -f "$home11/.claude/accounts/work/credentials.json" ]] \
+    && [[ "$(jq -r '.claudeAiOauth.accessToken' "$home11/.claude/accounts/work/credentials.json")" == "KEEP_ME" ]]; then
+    pass "case11 uninstall removes scripts/symlink/statusLine, keeps other settings and all saved accounts"
+  else
+    fail "case11 uninstall wrong (exit=$EXIT_CODE statusLine=$statusline_key11 theme=$theme11): $OUT"
+  fi
+
+  # The accounts dir is the one thing that needs an explicit opt-in.
+  if printf '%s' "$OUT" | grep -q 'accounts'; then
+    pass "case11b uninstall tells the user their saved accounts were left in place"
+  else
+    fail "case11b uninstall silent about saved accounts: $OUT"
+  fi
+
+  OUT="$(HOME="$home11" SHELL=/bin/bash bash "$REPO_DIR/uninstall.sh" --purge-accounts <<<"y" 2>&1)"
+  EXIT_CODE=$?
+  if [[ "$EXIT_CODE" -eq 0 ]] && [[ ! -d "$home11/.claude/accounts" ]]; then
+    pass "case11c --purge-accounts removes saved accounts after confirmation"
+  else
+    fail "case11c --purge-accounts did not remove accounts (exit=$EXIT_CODE): $OUT"
+  fi
+
+  rm -rf "$home11"
+
+  # --- Case 12: --purge-accounts alone is NOT enough -- only an affirmative
+  # y/yes answer may delete accounts/. This pins the two properties that
+  # actually stand between the user and unrecoverable credential loss: a
+  # future refactor of confirm() or the arg-parsing loop must not slip past
+  # either "n" or an empty/EOF answer and delete anything.
+  local home12 creds12 token12
+  home12="$(make_sandbox)"
+  mkdir -p "$home12/.claude"
+  jq -n '{theme: "dark"}' >"$home12/.claude/settings.json"
+  run_install "$home12" "y"
+
+  mkdir -p "$home12/.claude/accounts/work"
+  chmod 700 "$home12/.claude/accounts/work"
+  jq -n '{claudeAiOauth: {accessToken: "DO_NOT_DELETE_ME", refreshToken: "DO_NOT_DELETE_ME_TOO"}}' \
+    >"$home12/.claude/accounts/work/credentials.json"
+  creds12="$home12/.claude/accounts/work/credentials.json"
+
+  # 12a: --purge-accounts + explicit "n"
+  OUT="$(HOME="$home12" SHELL=/bin/bash bash "$REPO_DIR/uninstall.sh" --purge-accounts <<<"n" 2>&1)"
+  EXIT_CODE=$?
+  token12="$(jq -r '.claudeAiOauth.accessToken // empty' "$creds12" 2>/dev/null)"
+  if [[ "$EXIT_CODE" -eq 0 ]] \
+    && [[ -f "$creds12" ]] \
+    && [[ "$token12" == "DO_NOT_DELETE_ME" ]]; then
+    pass "case12a --purge-accounts with 'n' keeps the accounts dir and credential value intact"
+  else
+    fail "case12a --purge-accounts with 'n' lost/altered credentials (exit=$EXIT_CODE token='$token12'): $OUT"
+  fi
+
+  # 12b: --purge-accounts + empty answer (immediate EOF on stdin, as happens
+  # when the uninstaller is run non-interactively without a "y"/"n" piped in).
+  OUT="$(HOME="$home12" SHELL=/bin/bash bash "$REPO_DIR/uninstall.sh" --purge-accounts </dev/null 2>&1)"
+  EXIT_CODE=$?
+  token12="$(jq -r '.claudeAiOauth.accessToken // empty' "$creds12" 2>/dev/null)"
+  if [[ "$EXIT_CODE" -eq 0 ]] \
+    && [[ -f "$creds12" ]] \
+    && [[ "$token12" == "DO_NOT_DELETE_ME" ]]; then
+    pass "case12b --purge-accounts with empty/EOF answer keeps the accounts dir and credential value intact"
+  else
+    fail "case12b --purge-accounts with empty/EOF answer lost/altered credentials (exit=$EXIT_CODE token='$token12'): $OUT"
+  fi
+
+  rm -rf "$home12"
+
+  # --- Case 13: an unknown flag is rejected before anything is touched ------
+  local home13
+  home13="$(make_sandbox)"
+  mkdir -p "$home13/.claude"
+  jq -n '{theme: "dark"}' >"$home13/.claude/settings.json"
+  run_install "$home13" "y"
+
+  mkdir -p "$home13/.claude/accounts/work"
+  chmod 700 "$home13/.claude/accounts/work"
+  jq -n '{claudeAiOauth: {accessToken: "DO_NOT_DELETE_ME"}}' \
+    >"$home13/.claude/accounts/work/credentials.json"
+
+  OUT="$(HOME="$home13" SHELL=/bin/bash bash "$REPO_DIR/uninstall.sh" --bogus <<<"" 2>&1)"
+  EXIT_CODE=$?
+  if [[ "$EXIT_CODE" -ne 0 ]] \
+    && [[ -e "$home13/.claude/statusline-usage.sh" ]] \
+    && [[ -e "$home13/.claude/ccswitch" ]] \
+    && [[ -d "$home13/.claude/accounts" ]]; then
+    pass "case13 unknown flag rejected (nonzero exit), nothing removed"
+  else
+    fail "case13 unknown flag not safely rejected (exit=$EXIT_CODE): $OUT"
+  fi
+
+  rm -rf "$home13"
 
   echo
   echo "----------------------------------------"
