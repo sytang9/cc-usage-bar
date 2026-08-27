@@ -44,12 +44,15 @@ SECRET_TOKENS=(
   REFRESH_M_NEW REFRESH_M_OLD TOK_M
   TOK_ACT TOK_ACT_OLD REFRESH_ACT_LIVE REFRESH_ACT_SNAP TOK_NEW_L REFRESH_ROT_L TOK_NEW_S REFRESH_ROT_S
   TOK_CNT REFRESH_CNT
+  REFRESH_LIVE_OTHER TOK_LIVE_OTHER
   REFRESH_SIGNAL_SECRET TOK_OLD
   REFRESH_NODE TOK_NODE_OLD
   REFRESH_SKEW TOK_SKEW_OLD TOK_SKEW_NEW REFRESH_SKEW_ROT
   REFRESH_P1 REFRESH_P2 REFRESH_P3 REFRESH_P4 REFRESH_P5 REFRESH_P6
   TOK_P1 TOK_P2 TOK_P3 TOK_P4 TOK_P5 TOK_P6
   REFRESH_S1 REFRESH_S2 TOK_S1_OLD TOK_S2_OLD
+  REFRESH_SHARED_LIVE TOK_SHARED_OLD TOK_SHARED_NEW REFRESH_SHARED_ROT
+  REFRESH_PEER TOK_PEER_OLD TOK_PEER_NEW REFRESH_PEER_ROT
 )
 
 pass() {
@@ -654,6 +657,60 @@ case22_refreshes_stay_serial() {
   rm -rf "$home" "$ctl"
 }
 
+# Regression: is_active_account FAILS OPEN when ~/.claude.json carries no
+# .oauthAccount.accountUuid, so every account -- including the one backing the
+# running session -- read as non-active, and the non-active branch is the one
+# that refreshes. ccswitch then rotated the LIVE session's refresh token, wrote
+# the rotated value to the snapshot only, and left ~/.claude/.credentials.json
+# holding a token the server had already consumed: a forced re-login.
+#
+# The gate is token equality, not identity, so it holds with no identity file at
+# all. acct_peer is in the same run to prove the gate is narrow: an account that
+# does NOT share the live refresh token must still refresh normally.
+case23_identity_unknown_never_rotates_live_token() {
+  local home ctl tokcount live_rt shared_rt peer_rt
+  home="$(new_home)"
+  ctl="$(new_ctl)"
+
+  # No uuid: live_account_uuid comes back empty and identity is UNKNOWN.
+  write_claude_json "$home"
+  write_live_credentials "$home" "REFRESH_SHARED_LIVE" "TOK_SHARED_OLD" 1
+  # The snapshot mirrors the live token -- exactly what mirror_live_to_snapshot
+  # leaves behind on a healthy machine.
+  write_account_credentials "$home" "acct_shared" "REFRESH_SHARED_LIVE" "TOK_SHARED_OLD" 1
+  write_account_oauth "$home" "acct_shared" "UUID_SHARED"
+  write_account_credentials "$home" "acct_peer" "REFRESH_PEER" "TOK_PEER_OLD" 1
+  write_account_oauth "$home" "acct_peer" "UUID_PEER"
+
+  # Both refreshes WOULD succeed. Only the peer's may be attempted.
+  set_token_response "$ctl" "REFRESH_SHARED_LIVE" 200 "$(refresh_success_body TOK_SHARED_NEW REFRESH_SHARED_ROT)"
+  set_token_response "$ctl" "REFRESH_PEER" 200 "$(refresh_success_body TOK_PEER_NEW REFRESH_PEER_ROT)"
+  set_usage_response "$ctl" "TOK_SHARED_OLD" 200 "$(usage_body 30 40)"
+  set_usage_response "$ctl" "TOK_PEER_NEW" 200 "$(usage_body 50 60)"
+
+  run_cc "$home" "$ctl" "" --no-switch
+
+  tokcount="$(token_call_count "$ctl")"
+  live_rt="$(jq -r '.claudeAiOauth.refreshToken' "$home/.claude/.credentials.json" 2>/dev/null)"
+  shared_rt="$(jq -r '.claudeAiOauth.refreshToken' "$home/.claude/accounts/acct_shared/credentials.json" 2>/dev/null)"
+  peer_rt="$(jq -r '.claudeAiOauth.refreshToken' "$home/.claude/accounts/acct_peer/credentials.json" 2>/dev/null)"
+
+  if [[ "$EXIT_CODE" -eq 0 ]] \
+    && [[ "${tokcount//[[:space:]]/}" == "1" ]] \
+    && [[ "$live_rt" == "REFRESH_SHARED_LIVE" ]] \
+    && [[ "$shared_rt" == "REFRESH_SHARED_LIVE" ]] \
+    && [[ "$peer_rt" == "REFRESH_PEER_ROT" ]]; then
+    pass "case23 identity-unknown: the live session's refresh token is never rotated, peers still refresh"
+  else
+    fail "case23 (exit=$EXIT_CODE tok=$tokcount live_rt=$live_rt shared_rt=$shared_rt peer_rt=$peer_rt): $OUT"
+  fi
+
+  rm -rf "$home" "$ctl"
+}
+
+
+
+
 main() {
   if [[ ! -x "$TARGET" ]]; then
     echo "FAIL: target script not found or not executable: $TARGET"
@@ -813,7 +870,13 @@ main() {
     ctl="$(new_ctl)"
 
     write_claude_json "$home" "UUID_OTHER"
-    write_live_credentials "$home" "REFRESH_C" "TOK_C_OLD" 1
+    # The live file must hold a DIFFERENT refresh token than acct_c's snapshot.
+    # A non-active account is only genuinely refreshable if rotating its token
+    # cannot invalidate the live session's -- see is_live_session_account. The
+    # fixture used to reuse REFRESH_C for both, which described an account that
+    # was non-active by uuid yet held the live session's own token: not a state
+    # a real machine reaches, and the one state where refreshing is unsafe.
+    write_live_credentials "$home" "REFRESH_LIVE_OTHER" "TOK_LIVE_OTHER" 1
     write_account_credentials "$home" "acct_c" "REFRESH_C" "TOK_C_OLD" 1
     write_account_oauth "$home" "acct_c" "UUID_C"
 
@@ -1248,6 +1311,7 @@ main() {
   case20_clock_skew_margin
   case21_parallel_usage_is_deterministic
   case22_refreshes_stay_serial
+  case23_identity_unknown_never_rotates_live_token
 
   # =========================================================================
   # Case 8 (security): none of the fake secret tokens ever appear in any
