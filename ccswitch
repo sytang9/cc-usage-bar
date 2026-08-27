@@ -50,7 +50,18 @@ fi
 #    need BASHPID and break bash 3.2 on macOS.)
 #  - `exec` does NOT fire EXIT, so cmd_switch calls cleanup_tmpdir explicitly
 #    before its exec.
+# Set by acquire_refresh_lock. Declared HERE, above the trap block, because
+# cleanup_tmpdir reads it and `set -u` turns an unset read into a hard exit --
+# an early failure would otherwise die inside its own cleanup handler.
+HAVE_REFRESH_LOCK=0
+
 cleanup_tmpdir() {
+  # The lock release is inlined rather than calling release_refresh_lock: this
+  # trap is armed near the top of the file and that function is defined far
+  # below it, so an early exit would reach a name that does not exist yet. The
+  # flag is 0 until the lock is actually taken, and && short-circuits, so
+  # $REFRESH_LOCK_DIR is never expanded before it is defined either.
+  [[ "$HAVE_REFRESH_LOCK" == "1" ]] && rm -rf "$REFRESH_LOCK_DIR"
   rm -rf "$CCSWITCH_TMPDIR"
 }
 trap 'cleanup_tmpdir' EXIT
@@ -117,6 +128,11 @@ TOKEN_EXPIRY_SKEW_SECONDS=60
 # the refresh in flight indefinitely, and every second in flight is a second in
 # which the outcome is unknown -- see attempt_refresh's in-flight marker.
 REFRESH_TIMEOUT_SECONDS=20
+
+# How long to wait for the single-flight refresh lock before giving up and
+# reporting the accounts as transiently unavailable. See acquire_refresh_lock.
+# Overridable so the lock-contention test does not spend the full wait.
+REFRESH_LOCK_WAIT_SECONDS="${CCSWITCH_LOCK_WAIT_SECONDS:-5}"
 
 # Set from cmd_usage's --refresh flag. Defaulted here because fetch_row_usage
 # reads it and `set -u` turns an unset read into a hard exit -- a trap for any
@@ -844,6 +860,52 @@ is_token_expired() {
 # adding pressure without losing the (GET-only) usage view.
 NO_REFRESH_FLAG="$ACCOUNTS_DIR/.no-refresh"
 
+# Single-flight lock over the refresh endpoint. Two overlapping `ccswitch usage`
+# runs -- a timer-driven poller plus a manual run is the ordinary way this
+# happens -- each read the SAME snapshot refresh token and each POST it. The
+# second POST is a replay by construction. A replayed single-use refresh token
+# is not a benign error: the provider reads it as token theft and revokes the
+# whole grant family, so one accidental double-poll can take out every token
+# issued from that login rather than just failing one row.
+#
+# mkdir is the portable atomic test-and-set here. flock(1) is not on stock
+# macOS, and this file targets bash 3.2 for that reason.
+REFRESH_LOCK_DIR="$ACCOUNTS_DIR/.refresh-lock"
+
+# acquire_refresh_lock -> 0 if held (sets HAVE_REFRESH_LOCK=1), 1 if not.
+# A caller that does not get it must treat refresh as transiently unavailable,
+# never as an account being dead.
+acquire_refresh_lock() {
+  local waited=0 reclaimed=0 holder
+  [[ -d "$ACCOUNTS_DIR" ]] || return 1
+  while ! mkdir "$REFRESH_LOCK_DIR" 2>/dev/null; do
+    # Reclaim a lock whose owner is gone. A crash or SIGKILL runs no trap, and
+    # a lock nobody holds would otherwise wedge refresh permanently. Reclaimed
+    # at most once per call, so a losing race cannot spin here.
+    if [[ "$reclaimed" == "0" ]]; then
+      reclaimed=1
+      holder="$(cat "$REFRESH_LOCK_DIR/pid" 2>/dev/null)"
+      if [[ "$holder" =~ ^[0-9]+$ ]] && ! kill -0 "$holder" 2>/dev/null; then
+        rm -rf "$REFRESH_LOCK_DIR"
+        continue
+      fi
+    fi
+    [[ "$waited" -ge "$REFRESH_LOCK_WAIT_SECONDS" ]] && return 1
+    sleep 1
+    waited=$((waited + 1))
+  done
+  chmod 700 "$REFRESH_LOCK_DIR" 2>/dev/null
+  echo $$ >"$REFRESH_LOCK_DIR/pid" 2>/dev/null
+  HAVE_REFRESH_LOCK=1
+  return 0
+}
+
+release_refresh_lock() {
+  [[ "$HAVE_REFRESH_LOCK" == "1" ]] || return 0
+  HAVE_REFRESH_LOCK=0
+  rm -rf "$REFRESH_LOCK_DIR"
+}
+
 REFRESH_BACKOFF_FILE="$ACCOUNTS_DIR/.refresh-backoff"
 is_refresh_backoff() {
   local until
@@ -883,6 +945,11 @@ attempt_refresh() {
 
   # Don't call the endpoint during an active 429 backoff window.
   is_refresh_backoff && return 2
+
+  # No single-flight lock -> another ccswitch may be mid-POST with this very
+  # token. Transient, so return 2 ("wait"): an account is not dead just because
+  # this process could not get a turn.
+  [[ "$HAVE_REFRESH_LOCK" == "1" ]] || return 2
 
   local marker
   marker="$(refresh_inflight_marker "$label")"
@@ -1338,6 +1405,15 @@ cmd_usage() {
   fi
 
   warn_if_refresh_unavailable
+
+  # Single-flight over the refresh endpoint for the whole run. Held even when
+  # nothing turns out to need refreshing: which accounts need one is only known
+  # per-account, inside the loop, and taking the lock there would reintroduce
+  # exactly the interleaving it exists to prevent.
+  if ! acquire_refresh_lock; then
+    echo "Warning: another ccswitch is refreshing tokens; skipping refresh this run." >&2
+    echo "Rows for expired accounts show the wait state. Re-run when it finishes." >&2
+  fi
 
   # Keep the active account's snapshot current on every poll (the CtrlA poller
   # runs this every 5 min), so its refresh token never goes stale behind

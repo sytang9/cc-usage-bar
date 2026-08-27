@@ -47,6 +47,7 @@ SECRET_TOKENS=(
   REFRESH_LIVE_OTHER TOK_LIVE_OTHER
   REFRESH_MIRROR_GOOD TOK_MIRROR_GOOD
   REFRESH_BURN TOK_BURN_OLD TOK_BURN_NEW REFRESH_BURN_ROT
+  REFRESH_LOCKED TOK_LOCKED_OLD TOK_LOCKED_NEW REFRESH_LOCKED_ROT
   REFRESH_SIGNAL_SECRET TOK_OLD
   REFRESH_NODE TOK_NODE_OLD
   REFRESH_SKEW TOK_SKEW_OLD TOK_SKEW_NEW REFRESH_SKEW_ROT
@@ -782,6 +783,49 @@ case25_unknown_outcome_token_is_retired_not_replayed() {
   rm -rf "$home" "$ctl"
 }
 
+# Regression: nothing serialized two concurrent ccswitch runs, so a timer-driven
+# poller overlapping a manual run had both read the same snapshot token and both
+# POST it -- the second a replay by construction. A run that cannot take the
+# single-flight lock must report the account as transiently unavailable and
+# leave its token untouched, NOT declare it dead.
+case26_lock_contention_is_transient_not_fatal() {
+  local home ctl tokcount snap_rt
+  home="$(new_home)"
+  ctl="$(new_ctl)"
+
+  write_claude_json "$home" "UUID_OTHER"
+  write_live_credentials "$home" "REFRESH_LIVE_OTHER" "TOK_LIVE_OTHER" "$(future_ms)"
+  write_account_credentials "$home" "acct_locked" "REFRESH_LOCKED" "TOK_LOCKED_OLD" 1
+  write_account_oauth "$home" "acct_locked" "UUID_LOCKED"
+  set_token_response "$ctl" "REFRESH_LOCKED" 200 "$(refresh_success_body TOK_LOCKED_NEW REFRESH_LOCKED_ROT)"
+
+  # Hold the lock on behalf of a LIVE process, so the stale-lock reclaim path
+  # correctly declines to steal it.
+  mkdir -p "$home/.claude/accounts/.refresh-lock"
+  echo "$$" >"$home/.claude/accounts/.refresh-lock/pid"
+
+  OUT="$(PATH="$STUB_BIN:$PATH" HOME="$home" CURL_STUB_DIR="$ctl" \
+    CCSWITCH_LOCK_WAIT_SECONDS=0 CCSWITCH_REFRESH_CMD="$STUB_BIN/refresh-helper" \
+    bash "$TARGET" usage --no-switch 2>&1)"
+  EXIT_CODE=$?
+  printf '%s\n' "$OUT" >>"$ALL_OUTPUT_LOG"
+
+  tokcount="$(token_call_count "$ctl")"
+  snap_rt="$(jq -r '.claudeAiOauth.refreshToken' "$home/.claude/accounts/acct_locked/credentials.json" 2>/dev/null)"
+
+  if [[ "$EXIT_CODE" -eq 0 ]] \
+    && [[ "${tokcount//[[:space:]]/}" == "0" ]] \
+    && [[ "$snap_rt" == "REFRESH_LOCKED" ]] \
+    && [[ -d "$home/.claude/accounts/.refresh-lock" ]] \
+    && printf '%s' "$OUT" | grep -q 'rate-limited' \
+    && ! printf '%s' "$OUT" | grep -q 're-login'; then
+    pass "case26 losing the refresh lock is transient: no POST, token intact, holder's lock kept"
+  else
+    fail "case26 (exit=$EXIT_CODE tok=$tokcount snap_rt=$snap_rt): $OUT"
+  fi
+
+  rm -rf "$home" "$ctl"
+}
 
 main() {
   if [[ ! -x "$TARGET" ]]; then
@@ -1386,6 +1430,7 @@ main() {
   case23_identity_unknown_never_rotates_live_token
   case24_blank_live_file_never_destroys_a_snapshot
   case25_unknown_outcome_token_is_retired_not_replayed
+  case26_lock_contention_is_transient_not_fatal
 
   # =========================================================================
   # Case 8 (security): none of the fake secret tokens ever appear in any
