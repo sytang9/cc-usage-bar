@@ -45,6 +45,7 @@ SECRET_TOKENS=(
   TOK_ACT TOK_ACT_OLD REFRESH_ACT_LIVE REFRESH_ACT_SNAP TOK_NEW_L REFRESH_ROT_L TOK_NEW_S REFRESH_ROT_S
   TOK_CNT REFRESH_CNT
   REFRESH_LIVE_OTHER TOK_LIVE_OTHER
+  REFRESH_MIRROR_GOOD TOK_MIRROR_GOOD
   REFRESH_SIGNAL_SECRET TOK_OLD
   REFRESH_NODE TOK_NODE_OLD
   REFRESH_SKEW TOK_SKEW_OLD TOK_SKEW_NEW REFRESH_SKEW_ROT
@@ -708,6 +709,38 @@ case23_identity_unknown_never_rotates_live_token() {
   rm -rf "$home" "$ctl"
 }
 
+# Regression: mirror_live_to_snapshot used to check only that the files existed
+# and the uuid matched, then cp the live file over the snapshot. Claude Code
+# blanks $CREDENTIALS_FILE on a revoked grant or a logout, so that cp replaced a
+# good saved refresh token with an empty one -- turning an account that only
+# needed a re-login into one that could not be switched back to at all.
+case24_blank_live_file_never_destroys_a_snapshot() {
+  local home ctl snap_rt snap_at
+  home="$(new_home)"
+  ctl="$(new_ctl)"
+
+  write_claude_json "$home" "UUID_MIRROR"
+  # Exactly the logged-out shape: empty tokens, expiresAt 0.
+  write_live_credentials "$home" "" "" 0
+  write_account_credentials "$home" "acct_mirror" "REFRESH_MIRROR_GOOD" "TOK_MIRROR_GOOD" "$(future_ms)"
+  write_account_oauth "$home" "acct_mirror" "UUID_MIRROR"
+  set_usage_response "$ctl" "TOK_MIRROR_GOOD" 200 "$(usage_body 10 20)"
+
+  run_cc "$home" "$ctl" "" --no-switch
+
+  snap_rt="$(jq -r '.claudeAiOauth.refreshToken' "$home/.claude/accounts/acct_mirror/credentials.json" 2>/dev/null)"
+  snap_at="$(jq -r '.claudeAiOauth.accessToken' "$home/.claude/accounts/acct_mirror/credentials.json" 2>/dev/null)"
+
+  if [[ "$EXIT_CODE" -eq 0 ]] \
+    && [[ "$snap_rt" == "REFRESH_MIRROR_GOOD" ]] \
+    && [[ "$snap_at" == "TOK_MIRROR_GOOD" ]]; then
+    pass "case24 a blanked live credentials file never overwrites a good snapshot"
+  else
+    fail "case24 mirror destroyed the snapshot (exit=$EXIT_CODE snap_rt=$snap_rt snap_at=$snap_at): $OUT"
+  fi
+
+  rm -rf "$home" "$ctl"
+}
 
 
 
@@ -1312,6 +1345,7 @@ main() {
   case21_parallel_usage_is_deterministic
   case22_refreshes_stay_serial
   case23_identity_unknown_never_rotates_live_token
+  case24_blank_live_file_never_destroys_a_snapshot
 
   # =========================================================================
   # Case 8 (security): none of the fake secret tokens ever appear in any

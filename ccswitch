@@ -358,6 +358,19 @@ mirror_live_to_snapshot() {
   [[ -f "$CLAUDE_JSON" ]] || return 0
   [[ -f "$CREDENTIALS_FILE" ]] || return 0
   [[ -d "$ACCOUNTS_DIR" ]] || return 0
+
+  # Mirror only a live file that still HOLDS a refresh token. Claude Code
+  # blanks $CREDENTIALS_FILE when a grant is revoked or the user logs out --
+  # accessToken "", refreshToken "", expiresAt 0. Copying that over a good
+  # snapshot is not a staleness problem, it is destruction: that account's last
+  # working refresh token is gone, so it can no longer be switched back to and
+  # refreshed, only re-authenticated from scratch. The copy below is one-way
+  # and has no undo, so the emptiness check has to happen HERE, ahead of it.
+  #
+  # Note the asymmetry with the rest of this file: everywhere else an empty
+  # token is a thing to report, here it is a thing to refuse to propagate.
+  is_valid_json_object_file "$CREDENTIALS_FILE" || return 0
+  [[ -n "$(jq -r '.claudeAiOauth.refreshToken // empty' "$CREDENTIALS_FILE" 2>/dev/null)" ]] || return 0
   local live_uuid
   live_uuid="$(live_account_uuid)"
   [[ -n "$live_uuid" ]] || return 0
