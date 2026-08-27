@@ -46,6 +46,7 @@ SECRET_TOKENS=(
   TOK_CNT REFRESH_CNT
   REFRESH_LIVE_OTHER TOK_LIVE_OTHER
   REFRESH_MIRROR_GOOD TOK_MIRROR_GOOD
+  REFRESH_BURN TOK_BURN_OLD TOK_BURN_NEW REFRESH_BURN_ROT
   REFRESH_SIGNAL_SECRET TOK_OLD
   REFRESH_NODE TOK_NODE_OLD
   REFRESH_SKEW TOK_SKEW_OLD TOK_SKEW_NEW REFRESH_SKEW_ROT
@@ -742,6 +743,44 @@ case24_blank_live_file_never_destroys_a_snapshot() {
   rm -rf "$home" "$ctl"
 }
 
+# Regression: attempt_refresh POSTs, THEN writes the result back. An interrupt
+# or a failed write-back between those two left the snapshot holding a token the
+# server had already rotated. The next run re-sent it, and a replayed single-use
+# refresh token is read as token theft: the provider revokes the whole grant
+# family. The in-flight marker records "POSTed, outcome unknown" so the next run
+# retires the token instead of replaying it.
+case25_unknown_outcome_token_is_retired_not_replayed() {
+  local home ctl tokcount snap_rt
+  home="$(new_home)"
+  ctl="$(new_ctl)"
+
+  write_claude_json "$home" "UUID_OTHER"
+  write_live_credentials "$home" "REFRESH_LIVE_OTHER" "TOK_LIVE_OTHER" "$(future_ms)"
+  write_account_credentials "$home" "acct_burn" "REFRESH_BURN" "TOK_BURN_OLD" 1
+  write_account_oauth "$home" "acct_burn" "UUID_BURN"
+  # A replay WOULD succeed against the stub -- the point is that it is never sent.
+  set_token_response "$ctl" "REFRESH_BURN" 200 "$(refresh_success_body TOK_BURN_NEW REFRESH_BURN_ROT)"
+  set_usage_response "$ctl" "TOK_BURN_NEW" 200 "$(usage_body 10 20)"
+  # The marker a killed predecessor would have left behind.
+  : >"$home/.claude/accounts/acct_burn/.refresh-inflight"
+
+  run_cc "$home" "$ctl" "" --no-switch
+
+  tokcount="$(token_call_count "$ctl")"
+  snap_rt="$(jq -r '.claudeAiOauth.refreshToken' "$home/.claude/accounts/acct_burn/credentials.json" 2>/dev/null)"
+
+  if [[ "$EXIT_CODE" -eq 0 ]] \
+    && [[ "${tokcount//[[:space:]]/}" == "0" ]] \
+    && [[ "$snap_rt" == "" ]] \
+    && [[ ! -f "$home/.claude/accounts/acct_burn/.refresh-inflight" ]] \
+    && printf '%s' "$OUT" | grep -q 're-login'; then
+    pass "case25 a refresh with an unknown outcome is retired, never replayed"
+  else
+    fail "case25 (exit=$EXIT_CODE tok=$tokcount snap_rt=$snap_rt): $OUT"
+  fi
+
+  rm -rf "$home" "$ctl"
+}
 
 
 main() {
@@ -1346,6 +1385,7 @@ main() {
   case22_refreshes_stay_serial
   case23_identity_unknown_never_rotates_live_token
   case24_blank_live_file_never_destroys_a_snapshot
+  case25_unknown_outcome_token_is_retired_not_replayed
 
   # =========================================================================
   # Case 8 (security): none of the fake secret tokens ever appear in any

@@ -113,6 +113,11 @@ USAGE_MAX_PARALLEL=4
 # refresh would have handled.
 TOKEN_EXPIRY_SKEW_SECONDS=60
 
+# Wall-clock ceiling on one refresh POST. Without it a hung connection holds
+# the refresh in flight indefinitely, and every second in flight is a second in
+# which the outcome is unknown -- see attempt_refresh's in-flight marker.
+REFRESH_TIMEOUT_SECONDS=20
+
 # Set from cmd_usage's --refresh flag. Defaulted here because fetch_row_usage
 # reads it and `set -u` turns an unset read into a hard exit -- a trap for any
 # future caller that reaches fetch_row_usage without going through cmd_usage.
@@ -647,15 +652,16 @@ refresh_token() {
   else
     node -e '
       const fs = require("fs");
-      const [bodyFile, url] = process.argv.slice(1);
+      const [bodyFile, url, timeoutS] = process.argv.slice(1);
       const body = fs.readFileSync(bodyFile, "utf8");
       fetch(url, { method: "POST",
         headers: { "Content-Type": "application/json",
                    "Origin": "https://claude.ai", "Referer": "https://claude.ai/" },
-        body })
+        body,
+        signal: AbortSignal.timeout(Number(timeoutS) * 1000) })
         .then(async r => { const t = await r.text(); process.stdout.write(t + "\n" + r.status); })
         .catch(() => process.stdout.write("\n000"));
-    ' "$bodyfile" "$TOKEN_REFRESH_URL" 2>/dev/null
+    ' "$bodyfile" "$TOKEN_REFRESH_URL" "$REFRESH_TIMEOUT_SECONDS" 2>/dev/null
   fi
 
   rm -f "$bodyfile"
@@ -852,6 +858,22 @@ set_refresh_backoff() {
 # attempt_refresh <label> <rt> -> exit status: 0 success (echoes new access
 # token), 2 rate-limited/backoff (transient -- do NOT treat as dead), 1 any
 # other failure (genuine -- needs re-login).
+# retire_snapshot_refresh_token <label>: blank the snapshot's refreshToken, so a
+# token the server may already have consumed can never be sent again. Costs one
+# re-login of that account; the replay it prevents costs the whole grant family.
+retire_snapshot_refresh_token() {
+  local label="$1"
+  local f="$ACCOUNTS_DIR/$label/credentials.json"
+  [[ -f "$f" ]] || return 0
+  jq_write "$f" '.claudeAiOauth.refreshToken = ""' "$f"
+}
+
+# refresh_inflight_marker <label> -> the path of that account's in-flight
+# marker. Holds no secret: its existence is the whole signal.
+refresh_inflight_marker() {
+  echo "$ACCOUNTS_DIR/$1/.refresh-inflight"
+}
+
 attempt_refresh() {
   local label="$1" rt="$2"
   [[ -z "$rt" ]] && return 1
@@ -862,29 +884,64 @@ attempt_refresh() {
   # Don't call the endpoint during an active 429 backoff window.
   is_refresh_backoff && return 2
 
+  local marker
+  marker="$(refresh_inflight_marker "$label")"
+
+  # A marker left behind means an earlier run POSTed this refresh token and
+  # never recorded what came back -- it was interrupted, or its write-back
+  # failed. The server may already have rotated it, and OAuth refresh tokens
+  # here are single-use: re-sending a consumed one is read as token theft and
+  # revokes every token in the grant family. So retire it rather than find out.
+  if [[ -f "$marker" ]]; then
+    retire_snapshot_refresh_token "$label" && rm -f "$marker"
+    return 1
+  fi
+
+  : >"$marker" 2>/dev/null || return 1
+  chmod 600 "$marker" 2>/dev/null
+
   local raw
   raw="$(refresh_token "$rt")"
   split_http_response "$raw"
 
+  # Any status we actually received settles the question: 429/4xx/5xx means the
+  # server did not rotate, 2xx means it did. Only an outcome never learned (the
+  # process died mid-POST) leaves the marker in place for the next run to find.
   if [[ "$HTTP_STATUS" == "429" ]]; then
+    rm -f "$marker"
     set_refresh_backoff
     return 2
   fi
 
-  [[ "$HTTP_STATUS" =~ ^2[0-9][0-9]$ ]] || return 1
+  if ! [[ "$HTTP_STATUS" =~ ^2[0-9][0-9]$ ]]; then
+    rm -f "$marker"
+    return 1
+  fi
 
+  # Past this point the server HAS rotated and $rt is spent. Every exit below
+  # must leave the snapshot holding the NEW token or no token -- never the
+  # spent one. Where the retire write itself fails, the marker is deliberately
+  # NOT cleared: it is then the only thing left standing between the next run
+  # and a replay.
   local parsed new_access new_expires_in new_refresh
-  parsed="$(parse_refresh "$HTTP_BODY")" || return 1
+  if ! parsed="$(parse_refresh "$HTTP_BODY")"; then
+    retire_snapshot_refresh_token "$label" && rm -f "$marker"
+    return 1
+  fi
   IFS='|' read -r new_access new_expires_in new_refresh <<<"$parsed"
 
   local new_expires_at_ms=$(( $(date +%s) * 1000 + new_expires_in * 1000 ))
   local snapshot_file="$ACCOUNTS_DIR/$label/credentials.json"
-  jq_write "$snapshot_file" --arg at "$new_access" --argjson exp "$new_expires_at_ms" --arg rt "$new_refresh" \
+  if ! jq_write "$snapshot_file" --arg at "$new_access" --argjson exp "$new_expires_at_ms" --arg rt "$new_refresh" \
     '.claudeAiOauth.accessToken = $at
      | .claudeAiOauth.expiresAt = $exp
      | if ($rt != "") then .claudeAiOauth.refreshToken = $rt else . end' \
-    "$snapshot_file" || return 1
+    "$snapshot_file"; then
+    retire_snapshot_refresh_token "$label" && rm -f "$marker"
+    return 1
+  fi
 
+  rm -f "$marker"
   echo "$new_access"
 }
 
