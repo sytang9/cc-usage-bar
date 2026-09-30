@@ -3,11 +3,13 @@
 #
 # Claude Code pipes {session_id, transcript_path, cwd, columns, tasks[]} to stdin
 # on every refresh tick and renders each {"id", "content"} line we print as that
-# subagent's row in the agent panel. Per row: agent type, label, model, live
-# context %, total tokens the agent has processed so far (tok), cache misses, age,
-# and the worktree when it differs from the lead's.
+# subagent's row in the agent panel. Per row: agent type, label, model,
+# ctx (the agent's session size now: tokens in its context, and % of its window),
+# tok (tokens its calls have read so far, and the share served from cache), cache
+# misses, "running <age>" or "done", and the worktree when it differs from the lead's.
 #
-# tok and misses come from the agent's own transcript
+# ctx is Claude Code's own tokenCount. tok and misses come from the agent's
+# own transcript
 # (<transcript dir>/<session>/subagents/agent-<id>.jsonl), read incrementally:
 # a per-agent state file remembers the byte offset, so each tick reads only new
 # lines. Contract: NEVER exit non-zero; on any failure print nothing, so Claude
@@ -23,7 +25,7 @@ readonly COLOR_CRIT=167
 readonly COLOR_DIM=245
 readonly MISS_TOKENS=100000 # a cache write this big after the first call = a full rewrite
 readonly LABEL_MAX=28
-readonly EMPTY_STATE='{"offset":0,"processed":0,"calls":0,"misses":0,"last":""}'
+readonly EMPTY_STATE='{"offset":0,"processed":0,"read":0,"calls":0,"misses":0,"last":""}'
 
 # update_totals <transcript> <state file> -> echoes the state JSON after
 # reading any complete new lines; echoes nothing when there is no transcript.
@@ -59,6 +61,7 @@ update_totals() {
           else ($d.message.usage) as $u
             | .processed += (($u.input_tokens | n) + ($u.cache_creation_input_tokens | n)
                              + ($u.cache_read_input_tokens | n))
+            | .read += ($u.cache_read_input_tokens | n)
             | .misses += (if .calls > 0 and ($u.cache_creation_input_tokens | n) > $miss then 1 else 0 end)
             | .calls += 1
             | .last = $d.message.id
@@ -110,16 +113,19 @@ render_rows() {
       | (if $pct == null then null elif $pct > $warn then $c_crit elif $pct > $ok then $c_warn else $c_ok end) as $pc
       | (if $t.status == "running" then
            ((($now * 1000) - ($t.startTime // ($now * 1000))) / 60000 | floor) as $m
-           | if $m >= 60 then "\($m / 60 | floor)h\($m % 60)m" else "\($m)m" end
+           | "running " + (if $m >= 60 then "\($m / 60 | floor)h\($m % 60)m" else "\($m)m" end)
          elif $t.status == "completed" then "done"
          else ($t.status // "") end) as $age
       | ($t.cwd // "" | if . != "" and . != $lead then split("/") | last else "" end) as $wt
       | [ (if $type != "" then $type else null end),
           $label,
           (if $model != "" then sgr($c_dim) + $model + reset else null end),
-          (if $pct != null then "ctx " + sgr($pc) + "\($pct)%" + reset else null end),
-          (if $s != null then "tok " + sgr($c_dim) + ($s.processed | human) + reset else null end),
-          (if $s != null and $s.misses > 0 then sgr($c_warn) + "\($s.misses) miss" + reset else null end),
+          (if $pct != null then "ctx " + sgr($pc) + (($t.tokenCount // 0) | human) + " (\($pct)%)" + reset else null end),
+          (if $s != null and ($s.processed // 0) > 0 then
+             "tok " + sgr($c_dim) + ($s.processed | human)
+             + " (\((($s.read // 0) * 100 / $s.processed) | floor)% cached)" + reset else null end),
+          (if $s != null and $s.misses > 0 then
+             sgr($c_warn) + "\($s.misses) cache miss\(if $s.misses > 1 then "es" else "" end)" + reset else null end),
           $age,
           (if $wt != "" then sgr($c_dim) + $wt + reset else null end) ]
       | map(select(. != null and . != "")) | join(" · ")

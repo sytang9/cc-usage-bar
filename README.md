@@ -25,8 +25,8 @@ block above is the plain-text equivalent.
   meters (with reset countdowns) on one line underneath.
 - **`subagent-statusline.sh`** — a Claude Code `subagentStatusLine` script.
   It replaces each subagent's row in the agent panel with its type, label,
-  model, live context %, total tokens processed so far, cache misses, age,
-  and worktree.
+  model, session size (`ctx`), tokens read with the cached share (`tok`),
+  cache misses, running time or done, and worktree.
 - **`ccswitch`** — save the currently logged-in Claude account under a
   label, list saved accounts, switch between them, or delete one.
 - **`ccswitch usage`** — an all-account monitor: polls the 5h/weekly usage
@@ -121,21 +121,25 @@ While subagents run, Claude Code shows one row per agent below the prompt.
 With `subagentStatusLine` configured, each row reads:
 
 ```
-engineer · T4 roles · sonnet 5.5 · ctx 41% · tok 12.3M · 2 miss · 18m · infrasel-sh-t4
+engineer · T4 roles · sonnet 5.5 · ctx 368k (36%) · tok 33.6M (99% cached) · 2 cache misses · running 18m · infrasel-sh-t4
 ```
 
-- **`ctx`** — the agent's current context, as a percentage of its model's
-  window. Amber from 60%, red above 85%. A role agent past 40% usually carries
-  old work it no longer needs: finish it and start a fresh one.
-- **`tok`** — every input token the agent's calls have processed so far
-  (input + cache writes + cache reads), counted once per API call. This is
-  what drives cost and rate-limit use; `ctx` alone does not show it.
-- **`miss`** — calls that rewrote more than 100k tokens of cache after the
-  first call, which means the cache expired while the agent sat idle (for
-  example during a long foreground test run). Shown only when above zero.
+- **`ctx 368k (36%)`** — the agent's session size now: the tokens in its
+  context (its prompt plus everything it has read, written and said so far),
+  and that as a share of its model's window. Amber from 60%, red above 85%. A
+  role agent past 40% usually carries old work it no longer needs: finish it
+  and start a fresh one. This is Claude Code's own per-agent `tokenCount`.
+- **`tok 33.6M (99% cached)`** — every input token the agent's calls have read
+  so far (each call re-reads the whole context), counted once per API call, and
+  the share of it served from the prompt cache. A high cached share is good:
+  cache reads cost about a tenth of fresh input.
+- **`2 cache misses`** — calls that rewrote more than 100k tokens of cache after
+  the first call: the cache expired while the agent sat idle (for example
+  during a long foreground test run). Shown only when above zero.
+- **`running 18m`** or **`done`** — still working, and for how long; or finished.
 - The worktree name appears when the agent runs outside the lead's directory.
 
-`tok` and `miss` come from the agent's own transcript
+`tok` and the cache misses come from the agent's own transcript
 (`~/.claude/projects/<project>/<session>/subagents/agent-<id>.jsonl`). The
 script reads only new bytes each tick and keeps its offset under
 `${XDG_CACHE_HOME:-~/.cache}/cc-usage-bar/subagents/`, so a tick costs about
