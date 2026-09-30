@@ -245,8 +245,7 @@ case10() {
   home_dir="$(make_sandbox)"
   make_session "$home_dir"
   : >"$SUB_DIR/agent-a1.jsonl"
-  local i
-  for i in 1 2 3; do
+  for _ in 1 2 3; do
     printf '{"type":"assistant","message":{"usage":{"input_tokens":0,"cache_creation_input_tokens":0,"cache_read_input_tokens":10000}}}\n' \
       >>"$SUB_DIR/agent-a1.jsonl"
   done
