@@ -79,7 +79,7 @@ case1() {
     && [[ "$body" == *"engineer"* ]] \
     && [[ "$body" == *"T4 roles"* ]] \
     && [[ "$body" == *"4%"* ]] \
-    && [[ "$body" == *"Σ235k"* ]] \
+    && [[ "$body" == *"tok 235k"* ]] \
     && [[ "$body" == *"1 miss"* ]] \
     && [[ "$body" == *"5m"* ]] \
     && [[ "$body" == *"infrasel-sh-t4"* ]]; then
@@ -106,7 +106,7 @@ case2() {
   run_script "$home_dir" "$(input_json 151002 running)"
   local body2
   body2="$(content_of "$OUT")"
-  if [[ "$body1" == *"Σ386k"* ]] && [[ "$body2" == *"Σ486k"* ]]; then
+  if [[ "$body1" == *"tok 386k"* ]] && [[ "$body2" == *"tok 486k"* ]]; then
     pass "case2: totals grow incrementally and a partial line is read once complete"
   else
     fail "case2: body1=[$body1] body2=[$body2]"
@@ -124,7 +124,7 @@ case3() {
   local body
   body="$(content_of "$OUT")"
   if [[ "$EXIT_CODE" -eq 0 ]] && [[ "$body" == *"T4 roles"* ]] && [[ "$body" == *"4%"* ]] \
-    && [[ "$body" != *"Σ"* ]]; then
+    && [[ "$body" != *"tok "* ]]; then
     pass "case3: missing transcript renders ctx only"
   else
     fail "case3: exit=$EXIT_CODE body=[$body]"
@@ -191,7 +191,7 @@ case7() {
   local size offset
   size="$(wc -c <"$SUB_DIR/agent-a1.jsonl" | tr -d ' ')"
   offset="$(cut -d' ' -f1 "$home_dir/.cache/cc-usage-bar/subagents/s1/a1.json" 2>/dev/null)"
-  if [[ "$offset" == "$size" ]] && [[ "$(content_of "$OUT")" == *"Σ235k"* ]]; then
+  if [[ "$offset" == "$size" ]] && [[ "$(content_of "$OUT")" == *"tok 235k"* ]]; then
     pass "case7: offset equals the file size after an invalid byte"
   else
     fail "case7: offset=$offset size=$size out=[$OUT]"
@@ -213,7 +213,7 @@ case8() {
   run_script "$home_dir" "$(input_json 41266 running)"
   local body
   body="$(content_of "$OUT")"
-  if [[ "$body" == *"Σ1.2M"* ]]; then
+  if [[ "$body" == *"tok 1.2M"* ]]; then
     pass "case8: poison lines are skipped and later calls still count"
   else
     fail "case8: body=[$body]"
@@ -253,7 +253,7 @@ case10() {
   run_script "$home_dir" "$(input_json 41266 running)"
   local body
   body="$(content_of "$OUT")"
-  if [[ "$body" == *"Σ30k"* ]]; then
+  if [[ "$body" == *"tok 30k"* ]]; then
     pass "case10: id-less calls are not deduplicated"
   else
     fail "case10: body=[$body]"

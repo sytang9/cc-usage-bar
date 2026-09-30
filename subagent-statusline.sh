@@ -4,10 +4,10 @@
 # Claude Code pipes {session_id, transcript_path, cwd, columns, tasks[]} to stdin
 # on every refresh tick and renders each {"id", "content"} line we print as that
 # subagent's row in the agent panel. Per row: agent type, label, model, live
-# context %, total tokens the agent has processed so far (Σ), cache misses, age,
+# context %, total tokens the agent has processed so far (tok), cache misses, age,
 # and the worktree when it differs from the lead's.
 #
-# Σ and misses come from the agent's own transcript
+# tok and misses come from the agent's own transcript
 # (<transcript dir>/<session>/subagents/agent-<id>.jsonl), read incrementally:
 # a per-agent state file remembers the byte offset, so each tick reads only new
 # lines. Contract: NEVER exit non-zero; on any failure print nothing, so Claude
@@ -118,7 +118,7 @@ render_rows() {
           $label,
           (if $model != "" then sgr($c_dim) + $model + reset else null end),
           (if $pct != null then "ctx " + sgr($pc) + "\($pct)%" + reset else null end),
-          (if $s != null then sgr($c_dim) + "Σ" + ($s.processed | human) + reset else null end),
+          (if $s != null then "tok " + sgr($c_dim) + ($s.processed | human) + reset else null end),
           (if $s != null and $s.misses > 0 then sgr($c_warn) + "\($s.misses) miss" + reset else null end),
           $age,
           (if $wt != "" then sgr($c_dim) + $wt + reset else null end) ]

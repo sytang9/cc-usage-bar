@@ -121,13 +121,13 @@ While subagents run, Claude Code shows one row per agent below the prompt.
 With `subagentStatusLine` configured, each row reads:
 
 ```
-engineer · T4 roles · sonnet 5.5 · ctx 41% · Σ12.3M · 2 miss · 18m · infrasel-sh-t4
+engineer · T4 roles · sonnet 5.5 · ctx 41% · tok 12.3M · 2 miss · 18m · infrasel-sh-t4
 ```
 
 - **`ctx`** — the agent's current context, as a percentage of its model's
   window. Amber from 60%, red above 85%. A role agent past 40% usually carries
   old work it no longer needs: finish it and start a fresh one.
-- **`Σ`** — every input token the agent's calls have processed so far
+- **`tok`** — every input token the agent's calls have processed so far
   (input + cache writes + cache reads), counted once per API call. This is
   what drives cost and rate-limit use; `ctx` alone does not show it.
 - **`miss`** — calls that rewrote more than 100k tokens of cache after the
@@ -135,7 +135,7 @@ engineer · T4 roles · sonnet 5.5 · ctx 41% · Σ12.3M · 2 miss · 18m · inf
   example during a long foreground test run). Shown only when above zero.
 - The worktree name appears when the agent runs outside the lead's directory.
 
-`Σ` and `miss` come from the agent's own transcript
+`tok` and `miss` come from the agent's own transcript
 (`~/.claude/projects/<project>/<session>/subagents/agent-<id>.jsonl`). The
 script reads only new bytes each tick and keeps its offset under
 `${XDG_CACHE_HOME:-~/.cache}/cc-usage-bar/subagents/`, so a tick costs about
