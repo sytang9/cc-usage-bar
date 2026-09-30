@@ -78,12 +78,12 @@ case1() {
     && [[ "$(printf '%s\n' "$OUT" | head -1 | jq -r '.id')" == "a1" ]] \
     && [[ "$body" == *"engineer"* ]] \
     && [[ "$body" == *"T4 roles"* ]] \
-    && [[ "$body" == *"4%"* ]] \
-    && [[ "$body" == *"tok 235k"* ]] \
+    && [[ "$body" == *"41k (4%)"* ]] \
+    && [[ "$body" != *"tok "* ]] \
     && [[ "$body" == *"1 miss"* ]] \
     && [[ "$body" == *"5m"* ]] \
     && [[ "$body" == *"infrasel-sh-t4"* ]]; then
-    pass "case1: row has id, type, ctx %, deduped total, miss count, age, worktree"
+    pass "case1: row has id, type, session size with %, miss count, age, worktree"
   else
     fail "case1: exit=$EXIT_CODE out=[$OUT] body=[$body]"
   fi
@@ -96,18 +96,18 @@ case2() {
   home_dir="$(make_sandbox)"
   make_session "$home_dir"
   run_script "$home_dir" "$(input_json 41266 running)"
-  usage_line m4 2 1000 150000 >>"$SUB_DIR/agent-a1.jsonl"   # +151k
+  usage_line m4 2 200000 0 >>"$SUB_DIR/agent-a1.jsonl"   # a second full rewrite: miss 2
   printf '{"type":"assistant","message":{"id":"m5","usa' >>"$SUB_DIR/agent-a1.jsonl"
   run_script "$home_dir" "$(input_json 151002 running)"
   local body1
   body1="$(content_of "$OUT")"
-  printf 'ge":{"input_tokens":0,"cache_creation_input_tokens":0,"cache_read_input_tokens":100000}}}\n' \
+  printf 'ge":{"input_tokens":0,"cache_creation_input_tokens":300000,"cache_read_input_tokens":0}}}\n' \
     >>"$SUB_DIR/agent-a1.jsonl"
   run_script "$home_dir" "$(input_json 151002 running)"
   local body2
   body2="$(content_of "$OUT")"
-  if [[ "$body1" == *"tok 386k"* ]] && [[ "$body2" == *"tok 486k"* ]]; then
-    pass "case2: totals grow incrementally and a partial line is read once complete"
+  if [[ "$body1" == *"2 miss"* ]] && [[ "$body2" == *"3 miss"* ]]; then
+    pass "case2: misses grow incrementally and a partial line is read once complete"
   else
     fail "case2: body1=[$body1] body2=[$body2]"
   fi
@@ -123,8 +123,8 @@ case3() {
   run_script "$home_dir" "$(input_json 41266 running)"
   local body
   body="$(content_of "$OUT")"
-  if [[ "$EXIT_CODE" -eq 0 ]] && [[ "$body" == *"T4 roles"* ]] && [[ "$body" == *"4%"* ]] \
-    && [[ "$body" != *"tok "* ]]; then
+  if [[ "$EXIT_CODE" -eq 0 ]] && [[ "$body" == *"T4 roles"* ]] && [[ "$body" == *"41k (4%)"* ]] \
+    && [[ "$body" != *"miss"* ]]; then
     pass "case3: missing transcript renders ctx only"
   else
     fail "case3: exit=$EXIT_CODE body=[$body]"
@@ -141,8 +141,8 @@ case4() {
   local warn="$OUT"
   run_script "$home_dir" "$(input_json 900000 running)"
   local crit="$OUT"
-  if printf '%s' "$warn" | jq -r '.content' | grep -q $'\033\\[38;5;179m70%' \
-    && printf '%s' "$crit" | jq -r '.content' | grep -q $'\033\\[38;5;167m90%'; then
+  if printf '%s' "$warn" | jq -r '.content' | grep -q $'\033\\[38;5;179m700k (70%)' \
+    && printf '%s' "$crit" | jq -r '.content' | grep -q $'\033\\[38;5;167m900k (90%)'; then
     pass "case4: 70% renders amber, 90% renders red"
   else
     fail "case4: warn=[$warn] crit=[$crit]"
@@ -191,7 +191,7 @@ case7() {
   local size offset
   size="$(wc -c <"$SUB_DIR/agent-a1.jsonl" | tr -d ' ')"
   offset="$(cut -d' ' -f1 "$home_dir/.cache/cc-usage-bar/subagents/s1/a1.json" 2>/dev/null)"
-  if [[ "$offset" == "$size" ]] && [[ "$(content_of "$OUT")" == *"tok 235k"* ]]; then
+  if [[ "$offset" == "$size" ]] && [[ "$(content_of "$OUT")" == *"1 miss"* ]]; then
     pass "case7: offset equals the file size after an invalid byte"
   else
     fail "case7: offset=$offset size=$size out=[$OUT]"
@@ -208,12 +208,12 @@ case8() {
     printf '"junk"\n'
     printf '{"type":"assistant","message":{"id":"m9","usage":{"input_tokens":"x","cache_creation_input_tokens":0,"cache_read_input_tokens":0}}}\n'
     printf '{"type":"assistant","message":"not an object"}\n'
-    usage_line m10 0 0 1000000
+    usage_line m10 0 500000 0
   } >>"$SUB_DIR/agent-a1.jsonl"
   run_script "$home_dir" "$(input_json 41266 running)"
   local body
   body="$(content_of "$OUT")"
-  if [[ "$body" == *"tok 1.2M"* ]]; then
+  if [[ "$body" == *"2 miss"* ]]; then
     pass "case8: poison lines are skipped and later calls still count"
   else
     fail "case8: body=[$body]"
@@ -246,13 +246,13 @@ case10() {
   make_session "$home_dir"
   : >"$SUB_DIR/agent-a1.jsonl"
   for _ in 1 2 3; do
-    printf '{"type":"assistant","message":{"usage":{"input_tokens":0,"cache_creation_input_tokens":0,"cache_read_input_tokens":10000}}}\n' \
+    printf '{"type":"assistant","message":{"usage":{"input_tokens":0,"cache_creation_input_tokens":150000,"cache_read_input_tokens":0}}}\n' \
       >>"$SUB_DIR/agent-a1.jsonl"
   done
   run_script "$home_dir" "$(input_json 41266 running)"
   local body
   body="$(content_of "$OUT")"
-  if [[ "$body" == *"tok 30k"* ]]; then
+  if [[ "$body" == *"2 miss"* ]]; then
     pass "case10: id-less calls are not deduplicated"
   else
     fail "case10: body=[$body]"
