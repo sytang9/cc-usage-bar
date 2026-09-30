@@ -21,6 +21,8 @@ ACCOUNTS_DIR="$CLAUDE_DIR/accounts"
 # break the removal comparison and orphan the statusLine entry.
 # shellcheck disable=SC2088
 OUR_STATUSLINE_COMMAND="~/.claude/statusline-usage.sh"
+# shellcheck disable=SC2088
+OUR_SUBAGENT_STATUSLINE_COMMAND="~/.claude/subagent-statusline.sh"
 CCW_FUNCTION='ccw() { ~/.claude/ccswitch "$@" --relaunch; }'
 
 PURGE_ACCOUNTS=0
@@ -62,7 +64,7 @@ confirm() {
 
 remove_scripts() {
   local f
-  for f in "$CLAUDE_DIR/statusline-usage.sh" "$CLAUDE_DIR/ccswitch"; do
+  for f in "$CLAUDE_DIR/statusline-usage.sh" "$CLAUDE_DIR/subagent-statusline.sh" "$CLAUDE_DIR/ccswitch"; do
     if [[ -e "$f" ]]; then
       if rm -f "$f"; then
         echo "Removed: $f"
@@ -96,10 +98,11 @@ remove_symlink() {
   fi
 }
 
-# remove_statusline: delete the statusLine key ONLY when it is still ours, so a
-# statusLine the user has since pointed at their own script survives. Every
-# other key is preserved.
+# remove_statusline <key> <our command>: delete a status line key ONLY when it
+# is still ours, so one the user has since pointed at their own script
+# survives. Every other key is preserved.
 remove_statusline() {
+  local key="$1" ours="$2"
   [[ -f "$SETTINGS_FILE" ]] || { echo "No $SETTINGS_FILE to clean."; return 0; }
 
   if ! jq -e . "$SETTINGS_FILE" >/dev/null 2>&1; then
@@ -108,21 +111,21 @@ remove_statusline() {
   fi
 
   local current
-  current="$(jq -r '.statusLine.command // empty' "$SETTINGS_FILE" 2>/dev/null)"
+  current="$(jq -r --arg k "$key" '.[$k].command // empty' "$SETTINGS_FILE" 2>/dev/null)"
   if [[ -z "$current" ]]; then
-    echo "No statusLine entry to remove."
+    echo "No $key entry to remove."
     return 0
   fi
-  if [[ "$current" != "$OUR_STATUSLINE_COMMAND" ]]; then
-    echo "statusLine does not point at cc-usage-bar (command='$current') -- leaving it."
+  if [[ "$current" != "$ours" ]]; then
+    echo "$key does not point at cc-usage-bar (command='$current') -- leaving it."
     return 0
   fi
 
   local tmp
   tmp="$(mktemp "$CLAUDE_DIR/.cc-usage-bar-uninstall.XXXXXX")"
-  if jq 'del(.statusLine)' "$SETTINGS_FILE" >"$tmp" 2>/dev/null && [[ -s "$tmp" ]]; then
+  if jq --arg k "$key" 'del(.[$k])' "$SETTINGS_FILE" >"$tmp" 2>/dev/null && [[ -s "$tmp" ]]; then
     mv "$tmp" "$SETTINGS_FILE"
-    echo "Removed the statusLine entry from $SETTINGS_FILE (other keys untouched)"
+    echo "Removed the $key entry from $SETTINGS_FILE (other keys untouched)"
   else
     rm -f "$tmp"
     echo "Error: failed to rewrite $SETTINGS_FILE; it is unchanged." >&2
@@ -185,7 +188,8 @@ main() {
 
   remove_scripts
   remove_symlink
-  remove_statusline
+  remove_statusline statusLine "$OUR_STATUSLINE_COMMAND"
+  remove_statusline subagentStatusLine "$OUR_SUBAGENT_STATUSLINE_COMMAND"
   handle_accounts
   report_ccw_function
 

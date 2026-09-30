@@ -50,6 +50,7 @@ main() {
   local cc_dir="$home1/.claude"
   if [[ "$EXIT_CODE" -eq 0 ]] \
     && [[ -x "$cc_dir/statusline-usage.sh" ]] \
+    && [[ -x "$cc_dir/subagent-statusline.sh" ]] \
     && [[ -x "$cc_dir/ccswitch" ]]; then
     pass "case1 scripts copied and executable in \$HOME/.claude"
   else
@@ -60,13 +61,16 @@ main() {
   local command_val interval_val
   command_val="$(jq -r '.statusLine.command // empty' "$settings_file" 2>/dev/null)"
   interval_val="$(jq -r '.statusLine.refreshInterval // empty' "$settings_file" 2>/dev/null)"
+  local sub_command_val
+  sub_command_val="$(jq -r '.subagentStatusLine.command // empty' "$settings_file" 2>/dev/null)"
   # Asserting against the literal installer writes (Claude Code expands this
   # tilde at run time, not bash) -- not a path this test should resolve.
   # shellcheck disable=SC2088
-  if [[ "$command_val" == "~/.claude/statusline-usage.sh" ]] && [[ "$interval_val" == "5" ]]; then
-    pass "case2 settings.json created with correct statusLine command + refreshInterval 5"
+  if [[ "$command_val" == "~/.claude/statusline-usage.sh" ]] && [[ "$interval_val" == "5" ]] \
+    && [[ "$sub_command_val" == "~/.claude/subagent-statusline.sh" ]]; then
+    pass "case2 settings.json created with statusLine (refreshInterval 5) and subagentStatusLine"
   else
-    fail "case2 settings.json statusLine wrong (command=$command_val interval=$interval_val): $OUT"
+    fail "case2 settings.json wrong (command=$command_val interval=$interval_val sub=$sub_command_val): $OUT"
   fi
 
   if grep -qF 'ccw()' "$home1/.bashrc" 2>/dev/null; then
@@ -272,7 +276,7 @@ main() {
   EXIT_CODE=$?
 
   local statusline_key11 theme11 link11
-  statusline_key11="$(jq -r 'has("statusLine")' "$home11/.claude/settings.json" 2>/dev/null)"
+  statusline_key11="$(jq -r 'has("statusLine") or has("subagentStatusLine")' "$home11/.claude/settings.json" 2>/dev/null)"
   theme11="$(jq -r '.theme // empty' "$home11/.claude/settings.json" 2>/dev/null)"
   link11="$home11/.local/bin/ccswitch"
 
@@ -283,6 +287,7 @@ main() {
   # must fail this assertion.
   if [[ "$EXIT_CODE" -eq 0 ]] \
     && [[ ! -e "$home11/.claude/statusline-usage.sh" ]] \
+    && [[ ! -e "$home11/.claude/subagent-statusline.sh" ]] \
     && [[ ! -e "$home11/.claude/ccswitch" ]] \
     && [[ ! -e "$link11" ]] \
     && [[ ! -L "$link11" ]] \
@@ -380,6 +385,24 @@ main() {
   fi
 
   rm -rf "$home13"
+
+  # --- Case 14: a user's own subagentStatusLine survives install ----------
+  local home14
+  home14="$(make_sandbox)"
+  mkdir -p "$home14/.claude"
+  jq -n '{subagentStatusLine: {type: "command", command: "/my/own/rows.sh"}}' >"$home14/.claude/settings.json"
+  run_install "$home14" "n"
+  local sub14 main14
+  sub14="$(jq -r '.subagentStatusLine.command // empty' "$home14/.claude/settings.json" 2>/dev/null)"
+  main14="$(jq -r '.statusLine.command // empty' "$home14/.claude/settings.json" 2>/dev/null)"
+  # shellcheck disable=SC2088
+  if [[ "$sub14" == "/my/own/rows.sh" ]] && [[ "$main14" == "~/.claude/statusline-usage.sh" ]] \
+    && printf '%s' "$OUT" | grep -q "subagentStatusLine"; then
+    pass "case14 user's own subagentStatusLine kept (with a note), statusLine still installed"
+  else
+    fail "case14 user's subagentStatusLine not preserved (sub=$sub14 main=$main14): $OUT"
+  fi
+  rm -rf "$home14"
 
   echo
   echo "----------------------------------------"

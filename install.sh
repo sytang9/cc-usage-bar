@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# install.sh — installs cc-usage-bar (statusline-usage.sh + ccswitch) into
-# $HOME/.claude, wires up the statusLine entry in $HOME/.claude/settings.json,
+# install.sh — installs cc-usage-bar (statusline-usage.sh, subagent-statusline.sh,
+# ccswitch) into $HOME/.claude, wires up the statusLine and subagentStatusLine
+# entries in $HOME/.claude/settings.json,
 # and optionally adds a `ccw` shell shortcut.
 #
 # Safe to re-run: every step is idempotent. settings.json is backed up once on
@@ -18,7 +19,8 @@ BIN_DIR="$HOME/.local/bin"
 # printed snippet and the value written into settings.json can never drift
 # apart.
 STATUSLINE_JSON='{"type":"command","command":"~/.claude/statusline-usage.sh","refreshInterval":5}'
-SETTINGS_SNIPPET='{"statusLine": '"$STATUSLINE_JSON"'}'
+SUBAGENT_STATUSLINE_JSON='{"type":"command","command":"~/.claude/subagent-statusline.sh"}'
+SETTINGS_SNIPPET='{"statusLine": '"$STATUSLINE_JSON"', "subagentStatusLine": '"$SUBAGENT_STATUSLINE_JSON"'}'
 
 CCW_FUNCTION='ccw() { ~/.claude/ccswitch "$@" --relaunch; }'
 
@@ -61,9 +63,11 @@ check_node() {
 install_scripts() {
   mkdir -p "$CLAUDE_DIR"
   cp "$SCRIPT_DIR/statusline-usage.sh" "$CLAUDE_DIR/statusline-usage.sh"
+  cp "$SCRIPT_DIR/subagent-statusline.sh" "$CLAUDE_DIR/subagent-statusline.sh"
   cp "$SCRIPT_DIR/ccswitch" "$CLAUDE_DIR/ccswitch"
-  chmod +x "$CLAUDE_DIR/statusline-usage.sh" "$CLAUDE_DIR/ccswitch"
+  chmod +x "$CLAUDE_DIR/statusline-usage.sh" "$CLAUDE_DIR/subagent-statusline.sh" "$CLAUDE_DIR/ccswitch"
   echo "Installed: $CLAUDE_DIR/statusline-usage.sh"
+  echo "Installed: $CLAUDE_DIR/subagent-statusline.sh"
   echo "Installed: $CLAUDE_DIR/ccswitch"
 }
 
@@ -120,8 +124,18 @@ configure_settings() {
     exit 1
   fi
 
-  if jq -e --argjson sl "$STATUSLINE_JSON" '.statusLine == $sl' "$SETTINGS_FILE" >/dev/null 2>&1; then
-    echo "statusLine already configured in $SETTINGS_FILE -- leaving it alone."
+  # A subagentStatusLine that points at the user's own script is theirs: keep it.
+  local keep_sub=0
+  if jq -e --argjson ssl "$SUBAGENT_STATUSLINE_JSON" \
+    '.subagentStatusLine.command != null and .subagentStatusLine.command != $ssl.command' \
+    "$SETTINGS_FILE" >/dev/null 2>&1; then
+    keep_sub=1
+    echo "Note: subagentStatusLine points at your own script -- leaving it."
+  fi
+
+  if jq -e --argjson sl "$STATUSLINE_JSON" --argjson ssl "$SUBAGENT_STATUSLINE_JSON" --argjson keep "$keep_sub" \
+    '.statusLine == $sl and ($keep == 1 or .subagentStatusLine == $ssl)' "$SETTINGS_FILE" >/dev/null 2>&1; then
+    echo "statusLine and subagentStatusLine already configured in $SETTINGS_FILE -- leaving it alone."
     return 0
   fi
 
@@ -141,10 +155,12 @@ configure_settings() {
   # guard is duplicated here rather than shared.
   local tmp
   tmp="$(mktemp "$CLAUDE_DIR/.cc-usage-bar-settings.XXXXXX")"
-  if jq --argjson sl "$STATUSLINE_JSON" '.statusLine = $sl' "$SETTINGS_FILE" >"$tmp" 2>/dev/null \
+  if jq --argjson sl "$STATUSLINE_JSON" --argjson ssl "$SUBAGENT_STATUSLINE_JSON" --argjson keep "$keep_sub" \
+    '.statusLine = $sl | if $keep == 1 then . else .subagentStatusLine = $ssl end' \
+    "$SETTINGS_FILE" >"$tmp" 2>/dev/null \
     && [[ -s "$tmp" ]]; then
     mv "$tmp" "$SETTINGS_FILE"
-    echo "Merged statusLine into $SETTINGS_FILE"
+    echo "Merged statusLine and subagentStatusLine into $SETTINGS_FILE"
   else
     rm -f "$tmp"
     echo "Error: failed to update $SETTINGS_FILE; it is unchanged." >&2
