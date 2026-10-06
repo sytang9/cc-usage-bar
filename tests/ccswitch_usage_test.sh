@@ -13,6 +13,11 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 TARGET="$REPO_DIR/ccswitch"
 
+# ccswitch also reads ${CODEX_HOME:-$HOME/.codex}. HOME is sandboxed per case,
+# but an exported CODEX_HOME would point every case at the developer's real
+# Codex login, so drop it for the whole suite.
+unset CODEX_HOME
+
 FAIL_COUNT=0
 PASS_COUNT=0
 
