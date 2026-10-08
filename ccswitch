@@ -1126,6 +1126,10 @@ CODEX_USER_AGENT="codex_cli_rs/0.0.0"
 # are not stable (on 2026-10-06 the weekly window sat in primary).
 CODEX_FIVE_HOUR_WINDOW_SECONDS=18000
 CODEX_SEVEN_DAY_WINDOW_SECONDS=604800
+# The Codex GET runs on the table's critical path: without a cap, a stalled
+# chatgpt.com connection would hang the Claude rows too. A timeout returns
+# status 000, which already renders as a dash row.
+CODEX_USAGE_MAX_TIME_SECONDS=15
 
 # read_codex_auth -> "access_token|account_id|exp_epoch_seconds", or non-zero
 # with no output when there is no usable ChatGPT-mode login (missing file,
@@ -1156,6 +1160,7 @@ fetch_codex_usage_raw() {
     printf 'header = "Authorization: Bearer %s"\n' "$token"
     printf 'header = "ChatGPT-Account-Id: %s"\n' "$account_id"
     printf 'header = "User-Agent: %s"\n' "$CODEX_USER_AGENT"
+    printf 'max-time = %s\n' "$CODEX_USAGE_MAX_TIME_SECONDS"
   } >"$cfgfile"
   curl -sS -o - -w '\n%{http_code}' --config "$cfgfile" "$CODEX_USAGE_API_URL" 2>/dev/null
   rm -f "$cfgfile"
@@ -1163,9 +1168,10 @@ fetch_codex_usage_raw() {
 
 # parse_codex_usage <json> -> compact JSON {five_hour_pct, seven_day_pct,
 # five_hour_reset_epoch, seven_day_reset_epoch, plan_type}, each possibly null;
-# non-zero with no output when .rate_limit is not an object. The ONLY function
-# that knows the Codex response field names. Unknown window lengths are
-# ignored; identity fields (email, user_id, account_id) are dropped here.
+# non-zero with no output when .rate_limit is not an object or holds no known
+# window. The ONLY function that knows the Codex response field names. Unknown
+# window lengths are ignored; identity fields (email, user_id, account_id) are
+# dropped here.
 parse_codex_usage() {
   echo "$1" | jq -ce \
     --argjson five "$CODEX_FIVE_HOUR_WINDOW_SECONDS" \
@@ -1174,6 +1180,9 @@ parse_codex_usage() {
     | ($r.rate_limit | objects | [.primary_window, .secondary_window] | map(objects)) as $w
     | ([$w[] | select(.limit_window_seconds == $five)] | first) as $f
     | ([$w[] | select(.limit_window_seconds == $week)] | first) as $s
+    # No known window at all is schema drift, not a plan state: fail so it is
+    # never cached as a successful fetch.
+    | if $f == null and $s == null then error("no known window") else . end
     | {five_hour_pct: (($f.used_percent | numbers) // null),
        seven_day_pct: (($s.used_percent | numbers) // null),
        five_hour_reset_epoch: (($f.reset_at | numbers | floor) // null),
@@ -1243,7 +1252,9 @@ codex_usage_row() {
       file_write "$CODEX_USAGE_CACHE_FILE" "$new_cache"
       codex_cache_row "$new_cache" wait
       ;;
-    401 | 403) echo "expired||||" ;;
+    # Only 401 means the login expired. A 403 can be a Cloudflare challenge or
+    # a rejected header, where "run codex" is the wrong advice: show a dash.
+    401) echo "expired||||" ;;
     2[0-9][0-9])
       if ! parsed="$(parse_codex_usage "$HTTP_BODY")"; then
         echo "dash||||"

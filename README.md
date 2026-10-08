@@ -221,8 +221,10 @@ after the Claude accounts:
 - **Read-only.** ccswitch reads Codex's access token and calls the same usage
   endpoint Codex CLI uses. It never refreshes the token and never writes
   `auth.json`: a refresh would rotate the token under a running Codex CLI and
-  log it out. When the token has expired or is rejected, the row shows
-  `expired` until Codex itself refreshes it (run `codex` once).
+  log it out. When the token has expired or the endpoint answers 401, the row
+  shows `expired` until Codex itself refreshes it (run `codex` once). Any
+  other failure (a 403, a timeout after 15 s, a response with no known
+  window) shows `—` and is not cached.
 - **Single account.** There is one Codex login per `CODEX_HOME`, and it is
   never offered as a switch target or flagged as most headroom.
 - Windows the plan does not report show `—` (some plans report only the
@@ -230,6 +232,8 @@ after the Claude accounts:
   (mode `600`, no token or account id) under the same 10-minute cache and
   429 backoff as the Claude rows.
 - No Codex login, or an API-key login, means no row and no other change.
+- The row needs at least one saved Claude account: with none, `ccswitch usage`
+  stops at "no saved accounts" before the Codex row.
 
 ### Pausing token refresh
 

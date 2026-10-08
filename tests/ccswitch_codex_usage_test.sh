@@ -65,6 +65,8 @@ if [[ "$url" == "https://chatgpt.com/backend-api/wham/usage" ]]; then
     && echo account_ok >>"$CURL_STUB_DIR/calls/headers"
   grep -q 'User-Agent: codex_cli_rs/' "$config_file" \
     && echo ua_ok >>"$CURL_STUB_DIR/calls/headers"
+  grep -qE '^max-time = [0-9]+$' "$config_file" \
+    && echo maxtime_ok >>"$CURL_STUB_DIR/calls/headers"
   status="$(cat "$CURL_STUB_DIR/wham.status" 2>/dev/null)"
   body="$(cat "$CURL_STUB_DIR/wham.body" 2>/dev/null)"
   [[ -z "$body" ]] && body='{}'
@@ -406,8 +408,8 @@ case7_headers_via_config() {
   run_cc "$env" set "" --no-switch
   headers="$(sort "$env/ctl/calls/headers" | tr '\n' ' ')"
 
-  if [[ "$headers" == "account_ok auth_ok ua_ok " ]]; then
-    pass "case7 Authorization, ChatGPT-Account-Id and User-Agent headers sent"
+  if [[ "$headers" == "account_ok auth_ok maxtime_ok ua_ok " ]]; then
+    pass "case7 Authorization, ChatGPT-Account-Id, User-Agent and a max-time sent"
   else
     fail "case7 headers (got: $headers)"
   fi
@@ -474,6 +476,52 @@ case9_bad_response_dash() {
   rm -rf "$env"
 }
 
+# --- Case 11: a 403 is not an expired login (Cloudflare, UA, account) -------
+case11_forbidden_is_not_expired() {
+  local env before after
+  env="$(new_env)"
+  setup_claude "$env" 10 20
+  write_codex_auth "$env" chatgpt "$(future 864000)"
+  jq -cn '{fetched_at: 1000, five_hour_pct: 5, seven_day_pct: 6, five_hour_reset_epoch: null, seven_day_reset_epoch: null, rate_limited_until: null, plan_type: "plus"}' \
+    >"$env/codex/.usage-cache"
+  before="$(cat "$env/codex/.usage-cache")"
+  set_wham "$env" 403 '<html>Just a moment...</html>'
+  run_cc "$env" set "" --no-switch
+  after="$(cat "$env/codex/.usage-cache")"
+
+  if [[ "$before" == "$after" ]] \
+    && ! codex_line | grep -q 'expired' \
+    && codex_line | grep -qE '^  codex +— +— ' \
+    && [[ "$EXIT_CODE" -eq 0 ]]; then
+    pass "case11 403 -> dash row, not expired, cache untouched"
+  else
+    fail "case11 403 (after=$after)"
+    printf '%s\n' "$PLAIN"
+  fi
+  rm -rf "$env"
+}
+
+# --- Case 12: a 200 with no known window is schema drift, not a success ------
+case12_no_known_window_not_cached() {
+  local env r
+  env="$(new_env)"
+  setup_claude "$env" 10 20
+  write_codex_auth "$env" chatgpt "$(future 864000)"
+  r="$(future 7200)"
+  set_wham "$env" 200 "$(wham_body "$(window 42 18060 "$r")" "$(window 7 604860 "$r")")"
+  run_cc "$env" set "" --no-switch
+
+  if [[ ! -e "$env/codex/.usage-cache" ]] \
+    && codex_line | grep -qE '^  codex +— +— ' \
+    && [[ "$EXIT_CODE" -eq 0 ]]; then
+    pass "case12 200 with no known window -> dash row, not cached as a success"
+  else
+    fail "case12 no known window (cache=$(cat "$env/codex/.usage-cache" 2>/dev/null))"
+    printf '%s\n' "$PLAIN"
+  fi
+  rm -rf "$env"
+}
+
 main() {
   write_curl_stub
 
@@ -488,6 +536,8 @@ main() {
   case7_headers_via_config
   case8_cache_headroom_switch
   case9_bad_response_dash
+  case11_forbidden_is_not_expired
+  case12_no_known_window_not_cached
 
   # Security, LAST so every case above has logged its output first: no Codex
   # access token, account id or JWT subject may appear in any output, any
