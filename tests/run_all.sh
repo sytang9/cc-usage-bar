@@ -13,6 +13,7 @@ SUITES=(
   subagent_statusline_test.sh
   ccswitch_test.sh
   ccswitch_usage_test.sh
+  ccswitch_codex_usage_test.sh
   install_test.sh
 )
 

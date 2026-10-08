@@ -1109,6 +1109,165 @@ fetch_and_cache_usage() {
   echo "${p5}|${p7}|${p5reset}|${p7reset}|${HTTP_STATUS}"
 }
 
+# --- Codex (OpenAI ChatGPT plan) usage: one read-only extra row ---------------
+# Codex CLI keeps its own OAuth login in ${CODEX_HOME:-~/.codex}/auth.json. We
+# only READ it. A refresh would rotate the refresh token under the running
+# Codex CLI and log it out, so an expired or rejected token shows "expired"
+# until Codex refreshes it itself. Single account; never a switch target; never
+# touches the Claude account state above. Endpoint and response shape were
+# observed live on 2026-10-06 (no published API).
+CODEX_DIR="${CODEX_HOME:-$HOME/.codex}"
+CODEX_AUTH_FILE="$CODEX_DIR/auth.json"
+CODEX_USAGE_CACHE_FILE="$CODEX_DIR/.usage-cache"
+CODEX_USAGE_API_URL="https://chatgpt.com/backend-api/wham/usage"
+# The endpoint wants a Codex CLI client string; the version is not checked.
+CODEX_USER_AGENT="codex_cli_rs/0.0.0"
+# Windows are identified by length because the primary/secondary slot names
+# are not stable (on 2026-10-06 the weekly window sat in primary).
+CODEX_FIVE_HOUR_WINDOW_SECONDS=18000
+CODEX_SEVEN_DAY_WINDOW_SECONDS=604800
+# The Codex GET runs on the table's critical path: without a cap, a stalled
+# chatgpt.com connection would hang the Claude rows too. A timeout returns
+# status 000, which already renders as a dash row.
+CODEX_USAGE_MAX_TIME_SECONDS=15
+
+# read_codex_auth -> "access_token|account_id|exp_epoch_seconds", or non-zero
+# with no output when there is no usable ChatGPT-mode login (missing file,
+# API-key mode, no token). exp comes from the JWT payload and is empty when it
+# cannot be decoded. jq reads the file directly, so the token never hits argv.
+read_codex_auth() {
+  [[ -f "$CODEX_AUTH_FILE" ]] || return 1
+  jq -er '
+    select(.auth_mode == "chatgpt")
+    | .tokens
+    | select((.access_token | type) == "string" and .access_token != "")
+    | ((try (.access_token | split(".")[1]
+             | gsub("-"; "+") | gsub("_"; "/")
+             | . + ("=" * ((4 - length % 4) % 4))
+             | @base64d | fromjson | .exp | numbers | floor)) // "") as $exp
+    | "\(.access_token)|\(.account_id // "")|\($exp)"
+  ' "$CODEX_AUTH_FILE" 2>/dev/null
+}
+
+# fetch_codex_usage_raw <access_token> <account_id> -> "<body>\n<http_status>",
+# same convention and same --config secrecy as fetch_usage_raw. The ONLY place
+# that knows the Codex endpoint and its headers.
+fetch_codex_usage_raw() {
+  local token="$1" account_id="$2" cfgfile
+  cfgfile="$(mktemp "$CCSWITCH_TMPDIR/codex-cfg.XXXXXX")"
+  chmod 600 "$cfgfile"
+  {
+    printf 'header = "Authorization: Bearer %s"\n' "$token"
+    printf 'header = "ChatGPT-Account-Id: %s"\n' "$account_id"
+    printf 'header = "User-Agent: %s"\n' "$CODEX_USER_AGENT"
+    printf 'max-time = %s\n' "$CODEX_USAGE_MAX_TIME_SECONDS"
+  } >"$cfgfile"
+  curl -sS -o - -w '\n%{http_code}' --config "$cfgfile" "$CODEX_USAGE_API_URL" 2>/dev/null
+  rm -f "$cfgfile"
+}
+
+# parse_codex_usage <json> -> compact JSON {five_hour_pct, seven_day_pct,
+# five_hour_reset_epoch, seven_day_reset_epoch, plan_type}, each possibly null;
+# non-zero with no output when .rate_limit is not an object or holds no known
+# window. The ONLY function that knows the Codex response field names. Unknown
+# window lengths are ignored; identity fields (email, user_id, account_id) are
+# dropped here.
+parse_codex_usage() {
+  echo "$1" | jq -ce \
+    --argjson five "$CODEX_FIVE_HOUR_WINDOW_SECONDS" \
+    --argjson week "$CODEX_SEVEN_DAY_WINDOW_SECONDS" '
+    . as $r
+    | ($r.rate_limit | objects | [.primary_window, .secondary_window] | map(objects)) as $w
+    | ([$w[] | select(.limit_window_seconds == $five)] | first) as $f
+    | ([$w[] | select(.limit_window_seconds == $week)] | first) as $s
+    # No known window at all is schema drift, not a plan state: fail so it is
+    # never cached as a successful fetch.
+    | if $f == null and $s == null then error("no known window") else . end
+    | {five_hour_pct: (($f.used_percent | numbers) // null),
+       seven_day_pct: (($s.used_percent | numbers) // null),
+       five_hour_reset_epoch: (($f.reset_at | numbers | floor) // null),
+       seven_day_reset_epoch: (($s.reset_at | numbers | floor) // null),
+       plan_type: (($r.plan_type | strings) // null)}
+  ' 2>/dev/null
+}
+
+# read_codex_usage_cache -> cache JSON object, or "{}" if missing/corrupt.
+read_codex_usage_cache() {
+  local content
+  content="$(cat "$CODEX_USAGE_CACHE_FILE" 2>/dev/null)"
+  echo "$content" | jq -e 'type == "object"' >/dev/null 2>&1 && echo "$content" || echo "{}"
+}
+
+# codex_cache_row <cache_json> <fallback_state> -> "ok|p5|p7|r5|r7" when the
+# cache holds a successful fetch, else "<fallback_state>||||". A null window
+# comes out empty and renders as a dash.
+codex_cache_row() {
+  echo "$1" | jq -r --arg fb "$2" '
+    if ((.fetched_at | numbers) // 0) > 0
+    then ["ok", .five_hour_pct, .seven_day_pct, .five_hour_reset_epoch, .seven_day_reset_epoch]
+         | map(. // "" | tostring) | join("|")
+    else "\($fb)||||" end'
+}
+
+# codex_usage_row <bypass_cache: 0|1> -> "state|p5|p7|r5|r7" (state: ok, dash,
+# wait, expired), or non-zero with no output when there is no Codex login.
+# Same TTL and 429 backoff rules as fetch_and_cache_usage. On an expired or
+# rejected token it neither refreshes nor writes the cache, so fetched_at goes
+# stale instead of being overwritten.
+codex_usage_row() {
+  local bypass_cache="$1" auth token account_id exp
+  auth="$(read_codex_auth)" || return 1
+  IFS='|' read -r token account_id exp <<<"$auth"
+
+  if [[ "$exp" =~ ^[0-9]+$ ]] && is_token_expired "$(( exp * 1000 ))"; then
+    echo "expired||||"
+    return 0
+  fi
+
+  local now cache rate_limited_until fetched_at
+  now="$(date +%s)"
+  cache="$(read_codex_usage_cache)"
+  rate_limited_until="$(echo "$cache" | jq -r '.rate_limited_until | numbers')"
+  fetched_at="$(echo "$cache" | jq -r '.fetched_at | numbers')"
+
+  if [[ -n "$rate_limited_until" ]] && (( now < rate_limited_until )); then
+    codex_cache_row "$cache" wait
+    return 0
+  fi
+  if [[ "$bypass_cache" != "1" ]] && [[ -n "$fetched_at" ]] && (( fetched_at > 0 )) \
+    && (( now - fetched_at < USAGE_CACHE_TTL_SECONDS )); then
+    codex_cache_row "$cache" dash
+    return 0
+  fi
+
+  local new_cache parsed
+  split_http_response "$(fetch_codex_usage_raw "$token" "$account_id")"
+  case "$HTTP_STATUS" in
+    429)
+      # fetched_at 0 marks "never fetched" when there was no earlier cache; the
+      # contract wants it non-null.
+      new_cache="$(echo "$cache" | jq -c --argjson rl "$((now + USAGE_RATE_LIMIT_BACKOFF_SECONDS))" \
+        '{fetched_at: 0, five_hour_pct: null, seven_day_pct: null, five_hour_reset_epoch: null,
+          seven_day_reset_epoch: null, plan_type: null} + . + {rate_limited_until: $rl}')"
+      file_write "$CODEX_USAGE_CACHE_FILE" "$new_cache"
+      codex_cache_row "$new_cache" wait
+      ;;
+    # Only 401 means the login expired. A 403 can be a Cloudflare challenge or
+    # a rejected header, where "run codex" is the wrong advice: show a dash.
+    401) echo "expired||||" ;;
+    2[0-9][0-9])
+      if ! parsed="$(parse_codex_usage "$HTTP_BODY")"; then
+        echo "dash||||"
+        return 0
+      fi
+      new_cache="$(echo "$parsed" | jq -c --argjson fa "$now" '{fetched_at: $fa} + . + {rate_limited_until: null}')"
+      file_write "$CODEX_USAGE_CACHE_FILE" "$new_cache"
+      codex_cache_row "$new_cache" dash
+      ;;
+    *) echo "dash||||" ;;
+  esac
+}
+
 # --- meter rendering (mirrors statusline-usage.sh's aesthetic: eighth-block
 # fill + middle-dot track + 256-color thresholds) -----------------------------
 USAGE_PCT_OK_MAX=59
@@ -1352,6 +1511,7 @@ render_usage_cell() {
       ;;
     relogin) printf '%-*s' "$USAGE_CELL_WIDTH" "re-login" ;;
     wait) printf '%-*s' "$USAGE_CELL_WIDTH" "rate-limited" ;;
+    expired) printf '%-*s' "$USAGE_CELL_WIDTH" "expired" ;;
     *) printf '%-*s' "$USAGE_CELL_WIDTH" $'\xe2\x80\x94' ;; # em dash
   esac
 }
@@ -1492,18 +1652,30 @@ cmd_usage() {
   local headroom_label
   headroom_label="$(echo "$headroom_lookup" | find_headroom_label)"
 
+  # The Codex row joins AFTER the headroom pick and the switch prompt only
+  # accepts saved Claude labels, so it is never offered as a switch target.
+  local codex_row
+  if codex_row="$(codex_usage_row "$USAGE_BYPASS_CACHE")"; then
+    rows+="codex|  |${codex_row}"$'\n'
+  fi
+
   local header_text
   header_text="$(printf '%-14s%-*s   %-*s   %-*s   %s' \
     "  ACCOUNT" "$USAGE_CELL_WIDTH" "5H" "$USAGE_CELL_WIDTH" "WEEK" \
     "$USAGE_RESET_WIDTH" "RESET(5h)" "RESET(wk)")"
   printf '%s\n' "$(usage_dim "$header_text")"
-  local marker state p5 p7 p5reset p7reset line
+  local marker state p5 p7 p5reset p7reset line s5 s7
   while IFS='|' read -r label marker state p5 p7 p5reset p7reset; do
     [[ -z "$label" ]] && continue
+    # An ok row can lack one window (Codex only reports the windows a plan
+    # has); that cell is a dash, not a 0% meter.
+    s5="$state"; s7="$state"
+    [[ "$state" == "ok" && -z "$p5" ]] && s5="dash"
+    [[ "$state" == "ok" && -z "$p7" ]] && s7="dash"
     line="$(printf '%-14s' "${marker}${label}")"
-    line+="$(render_usage_cell "$state" "$p5")"
+    line+="$(render_usage_cell "$s5" "$p5")"
     line+="   "
-    line+="$(render_usage_cell "$state" "$p7")"
+    line+="$(render_usage_cell "$s7" "$p7")"
     line+="   "
     line+="$(usage_reset_cell "$p5reset")"
     line+="   "

@@ -208,6 +208,33 @@ Flags:
 - `--relaunch` — if you do switch from the prompt, exec `claude` afterward
   (same behavior as `ccswitch <label> --relaunch`).
 
+### The Codex row
+
+If Codex CLI is logged in with a ChatGPT plan (`auth_mode` `chatgpt` in
+`${CODEX_HOME:-~/.codex}/auth.json`), the table gets one extra row, `codex`,
+after the Claude accounts:
+
+```
+  codex       —                 ············   0%   —           6d 23h
+```
+
+- **Read-only.** ccswitch reads Codex's access token and calls the same usage
+  endpoint Codex CLI uses. It never refreshes the token and never writes
+  `auth.json`: a refresh would rotate the token under a running Codex CLI and
+  log it out. When the token has expired or the endpoint answers 401, the row
+  shows `expired` until Codex itself refreshes it (run `codex` once). Any
+  other failure (a 403, a timeout after 15 s, a response with no known
+  window) shows `—` and is not cached.
+- **Single account.** There is one Codex login per `CODEX_HOME`, and it is
+  never offered as a switch target or flagged as most headroom.
+- Windows the plan does not report show `—` (some plans report only the
+  weekly window). Results are cached in `${CODEX_HOME:-~/.codex}/.usage-cache`
+  (mode `600`, no token or account id) under the same 10-minute cache and
+  429 backoff as the Claude rows.
+- No Codex login, or an API-key login, means no row and no other change.
+- The row needs at least one saved Claude account: with none, `ccswitch usage`
+  stops at "no saved accounts" before the Codex row.
+
 ### Pausing token refresh
 
 The token-refresh endpoint rate-limits per machine. If a burst of expired
@@ -257,11 +284,12 @@ Run every test suite:
 bash tests/run_all.sh
 ```
 
-Four self-contained bash suites (statusline, ccswitch, ccswitch usage,
-installer). No test framework, no network: each suite sandboxes `HOME` under
-`mktemp -d` and the usage suite answers HTTP from a stub `curl` on `PATH`, so
-nothing ever touches your real `~/.claude` or Anthropic's API. CI runs the same
-command on every push and pull request.
+Six self-contained bash suites (statusline, subagent rows, ccswitch,
+ccswitch usage, the Codex row, installer). No test framework, no network:
+each suite sandboxes `HOME` under `mktemp -d` and the usage suites answer
+HTTP from a stub `curl` on `PATH`, so nothing ever touches your real
+`~/.claude`, `~/.codex`, or either vendor's API. CI runs the same command on
+every push and pull request.
 
 Lint every script (CI runs the same command):
 
