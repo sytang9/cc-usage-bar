@@ -12,7 +12,7 @@
 # Bumped by hand. ccswitch is copied into ~/.claude by install.sh, so an
 # installed copy cannot be traced back to the checkout it came from -- this is
 # the only way to ask one what it is.
-CCSWITCH_VERSION="1.0.0"
+CCSWITCH_VERSION="1.1.0"
 
 set -uo pipefail
 
@@ -1516,6 +1516,19 @@ render_usage_cell() {
   esac
 }
 
+# refresh_unavailable_reason -> echoes node-missing | node-too-old, or nothing
+# when the built-in refresh transport can work. Also nothing when
+# $CCSWITCH_REFRESH_CMD is set (that override replaces node entirely).
+refresh_unavailable_reason() {
+  [[ -n "${CCSWITCH_REFRESH_CMD:-}" ]] && return 0
+  if ! command -v node >/dev/null 2>&1; then
+    echo node-missing
+  elif ! node -e 'process.exit(typeof fetch === "function" ? 0 : 1)' >/dev/null 2>&1; then
+    echo node-too-old
+  fi
+  return 0
+}
+
 # warn_if_refresh_unavailable: print ONE stderr warning per run when the
 # built-in refresh transport cannot work, so an unusable node reads as a node
 # problem instead of surfacing per-account as "re-login".
@@ -1525,28 +1538,71 @@ render_usage_cell() {
 # $CCSWITCH_REFRESH_CMD is set -- that override replaces node entirely (it is
 # also how the tests stub the network).
 warn_if_refresh_unavailable() {
-  [[ -n "${CCSWITCH_REFRESH_CMD:-}" ]] && return 0
+  case "$(refresh_unavailable_reason)" in
+    node-missing)
+      echo "Warning: node not found on PATH. Expired account tokens cannot be refreshed" >&2
+      echo "(the refresh endpoint is behind Cloudflare, which blocks headless curl), so" >&2
+      echo "rows for expired accounts will show 're-login' until node is installed." >&2
+      ;;
+    node-too-old)
+      echo "Warning: this node is too old to refresh tokens -- fetch() requires node 18+." >&2
+      echo "Rows for expired accounts will show 're-login' regardless of account health." >&2
+      echo "Claude Code ships a modern node; putting it first on PATH fixes this." >&2
+      ;;
+  esac
+  return 0
+}
 
-  if ! command -v node >/dev/null 2>&1; then
-    echo "Warning: node not found on PATH. Expired account tokens cannot be refreshed" >&2
-    echo "(the refresh endpoint is behind Cloudflare, which blocks headless curl), so" >&2
-    echo "rows for expired accounts will show 're-login' until node is installed." >&2
-    return 0
-  fi
-
-  if ! node -e 'process.exit(typeof fetch === "function" ? 0 : 1)' >/dev/null 2>&1; then
-    echo "Warning: this node is too old to refresh tokens -- fetch() requires node 18+." >&2
-    echo "Rows for expired accounts will show 're-login' regardless of account health." >&2
-    echo "Claude Code ships a modern node; putting it first on PATH fixes this." >&2
+# usage_json_login <state> <login_health> -> echoes ok | re-login | unknown.
+# A "relogin" row only means the login is dead when login_health is "known";
+# when the refresh path itself could not run (old node, paused, lock busy) the
+# row says nothing about the account.
+usage_json_login() {
+  local state="$1" login_health="$2"
+  if [[ "$state" == "ok" ]]; then
+    echo ok
+  elif [[ "$state" == "relogin" && "$login_health" == "known" ]]; then
+    echo re-login
+  else
+    echo unknown
   fi
 }
 
+# usage_json_document <rows> <login_health> <reason> -> prints the `usage --json`
+# document. <rows> is cmd_usage's "label|marker|state|p5|p7|r5|r7" lines;
+# <reason> empty means JSON null. The numbers come from each account's
+# .usage-cache AFTER the run, so a re-login row still carries its last numbers
+# and their fetched_at.
+usage_json_document() {
+  local rows="$1" login_health="$2" reason="$3"
+  local label marker state login active objs=""
+  while IFS='|' read -r label marker state _ _ _ _; do
+    [[ -z "$label" ]] && continue
+    login="$(usage_json_login "$state" "$login_health")"
+    active=false
+    [[ "$marker" == "*"* ]] && active=true
+    objs+="$(jq -cn --arg label "$label" --argjson active "$active" --arg login "$login" \
+      --arg state "$state" --argjson cache "$(read_usage_cache "$label")" \
+      '($cache | objects) // {} | . as $cache | {label: $label, active: $active, login: $login, state: $state,
+        five_hour_pct: ($cache.five_hour_pct // null),
+        seven_day_pct: ($cache.seven_day_pct // null),
+        five_hour_reset_epoch: ($cache.five_hour_reset_epoch // null),
+        seven_day_reset_epoch: ($cache.seven_day_reset_epoch // null),
+        fetched_at: ($cache.fetched_at // null)}')"$'\n'
+  done <<<"$rows"
+  printf '%s' "$objs" | jq -s --arg health "$login_health" --arg reason "$reason" --argjson now "$(date +%s)" \
+    '{schema: 1, generated_at: $now, login_health: $health,
+      login_health_reason: (if $reason == "" then null else $reason end), accounts: .}'
+}
+
 cmd_usage() {
-  local no_switch=0 bypass_cache=0 relaunch=""
+  local no_switch=0 bypass_cache=0 relaunch="" json=0
+  local login_health=known reason=""
   local arg
   for arg in "$@"; do
     case "$arg" in
       --no-switch) no_switch=1 ;;
+      --json) json=1; no_switch=1 ;;
       --refresh) bypass_cache=1 ;;
       --relaunch) relaunch="--relaunch" ;;
       *)
@@ -1560,11 +1616,19 @@ cmd_usage() {
   local labels
   labels="$(saved_labels)"
   if [[ -z "$labels" ]]; then
+    if [[ "$json" == "1" ]]; then
+      usage_json_document "" "$login_health" "$reason"
+      return 0
+    fi
     echo "no saved accounts -- run: ccswitch save <label>"
     return 0
   fi
 
   warn_if_refresh_unavailable
+  # login_health: can this run judge whether a login is dead? When the refresh
+  # path cannot run, a "relogin" row proves nothing. First match wins.
+  reason="$(refresh_unavailable_reason)"
+  if [[ -z "$reason" && -f "$NO_REFRESH_FLAG" ]]; then reason="refresh-paused"; fi
 
   # Single-flight over the refresh endpoint for the whole run. Held even when
   # nothing turns out to need refreshing: which accounts need one is only known
@@ -1573,7 +1637,9 @@ cmd_usage() {
   if ! acquire_refresh_lock; then
     echo "Warning: another ccswitch is refreshing tokens; skipping refresh this run." >&2
     echo "Rows for expired accounts show the wait state. Re-run when it finishes." >&2
+    if [[ -z "$reason" ]]; then reason="refresh-lock-busy"; fi
   fi
+  [[ -n "$reason" ]] && login_health=unknown
 
   # Keep the active account's snapshot current on every poll (the CtrlA poller
   # runs this every 5 min), so its refresh token never goes stale behind
@@ -1652,6 +1718,12 @@ cmd_usage() {
   local headroom_label
   headroom_label="$(echo "$headroom_lookup" | find_headroom_label)"
 
+  # --json stops here: no Codex row (its GET is skipped), no table, no prompt.
+  if [[ "$json" == "1" ]]; then
+    usage_json_document "$rows" "$login_health" "$reason"
+    return 0
+  fi
+
   # The Codex row joins AFTER the headroom pick and the switch prompt only
   # accepts saved Claude labels, so it is never offered as a switch target.
   local codex_row
@@ -1727,6 +1799,7 @@ COMMANDS
 usage FLAGS
   --no-switch   just print the table, do not prompt to switch
   --refresh     bypass the 10-minute usage cache and re-poll now
+  --json        print one JSON document (implies --no-switch)
   --relaunch    after switching from the prompt, exec the claude CLI
 
 LABELS

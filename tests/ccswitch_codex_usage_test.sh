@@ -522,6 +522,24 @@ case12_no_known_window_not_cached() {
   rm -rf "$env"
 }
 
+# --- Case 13: usage --json omits the Codex row and never calls wham ----------
+case13_json_omits_codex() {
+  local env out
+  env="$(new_env)"
+  setup_claude "$env" 10 20
+  write_codex_auth "$env" chatgpt "$(future 864000)"
+  set_wham "$env" 200 "$(cat "$REAL_FIXTURE")"
+  out="$(CODEX_HOME="$env/codex" PATH="$STUB_BIN:$PATH" HOME="$env/home" CURL_STUB_DIR="$env/ctl" \
+    CCSWITCH_REFRESH_CMD=/bin/false bash "$TARGET" usage --json 2>/dev/null)"
+  if jq -e '[.accounts[].label] == ["work"]' <<<"$out" >/dev/null 2>&1 \
+    && [[ "$(count "$env" wham_count)" == "0" ]]; then
+    pass "case13 usage --json omits the Codex row and skips its GET"
+  else
+    fail "case13 json codex (wham=$(count "$env" wham_count)): $out"
+  fi
+  rm -rf "$env"
+}
+
 main() {
   write_curl_stub
 
@@ -538,6 +556,7 @@ main() {
   case9_bad_response_dash
   case11_forbidden_is_not_expired
   case12_no_known_window_not_cached
+  case13_json_omits_codex
 
   # Security, LAST so every case above has logged its output first: no Codex
   # access token, account id or JWT subject may appear in any output, any

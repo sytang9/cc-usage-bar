@@ -1,21 +1,23 @@
 // VS Code sidebar + status bar for ccswitch (cc-usage-bar): every saved account's 5h/weekly usage, which one has
 // the most headroom, one-click switching, auto-switch. Usage comes from ccswitch's own per-account cache
 // (~/.claude/accounts/<label>/.usage-cache, refreshed by `ccswitch usage`), or from a team snapshot file if
-// `claudeUsage.usageFile` is set. UI: ui/popup.* copied unchanged from github.com/jens-duttke/usage-monitor-for-claude.
+// `claudeUsage.usageFile` is set.
 const vscode = require('vscode');
 const fs = require('fs');
 const path = require('path');
 const { execFile } = require('child_process');
 
 const usageFile = () => vscode.workspace.getConfiguration('claudeUsage').get('usageFile') || '';  // '' = ccswitch's cache
-const POLL_MS = 60 * 1000;  // keeps "Updated X ago", reset times and the stale warning current
+const POLL_MS = 60 * 1000;  // keeps reset times and the per-account data age current
 const HOME = require('os').homedir();
 const CCSWITCH = path.join(HOME, '.claude', 'ccswitch');
 const ACCOUNTS = path.join(HOME, '.claude', 'accounts');
+// ccswitch's label rule: letters, digits, '_' and '-', never a leading '-' (ccswitch would read it as an option).
+const isLabel = (l) => typeof l === 'string' && /^[A-Za-z0-9_][\w-]*$/.test(l);
 const saved = (label) => fs.existsSync(path.join(ACCOUNTS, label, 'credentials.json'));
 const readJson = (f) => { try { return JSON.parse(fs.readFileSync(f, 'utf8')); } catch { return null; } };
 const emailOf = (label) => (readJson(path.join(ACCOUNTS, label, 'oauthAccount.json')) || {}).emailAddress || null;
-const savedLabels = () => { try { return fs.readdirSync(ACCOUNTS).filter(saved).sort(); } catch { return []; } };
+const savedLabels = () => { try { return fs.readdirSync(ACCOUNTS).filter((l) => isLabel(l) && saved(l)).sort(); } catch { return []; } };
 
 // The saved account the live login belongs to (matched by email, like ccswitch's '*'); else the email's local part.
 function activeLabel() {
@@ -24,18 +26,36 @@ function activeLabel() {
     return savedLabels().find((l) => emailOf(l) === email) || email.split('@')[0];
 }
 
-// Usage snapshot in one shape, from either source: { generated_at, accounts: [{ label, five_pct, week_pct, ... }] }.
-// ccswitch's cache: one file per saved account; "updated" is the OLDEST fetch, so staleness is never understated.
+// Usage snapshot in one shape, from either source: { accounts: [{ label, state, fetched_at, five_pct, week_pct, ... }] }.
+// Every account carries its OWN fetched_at; there is no global age. ccswitch's cache: one file per saved account.
+// Team file: it has no per-account age, so an account's age is the file's generated_at (else its mtime).
+const FRESH_SECS = 1800;  // display: data younger than 30 min is shown as current (ccswitch's cache TTL is 10 min)
+const SWITCH_FRESH_SECS = 900;  // switching (a target, or the active account's 'full'): data younger than 15 min
+const CLOCK_SLACK_SECS = 60;  // a fetched_at further in the future than this is not fresh (clock skew, a bad file)
 function readSnapshot() {
-    if (usageFile()) return JSON.parse(fs.readFileSync(usageFile(), 'utf8'));
-    const accounts = savedLabels().map((label) => {
+    if (usageFile()) {
+        const f = usageFile(), doc = JSON.parse(fs.readFileSync(f, 'utf8'));
+        const fileAge = doc.generated_at ?? Math.floor(fs.statSync(f).mtimeMs / 1000);
+        // Team labels are input: a row that breaks ccswitch's label rule never reaches a path.join or ccswitch.
+        const rows = (doc.accounts || []).filter((a) => a && isLabel(a.label));
+        return { accounts: rows.map((a) => ({ ...a, fetched_at: a.fetched_at ?? fileAge })) };
+    }
+    return { accounts: savedLabels().map((label) => {
         const c = readJson(path.join(ACCOUNTS, label, '.usage-cache')) || {};
-        return { label, provider: 'claude', state: c.fetched_at ? 'ok' : 'no data yet', fetched_at: c.fetched_at,
+        return { label, provider: 'claude', state: c.fetched_at ? 'ok' : 'no data yet', fetched_at: c.fetched_at ?? null,
             five_pct: c.five_hour_pct ?? null, week_pct: c.seven_day_pct ?? null,
             five_reset_epoch: c.five_hour_reset_epoch ?? null, week_reset_epoch: c.seven_day_reset_epoch ?? null };
-    });
-    const times = accounts.map((a) => a.fetched_at).filter(Boolean);
-    return { generated_at: times.length ? Math.min(...times) : null, accounts };
+    }) };
+}
+
+const isFresh = (a, now, secs = FRESH_SECS) => a.state === 'ok' && a.fetched_at != null
+    && now - a.fetched_at < secs && a.fetched_at - now <= CLOCK_SLACK_SECS;
+const loadOf = (a) => Math.max(...[a.five_pct, a.week_pct].filter((v) => v != null));  // a missing window is not full
+
+// A switch target: saved, login not dead, its own data fresh, neither window full, not the active account, Claude only.
+function qualifies(a, ctx) {
+    if ((a.provider || 'claude') !== 'claude' || (a.five_pct == null && a.week_pct == null)) return false;
+    return a.label !== ctx.you && ctx.isSaved(a.label) && !ctx.relogin.has(a.label) && isFresh(a, ctx.now, SWITCH_FRESH_SECS) && loadOf(a) < 100;
 }
 
 // HTML-escape a label before it goes into innerHTML or a quoted attribute. Labels come from folder names, or from
@@ -46,103 +66,153 @@ function esc(s) {
 
 const DAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 
-function resetText(epoch) {
+// When a window resets, as the panel says it after "Resets": 'in 48m', 'in 4h 12m', 'tomorrow 01:00', 'Fri 01:00', 'now'.
+// short (the one-line row summary) drops minutes and clock: 'in 4h', 'tomorrow', 'Fri'.
+function resetText(epoch, short = false) {
     const secs = epoch - Date.now() / 1000;
-    if (secs < 60) return '↻ now';
+    if (secs < 60) return 'now';
     const d = new Date(epoch * 1000), now = new Date();
-    const clock = d.toTimeString().slice(0, 5);
     const dayDiff = Math.round((new Date(d).setHours(0, 0, 0, 0) - new Date(now).setHours(0, 0, 0, 0)) / 864e5);
-    if (dayDiff === 0) { const m = Math.floor(secs / 60); return `↻ ${m >= 60 ? `${Math.floor(m / 60)}h ${m % 60}m` : `${m}m`} (${clock})`; }
-    if (dayDiff === 1) return `↻ tomorrow ${clock}`;
-    return `↻ ${DAYS[d.getDay()]} ${clock}`;
+    if (dayDiff === 0) {
+        const m = Math.floor(secs / 60), h = Math.floor(m / 60);
+        return 'in ' + (!h ? m + 'm' : short ? h + 'h' : `${h}h ${m % 60}m`);
+    }
+    const day = dayDiff === 1 ? 'tomorrow' : DAYS[d.getDay()];
+    return short ? day : `${day} ${d.toTimeString().slice(0, 5)}`;
 }
 
-function dividers(epoch, period) {
-    if (period < 86400) return [0.2, 0.4, 0.6, 0.8];
-    const start = epoch * 1000 - period * 1000, out = [];
-    const day = new Date(start); day.setHours(24, 0, 0, 0);  // next local midnight
-    for (; day.getTime() < epoch * 1000; day.setDate(day.getDate() + 1)) out.push((day.getTime() - start) / (period * 1000));
-    return out;
-}
-
-function bar(key, label, pct, epoch, period) {
-    if (pct == null) return null;
-    const elapsed = epoch ? Math.max(0, Math.min(1, 1 - (epoch - Date.now() / 1000) / period)) : null;
-    return { key, label, pct, pct_text: `${Math.round(pct)}%`, fill_pct: Math.max(0, Math.min(1, pct / 100)),
-        warn: pct >= 100 || (elapsed !== null && pct / 100 > elapsed),  // ahead of pace = red, like the app
-        reset_text: epoch ? resetText(epoch) : '', dividers: epoch ? dividers(epoch, period) : [], marker_rel: elapsed };
-}
-
-// Load = max(5h, weekly) (the CtrlA hub's rules);
-// free = load < 50%; most headroom = lowest load among readable Claude seats (codex never counts).
-function capacity(u) {
+// Load = max(5h, weekly) (the CtrlA hub's rules); best = lowest load among qualifying accounts.
+function capacity(u, ctx) {
     const seats = u.accounts.filter((a) => (a.provider || 'claude') === 'claude' && (a.five_pct != null || a.week_pct != null));
-    const load = (a) => Math.max(...[a.five_pct, a.week_pct].filter((v) => v != null));
-    const best = seats.filter((a) => a.state === 'ok').sort((x, y) => load(x) - load(y))[0];
-    return { free: seats.filter((a) => load(a) < 50).length, total: seats.length,
-        best: best && { label: best.label, five: best.five_pct, week: best.week_pct },
-        loads: Object.fromEntries(seats.map((a) => [a.label, load(a)])),
-        stale: !u.generated_at || Date.now() / 1000 - u.generated_at > 900, updated: u.generated_at };
+    const best = seats.filter((a) => qualifies(a, ctx)).sort((x, y) => loadOf(x) - loadOf(y))[0];
+    const fresh = Object.fromEntries(seats.map((a) => [a.label, isFresh(a, ctx.now)]));
+    return { you: ctx.you,
+        best: best ? { label: best.label, five: best.five_pct, week: best.week_pct } : null,
+        loads: Object.fromEntries(seats.map((a) => [a.label, loadOf(a)])), fresh,
+        activeFresh: !!ctx.you && fresh[ctx.you] === true,
+        activeSwitchFresh: !!ctx.you && seats.some((a) => a.label === ctx.you && isFresh(a, ctx.now, SWITCH_FRESH_SECS)) };
 }
 
-// Auto-switch target: the most-headroom seat, but only when the current seat is full (100% on 5h or weekly),
-// usage data is fresh, and the target is saved and not full itself. Returns a label or null.
-function autoTarget(cap, isSaved) {
-    if (cap.stale || !cap.you || !cap.best || cap.best.label === cap.you) return null;
-    if (!(cap.loads[cap.you] >= 100)) return null;
-    if (!(cap.loads[cap.best.label] < 100) || !isSaved(cap.best.label)) return null;
-    return cap.best.label;
+// Auto-switch target: the best qualifying account, but only when the active account is full (100% on 5h or weekly)
+// and its own data is under 15 min old. Returns a label (ccswitch's rule) or null.
+function autoTarget(cap) {
+    if (!cap.you || !cap.activeSwitchFresh || !(cap.loads[cap.you] >= 100) || !cap.best) return null;
+    return isLabel(cap.best.label) ? cap.best.label : null;
+}
+
+// Status bar: `● <you> <5h>%/<wk>% · ⇄ <next-best>`. ◷ marks data that is not fresh; $(sync) marks auto-switch on.
+// Only the best qualifying account is named, so a stale or dead account is never counted as available.
+const pctOr = (v) => (v == null ? '–' : Math.round(v) + '%');
+function statusText(cap, accounts, auto) {
+    const lead = auto ? '$(sync) ' : '';
+    if (!cap.you) return lead + '● none';
+    const me = accounts.find((a) => a.label === cap.you) || {};
+    return `${lead}● ${cap.you} ${pctOr(me.five_pct)}/${pctOr(me.week_pct)}${cap.activeFresh ? '' : ' ◷'} · ⇄ ${cap.best ? cap.best.label : 'none'}`;
+}
+
+// Tooltip: the auto-switch state, then one line per account (an active account with no row gets one too).
+function statusTooltip(cap, accounts, auto, now = Date.now() / 1000) {
+    const list = cap.you && !accounts.some((a) => a.label === cap.you) ? [...accounts, { label: cap.you, fetched_at: null, state: 'no data yet' }] : accounts;
+    const dead = new Set(cap.relogin || []);
+    const lines = list.map((a) => {
+        const age = isFresh(a, now) ? null : ageText(a.fetched_at, now);
+        return `${a.label}: 5h ${pctOr(a.five_pct)}, wk ${pctOr(a.week_pct)}` + (dead.has(a.label) ? ' · re-login' : '')
+            + (age === 'no data' ? ' · no data' : age ? ` · data ${age}` : !isFresh(a, now) ? ` · ${a.state}` : '') + (a.label === cap.you ? ' · active' : '');
+    });
+    return [`Auto-switch: ${auto ? 'ON' : 'off'}`, ...lines].join('\n');
+}
+
+// Data age as shown on a row: null while fresh by time, 'no data' when there never was any, 'in the future' past the
+// clock slack, else '45m old' / '5h old' / '13d old'.
+function ageText(fetchedAt, now) {
+    if (fetchedAt == null) return 'no data';
+    const secs = now - fetchedAt;
+    if (secs < -CLOCK_SLACK_SECS) return 'in the future';
+    if (secs < FRESH_SECS) return null;
+    return secs >= 86400 ? Math.floor(secs / 86400) + 'd old' : secs >= 3600 ? Math.floor(secs / 3600) + 'h old' : Math.floor(secs / 60) + 'm old';
 }
 
 function readAccounts() {
     const u = readSnapshot();
-    const cap = capacity(u);
-    const accounts = u.accounts.map((a) => ({ name: a.label, data: {
-        profile: emailOf(a.label) ? { email: emailOf(a.label), plan: '' } : null, extra: null, installations: [],
-        usage: [bar('five_hour', '5H', a.five_pct, a.five_reset_epoch, 18000),
-                bar('seven_day', 'Week', a.week_pct, a.week_reset_epoch, 604800)].filter(Boolean),
-        status: a.state === 'ok'
-            ? { last_success_time: u.generated_at, next_poll_time: null, refreshing: false, error: null }
-            : { text: a.state, is_error: a.state !== 'no data yet' },
-    } }));
-    cap.you = activeLabel();
-    cap.saved = fs.existsSync(CCSWITCH) ? accounts.map((a) => a.name).filter(saved) : null;  // null = no ccswitch
+    const now = Date.now() / 1000;
+    const cap = capacity(u, { you: activeLabel(), isSaved: saved, relogin, now });
+    const accounts = u.accounts.map((a) => ({ ...a, email: emailOf(a.label) }));
+    cap.loginHealth = loginHealth;
+    cap.saved = fs.existsSync(CCSWITCH) ? accounts.map((a) => a.label).filter(saved) : null;  // null = no ccswitch
     cap.relogin = [...relogin];
     return { accounts, cap };
 }
 
-// Compact sidebar layout on top of the unchanged popup.css: title = seat (click to switch), one
-// two-line row per bar (label · reset · % / bar), no section headings, account block or footer.
-const COMPACT_CSS = `
-.window-controls, h2, #accountSection, footer { display: none !important; }
-body { gap: 6px; padding: 7px 10px 9px; }
-header > span { font-size: 13px; }
-#title.link { cursor: pointer; } #title.link:hover { text-decoration: underline; }
-header { flex-wrap: wrap; row-gap: 4px; } #title { white-space: nowrap; flex-shrink: 0; }
-#badges { display: flex; flex-wrap: wrap; gap: 4px; margin-left: auto; justify-content: flex-end; }
-.badge { font-size: 10px; font-weight: 700; letter-spacing: .04em; padding: 2px 7px; border-radius: 9px; color: #fff; }
-.badge.cur { background: #D97757; } .badge.best { background: #238636; }
-.act { font-size: 10px; color: #888; cursor: pointer; padding: 2px 2px; align-self: center; } .act:hover { color: #fff; text-decoration: underline; }
-.act.save { color: #d29922; font-weight: 700; }
-.act.del { display: inline-flex; padding: 1px; } .act.del svg { width: 13px; height: 13px; } .act.del:hover { color: #f85149; }
-.dim { font-size: 10px; color: #666; align-self: center; }
-.act.relog { color: #fff; background: #d75f5f; font-weight: 700; padding: 1px 6px; border-radius: 9px; } .act.relog:hover { text-decoration: none; filter: brightness(1.15); }
-section.visible ~ section.visible { border: 0; padding-top: 0; }
-#usageBars { gap: 7px; }
-.usage-entry { display: grid; grid-template-columns: auto 1fr auto; column-gap: 8px; row-gap: 3px; align-items: baseline; }
-.bar-header { display: contents; }
-.bar-header > span:first-child { grid-column: 1; grid-row: 1; font-weight: 600; }
-.bar-pct { grid-column: 3; grid-row: 1; }
-.reset-text { grid-column: 2; grid-row: 1; font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.bar-container { grid-column: 1 / -1; grid-row: 2; height: 6px; }
-`;
+// What the panel shows, decided here so the webview only draws it. Every status is one icon with a fixed tooltip and
+// one grey summary ('82% · 74%', 'Weekly full · resets Thu', 'Re-login needed', 'No recent data').
+// An active account with no row (not saved, no data) gets one.
+const TIPS = { active: 'Active account', relogin: 'Needs re-login', full: 'A limit is at 100%', switch: 'You can switch here', '': '' };
+function panelData(accounts, cap, { now, installed, auto }) {
+    const savedSet = new Set(cap.saved || []), dead = new Set(cap.relogin || []);
+    const ctx = { you: cap.you, isSaved: (l) => savedSet.has(l), relogin: dead, now };
+    const pct = (v) => (v == null ? null : Math.round(v));
+    const live = (epoch) => epoch && epoch > now - 60;  // a past reset says nothing about now
+    const reset = (epoch) => (live(epoch) ? resetText(epoch) : null);
+    const full = (name, epoch) => name + ' full' + (live(epoch) ? ' · resets ' + resetText(epoch, true) : '');
+    const age = (a) => (isFresh(a, now) ? null : ageText(a.fetched_at, now) || a.state);
+    const list = cap.you && !accounts.some((a) => a.label === cap.you)
+        ? [...accounts, { label: cap.you, provider: 'claude', state: 'no data yet', fetched_at: null, five_pct: null, week_pct: null, email: null }]
+        : accounts;
+    const rows = list.map((a) => {
+        const claude = (a.provider || 'claude') === 'claude', you = a.label === cap.you;
+        const icon = you ? 'active' : dead.has(a.label) ? 'relogin' : (a.five_pct >= 100 || a.week_pct >= 100) ? 'full'
+            : qualifies(a, ctx) ? 'switch' : '';
+        const actions = !claude || !installed ? [] : [
+            ...(you && !savedSet.has(a.label) ? ['save'] : []),
+            ...(!you && !dead.has(a.label) ? ['switch'] : []),
+            ...(dead.has(a.label) ? ['relogin'] : []),
+            ...(savedSet.has(a.label) ? ['delete'] : []),
+        ];
+        const summary = icon === 'relogin' ? 'Re-login needed' : age(a) ? 'No recent data'
+            : icon === 'full' ? (a.week_pct >= 100 ? full('Weekly', a.week_reset_epoch) : full('Session', a.five_reset_epoch))
+            : pctOr(a.five_pct) + ' · ' + pctOr(a.week_pct);
+        return { label: a.label, provider: a.provider || 'claude', icon, tip: TIPS[icon], summary, five: pct(a.five_pct), week: pct(a.week_pct),
+            fiveReset: reset(a.five_reset_epoch), weekReset: reset(a.week_reset_epoch), age: age(a), email: a.email || null, actions };
+    });
+    const mine = list.find((a) => a.label === cap.you);
+    return {
+        installed, auto, loginHealth: cap.loginHealth || 'unknown',
+        active: mine ? { label: mine.label, email: mine.email || null, five: pct(mine.five_pct), week: pct(mine.week_pct),
+            fiveReset: reset(mine.five_reset_epoch), weekReset: reset(mine.week_reset_epoch), age: age(mine) } : null,
+        next: cap.best ? { label: cap.best.label, five: pct(cap.best.five), week: pct(cap.best.week) } : null,
+        counts: { total: rows.length, saved: rows.filter((r) => savedSet.has(r.label)).length,
+            relogin: rows.filter((r) => r.icon === 'relogin').length, full: rows.filter((r) => r.icon === 'full').length },
+        rows,
+    };
+}
 
-function popupDoc() {
-    const read = (f) => fs.readFileSync(path.join(__dirname, 'ui', f), 'utf8');
-    return read('popup.html')
-        .replace('<link rel="stylesheet" href="popup.css">', () => `<style>${read('popup.css')}</style>`)
-        .replace('</head>', () => `<style>${COMPACT_CSS}</style></head>`)
-        .replace('<script src="popup.js"></script>', () => `<script>${read('popup.js')}</script>`);
+// Turning auto-switch ON switches accounts with nobody watching, so it asks in a modal and records the yes in
+// globalState (state); auto-switch never acts without it. OFF needs no dialog. Returns true when the setting changed.
+const AUTO_DETAIL = 'Auto-switch changes the Claude Code account for every new Claude Code session on this machine, without asking, '
+    + 'when the active account reaches 100% (5h or weekly). If it is already at 100%, it switches right away. '
+    + 'Open Claude Code tabs keep the old account until you restart them.';
+const CONSENT = 'claudeUsage.autoSwitchConsent';
+async function askAutoConsent(state) {
+    const ok = await vscode.window.showWarningMessage('Turn on auto-switch?', { modal: true, detail: AUTO_DETAIL }, 'Turn on') === 'Turn on';
+    if (ok) await state.update(CONSENT, true);
+    return ok;
+}
+async function setAutoSwitch(on, state) {
+    if (on && !(await askAutoConsent(state))) return false;
+    await vscode.workspace.getConfiguration('claudeUsage').update('autoSwitch', on, vscode.ConfigurationTarget.Global);
+    return true;
+}
+// Fire-and-forget callers (toggle, toast): a failed settings write must be shown, not dropped.
+const changeAutoSwitch = (on, state) => setAutoSwitch(on, state).catch((err) =>
+    vscode.window.showErrorMessage('Could not change auto-switch: ' + (err && err.message || err)));
+// The setting is on, but nobody confirmed the dialog on this machine (settings.json, an older version):
+// ask once (polls share the pending dialog); No turns the setting off.
+let pendingConsent = null;
+function confirmAutoOn(state) {
+    pendingConsent = pendingConsent || askAutoConsent(state)
+        .then((ok) => ok || changeAutoSwitch(false).then(() => false))
+        .finally(() => { pendingConsent = null; });
+    return pendingConsent;
 }
 
 // input = what to type at ccswitch's own [y/N] prompts; we always ask in VS Code first.
@@ -166,9 +236,9 @@ async function ccswitch(args, input) {
 }
 
 // Click a seat: saved -> `ccswitch <label>` (instant). Everything goes through ccswitch; a seat that isn't
-// saved yet (or whose saved login expired) is enrolled once with Claude's own /login, then SAVE.
+// saved yet (or whose saved login expired) is enrolled once with Claude's own /login, then Save login.
 async function switchSeat(label, onDone) {
-    if (!/^[\w-]+$/.test(label)) return;  // ccswitch's own label charset - never anything else
+    if (!isLabel(label)) return;  // ccswitch's own label rule - never anything else
     if (!fs.existsSync(CCSWITCH)) return installCcswitch();
     if (label === activeLabel()) { vscode.window.showInformationMessage(`You are already on ${label}.`); return; }
     if (relogin.has(label) || !saved(label)) return enroll(label, relogin.has(label), onDone);
@@ -183,12 +253,12 @@ async function switchSeat(label, onDone) {
     vscode.window.showInformationMessage(`Switched Claude Code to ${label}. Restart open Claude Code tabs to use it.`);
 }
 
-// One-time enrolment of a seat ccswitch can't switch to yet: log in to it with Claude's /login, then SAVE.
+// One-time enrolment of a seat ccswitch can't switch to yet: log in to it with Claude's /login, then Save login.
 async function enroll(label, expired, onDone) {
     const ok = await vscode.window.showInformationMessage(
         expired ? `The saved login for ${label} has expired (ccswitch: re-login).` : `${label} isn't saved in ccswitch yet.`,
         { modal: true, detail: `Log in to ${label} once: a terminal opens with Claude Code - type /login and sign in as ${label}. `
-            + `Then click SAVE on the ${label} card. After that, switching to it is instant.` },
+            + `Then click the ${label} row in the sidebar and choose Save login. After that, switching to it is instant.` },
         'Open terminal');
     if (ok !== 'Open terminal') return;
     await checkLogins();  // ccswitch copies your current seat's newest tokens into its saved copy before /login replaces them
@@ -211,25 +281,46 @@ async function installCcswitch() {
     t.sendText(`(git -C "${dir}" pull -q 2>/dev/null || git clone -q https://github.com/sytang9/cc-usage-bar.git "${dir}") && bash "${dir}/install.sh"`);
 }
 
-// Keep-alive + health check, all decided by ccswitch itself: `ccswitch usage --no-switch` refreshes every
-// saved seat's tokens and prints `re-login` for a seat whose saved refresh token is dead.
+// Keep-alive + health check, all decided by ccswitch itself: `ccswitch usage --json` refreshes every saved
+// account's tokens and reports each account's login (`ok` | `re-login` | `unknown`) as data, not as text to parse.
 const relogin = new Set();
+let loginHealth = 'unknown';  // 'known' | 'unknown': whether the last run could judge dead logins at all
+let loginChecked = false;  // true once a check returned a valid document; auto-switch waits for it
+
+// The parsed `usage --json` document, or null unless it is schema 1 with an accounts array.
+function parseUsageJson(text) {
+    try {
+        const d = JSON.parse(text);
+        return d && d.schema === 1 && Array.isArray(d.accounts) ? d : null;
+    } catch { return null; }
+}
+
+// New re-login set: no document (failed run) -> the previous set; re-login adds, ok removes, unknown keeps the
+// previous verdict; saved only. One failed run must never forget a dead login.
+function mergeLogins(prev, doc, isSaved) {
+    if (!doc) return new Set(prev);
+    const next = new Set(prev);
+    for (const a of doc.accounts) {
+        if (a.login === 're-login') next.add(a.label);
+        else if (a.login === 'ok') next.delete(a.label);
+    }
+    return new Set([...next].filter(isSaved));
+}
+
 async function checkLogins() {
     if (!fs.existsSync(CCSWITCH)) return;
-    const r = await run(CCSWITCH, ['usage', '--no-switch']);
-    // ccswitch says when its re-login verdict can't be trusted (node missing, refresh paused) - then mark nothing
-    if (!r.ok || /regardless of account health|until node is installed/.test(r.err)) return;
-    const next = new Set();
-    for (const line of r.out.replace(/\x1b\[[0-9;]*m/g, '').split('\n')) {
-        const m = line.match(/^[* ]\s*([\w-]+)\s+(.*)$/);
-        if (m && saved(m[1]) && /\bre-login\b/.test(m[2])) next.add(m[1]);
-    }
-    relogin.clear();
+    const r = await run(CCSWITCH, ['usage', '--json']);
+    const doc = r.ok ? parseUsageJson(r.out) : null;  // old ccswitch (no --json) or stray output: trust nothing
+    const next = mergeLogins(relogin, doc, saved);
+    relogin.clear();  // same Set object, so saveSeat's relogin.delete keeps working
     for (const l of next) relogin.add(l);
+    loginHealth = doc && doc.login_health === 'known' ? 'known' : 'unknown';
+    if (doc) loginChecked = true;
 }
 
 // Save the CURRENT login under its seat name (ccswitch save always snapshots whichever login is active).
 async function saveSeat(label, onDone) {
+    if (!isLabel(label)) return;
     if (label !== activeLabel()) { vscode.window.showWarningMessage(`You can only save the seat you are on (${activeLabel()}).`); return; }
     if (saved(label)) {
         const ok = await vscode.window.showWarningMessage(`Overwrite the saved login for ${label}?`,
@@ -243,14 +334,90 @@ async function saveSeat(label, onDone) {
 }
 
 async function deleteSeat(label, onDone) {
+    if (!isLabel(label)) return;
     const ok = await vscode.window.showWarningMessage(`Delete the saved login for ${label}?`,
-        { modal: true, detail: 'Your current Claude Code login is not affected. To switch to this seat again you will need to log in to it once and SAVE.' }, 'Delete');
+        { modal: true, detail: 'Your current Claude Code login is not affected. To switch to this seat again you will need to log in to it once and choose Save login in its row.' }, 'Delete');
     if (ok !== 'Delete') return;
     const r = await ccswitch(['delete', label], 'y\n');
     if (r.ok && !saved(label)) vscode.window.showInformationMessage(`Deleted the saved login for ${label}.`);
     else vscode.window.showErrorMessage('ccswitch delete failed: ' + r.msg);
     onDone();
 }
+
+// --- Auto-switch. Every VS Code window runs its own copy, so the cooldown is a file and one window at a time
+// decides and switches, under an mkdir lock (atomic). Both sit next to ccswitch's own state files.
+const AUTO_STAMP = path.join(ACCOUNTS, '.autoswitch.json');  // { last_switch: <epoch secs> }
+const AUTO_LOCK = path.join(ACCOUNTS, '.autoswitch.lock');
+const AUTO_COOLDOWN_SECS = 10 * 60;  // a lagging snapshot can't bounce us between accounts
+const AUTO_LOCK_STALE_SECS = 10 * 60;  // longer than ccswitch()'s worst case (5 tries x 90 s): a crashed window left it
+
+// Why auto-switch must not act now, or null when it may. Every gate but the machine-wide cooldown and lock.
+function autoBlock(g) {
+    if (!g.on) return 'off';
+    if (!g.consented) return 'no consent';
+    if (!g.installed) return 'no ccswitch';
+    if (!g.checked) return 'no login check yet';
+    if (g.health !== 'known') return 'login health unknown';
+    return autoTarget(g.cap) ? null : 'no target';
+}
+
+function writeAutoStamp(secs) {
+    const tmp = `${AUTO_STAMP}.${process.pid}.tmp`;
+    fs.writeFileSync(tmp, JSON.stringify({ last_switch: secs }));
+    fs.renameSync(tmp, AUTO_STAMP);
+}
+
+function takeAutoLock(now) {
+    try { fs.mkdirSync(AUTO_LOCK); return true; } catch { /* held by another window, or stale */ }
+    try {
+        if (now - fs.statSync(AUTO_LOCK).mtimeMs / 1000 < AUTO_LOCK_STALE_SECS) return false;
+        fs.rmSync(AUTO_LOCK, { recursive: true, force: true });
+        fs.mkdirSync(AUTO_LOCK);
+        return true;
+    } catch { return false; }
+}
+
+// One attempt: { skip: reason } or { from, to, r } (r = the ccswitch result). The stamp is written before the
+// switch, so a failed switch also waits out the cooldown instead of retrying on every poll.
+async function autoSwitchOnce(cap, state) {
+    const on = !!vscode.workspace.getConfiguration('claudeUsage').get('autoSwitch');
+    if (on && !state.get(CONSENT) && !(await confirmAutoOn(state))) return { skip: 'no consent' };
+    const why = autoBlock({ on, consented: !!state.get(CONSENT), installed: fs.existsSync(CCSWITCH), checked: loginChecked, health: loginHealth, cap });
+    if (why) return { skip: why };
+    const now = Date.now() / 1000;
+    const cooling = () => {
+        const last = Number((readJson(AUTO_STAMP) || {}).last_switch) || 0;
+        return last <= now && now - last < AUTO_COOLDOWN_SECS;  // a stamp in the future (a wrong clock) is ignored
+    };
+    if (cooling()) return { skip: 'cooldown' };  // before the lock: a lock made on every poll wakes every window's watcher
+    if (!takeAutoLock(now)) return { skip: 'busy' };
+    try {
+        if (cooling()) return { skip: 'cooldown' };  // again under the lock: another window may have just switched
+        const live = readAccounts().cap, from = cap.you, to = autoTarget(live);  // the poll's cap may be a minute old
+        if (live.you !== from || !to) return { skip: 'moved' };
+        writeAutoStamp(now);
+        return { from, to, r: await ccswitch([to]) };
+    } finally { fs.rmSync(AUTO_LOCK, { recursive: true, force: true }); }
+}
+
+// Polls call this without waiting, so an error (an unreadable file, a stamp it cannot write) is shown here.
+async function autoSwitch(cap, state, onDone) {
+    let res;
+    try { res = await autoSwitchOnce(cap, state); } catch (err) {
+        vscode.window.showErrorMessage('Auto-switch failed: ' + (err && err.message || err));
+        return { skip: 'error' };
+    }
+    if (!res.r) return res;
+    if (!res.r.ok) { vscode.window.showErrorMessage(`Auto-switch to ${res.to} failed: ` + res.r.msg); return res; }
+    onDone();
+    const next = await vscode.window.showWarningMessage(`Auto-switched Claude Code: ${res.from} is full, now on ${res.to} (most headroom). Restart open Claude Code tabs to use it.`, 'Turn auto-switch off');
+    if (next === 'Turn auto-switch off') changeAutoSwitch(false);
+    return res;
+}
+
+// "View details" in the Active account header: Claude's own usage page, in the user's browser.
+const USAGE_URL = 'https://claude.ai/settings/usage';
+const openUsagePage = () => vscode.env.openExternal(vscode.Uri.parse(USAGE_URL));
 
 // Pre-release copies were published as meng-local.claude-usage (+ a Chrome helper); remove them so there is one sidebar.
 function removeOldHelper() {
@@ -268,32 +435,16 @@ function activate(context) {
     status.text = '$(pulse) Claude …';
     status.show();
 
-    const push = () => view && view.webview.postMessage({ accounts, cap });
+    const push = () => view && cap && view.webview.postMessage(panelData(accounts, cap, { now: Date.now() / 1000, installed: fs.existsSync(CCSWITCH), auto: !!cap.auto }));
     const autoOn = () => vscode.workspace.getConfiguration('claudeUsage').get('autoSwitch');
-    let lastAuto = 0;  // cooldown so a lagging snapshot can't bounce us between seats
-    const autoSwitch = async () => {
-        if (!autoOn() || !fs.existsSync(CCSWITCH) || Date.now() - lastAuto < 10 * 60 * 1000) return;
-        const from = cap.you, to = autoTarget(cap, (l) => saved(l) && !relogin.has(l));
-        if (!to) return;
-        lastAuto = Date.now();
-        const r = await ccswitch([to]);
-        if (!r.ok) { vscode.window.showErrorMessage(`Auto-switch to ${to} failed: ` + r.msg); return; }
-        poll();
-        const next = await vscode.window.showWarningMessage(`Auto-switched Claude Code: ${from} is full, now on ${to} (most headroom). Restart open Claude Code tabs to use it.`, 'Turn auto-switch off');
-        if (next === 'Turn auto-switch off') vscode.workspace.getConfiguration('claudeUsage').update('autoSwitch', false, vscode.ConfigurationTarget.Global);
-    };
-    const toggleAuto = () => vscode.workspace.getConfiguration('claudeUsage').update('autoSwitch', !autoOn(), vscode.ConfigurationTarget.Global);
+    const toggleAuto = () => changeAutoSwitch(!autoOn(), context.globalState);
 
     const poll = () => {
         try { ({ accounts, cap } = readAccounts()); cap.auto = autoOn(); } catch (err) { status.text = '$(warning) Claude usage unreadable'; status.tooltip = String(err); return; }
-        const pct = (a, key) => (a.data.usage.find((u) => u.key === key) || {}).pct_text || '–';
-        const r = (v) => (v == null ? '–' : Math.round(v) + '%');
-        status.text = (cap.stale ? '$(warning) ' : '$(pulse) ') + (cap.auto ? '$(sync) ' : '') + (cap.you ? `current ${cap.you} · ` : '') + `${cap.free}/${cap.total} free`
-            + (cap.best ? ` · most headroom ${cap.best.label} (${r(cap.best.five)}/${r(cap.best.week)})` : '');
-        status.tooltip = (cap.stale ? 'Usage data is over 15 min old\n' : '') + `Auto-switch: ${cap.auto ? 'ON' : 'off'}\n` + 'Accounts (5h / weekly)\n'
-            + accounts.map((a) => `${a.data.profile ? a.data.profile.email : a.label}: session ${pct(a, 'five_hour')}, weekly ${pct(a, 'seven_day')}`).join('\n');
+        status.text = statusText(cap, accounts, cap.auto);
+        status.tooltip = statusTooltip(cap, accounts, cap.auto);
         push();
-        autoSwitch();
+        autoSwitch(cap, context.globalState, poll);
     };
 
     context.subscriptions.push(status,
@@ -306,15 +457,17 @@ function activate(context) {
         vscode.window.registerWebviewViewProvider('claudeUsage.view', {
             resolveWebviewView(v) {
                 view = v;
-                v.webview.options = { enableScripts: true };
-                v.webview.html = webviewHtml(popupDoc());
+                v.webview.options = { enableScripts: true, localResourceRoots: [vscode.Uri.file(CODICONS)] };
+                v.webview.html = webviewHtml(v.webview);
                 v.webview.onDidReceiveMessage((m) => {
+                    if (!m) return;
                     if (m === 'ready') push();
                     else if (m.seat) switchSeat(m.seat, poll);
-                    else if (m.save && /^[\w-]+$/.test(m.save)) saveSeat(m.save, poll);
-                    else if (m.del && /^[\w-]+$/.test(m.del)) deleteSeat(m.del, poll);
+                    else if (m.save) saveSeat(m.save, poll);
+                    else if (m.del) deleteSeat(m.del, poll);
                     else if (m.toggleAuto) toggleAuto();
                     else if (m.installCc) installCcswitch();
+                    else if (m.openUsage) openUsagePage();
                 });
                 v.onDidDispose(() => { view = null; });
             },
@@ -333,127 +486,20 @@ function activate(context) {
     context.subscriptions.push({ dispose: () => { clearInterval(timer); fs.unwatchFile(watched); fs.unwatchFile(path.join(HOME, '.claude.json')); } });
 }
 
-// Same driver as ui/index.html, but the data arrives by postMessage instead of fetch.
-function webviewHtml(doc) {
-    // No network, no external files: inline script/style only (the srcdoc frames inherit this policy).
+// One native panel: panel.css + esc + panel.js inlined; the vendored codicon font is the only file it loads.
+// No network, no frames.
+const CODICONS = path.join(__dirname, 'webview', 'codicons');
+function webviewHtml(webview) {
+    const read = (f) => fs.readFileSync(path.join(__dirname, 'webview', f), 'utf8');
+    const src = webview.cspSource;
     return `<!DOCTYPE html><html><head><meta charset="utf-8">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src data:; frame-src 'self'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline' ${src}; font-src ${src}; script-src 'unsafe-inline'; img-src data:">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" href="${webview.asWebviewUri(vscode.Uri.file(path.join(CODICONS, 'codicon.css')))}">
 <style>
-body { margin: 0; padding: 8px 0; } #cap { color: #ccc; background: #1e1e1e; border-radius: 6px; padding: 7px 10px; margin-bottom: 6px; font: 12px system-ui, sans-serif; line-height: 1.5; }
-#cap .k { color: #888; font-size: 11px; font-weight: 600; letter-spacing: .05em; display: block; } #cap b { color: #fff; } #cap .hop { color: #57bdb2; } #cap .stale { color: #e05050; } #cap .k2 { color: #888; }
-#cap .head { display: flex; align-items: center; justify-content: space-between; gap: 6px; } #cap .head .k { display: inline; }
-#cap .auto { display: inline-flex; align-items: center; gap: 5px; font-size: 11px; color: #aaa; white-space: nowrap; }
-#cap .sw { position: relative; width: 26px; height: 14px; border-radius: 7px; background: #555; cursor: pointer; transition: background .15s; flex-shrink: 0; }
-#cap .sw::after { content: ''; position: absolute; top: 2px; left: 2px; width: 10px; height: 10px; border-radius: 50%; background: #fff; transition: left .15s; }
-#cap .sw.on { background: #D97757; } #cap .sw.on::after { left: 14px; } #cap .sw:focus-visible { outline: 2px solid #D97757; outline-offset: 2px; }
-#cap .info { width: 14px; height: 14px; border-radius: 50%; border: 1px solid #777; color: #aaa; font: italic 700 10px/12px Georgia, serif; text-align: center; cursor: pointer; flex-shrink: 0; }
-#cap .info:hover, #cap .info.open { border-color: #D97757; color: #D97757; }
-#cap .install { cursor: pointer; font-size: 10px; font-weight: 700; color: #fff; background: #D97757; padding: 2px 8px; border-radius: 9px; white-space: nowrap; } #cap .install:hover { filter: brightness(1.1); }
-#cap .explain { margin-top: 5px; padding: 6px 8px; border-left: 2px solid #D97757; background: #262626; color: #bbb; font-size: 11px; line-height: 1.45; }
-iframe { display: block; box-sizing: content-box; border: 2px solid transparent; width: calc(100% - 4px); height: 90px; margin-bottom: 4px; border-radius: 8px; }
-iframe.best { border-color: #238636; } iframe.cur { border-color: #D97757; }
-#cap .best { color: #3fb950; }
-</style></head><body><div id="cap"></div><div id="grid"></div><script>
-const DOC = ${JSON.stringify(doc).replace(/</g, '\\u003c')};
+${read('panel.css')}</style></head><body><main id="root"></main><script>
 ${esc.toString()}
-const COLORS = { bg: '#1e1e1e', fg: '#cccccc', fg_dim: '#888888', fg_heading: '#ffffff', fg_link: '#D97757',
-    bar_bg: '#333333', bar_fg: '#D97757', bar_fg_warn: '#F0443A', bar_divider: '#000c', bar_marker: '#fffc' };
-const T = { account: 'Account', email: 'Email', plan: 'Plan', usage: 'Usage', extra_usage: 'Extra usage',
-    claude_code: 'Claude Code', changelog: 'Changelog', pin_popup: 'Pin', unpin_popup: 'Unpin',
-    status_updated_s: 'Updated {s}s ago', status_updated: 'Updated {duration} ago',
-    status_next_update: 'Next update in {duration}', status_refreshing: 'Refreshing...',
-    duration_hm: '{h}h {m}m', duration_m: '{m}m', duration_s: '{s}s' };
-const frames = {};
-let lastCap = {};
-const TRASH = '<svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M6 1h4a1 1 0 0 1 1 1v1h3v1.5H2V3h3V2a1 1 0 0 1 1-1zm0 2h4V2.5H6zM3.5 6h9l-.7 8.1A1 1 0 0 1 10.8 15H5.2a1 1 0 0 1-1-.9zm2.6 1.5.3 6h1.2l-.2-6zm2.5 0-.2 6h1.2l.3-6z"/></svg>';
-// CURRENT (orange) = the seat you are logged in as; MOST HEADROOM (green) = the freest seat.
-// Bar colours = ccswitch's (cc-usage-bar): green <= 59%, amber 60-85%, red > 85% (xterm 108/179/167).
-const barColor = (pct) => (pct > 85 ? '#d75f5f' : pct > 59 ? '#d7af5f' : '#87af87');
-function paint(name, data) {
-    const w = frames[name];
-    if (!w) return;
-    for (const u of data.usage) {
-        const fill = w.document.querySelector('.usage-entry[data-key="' + u.key + '"] .bar-fill');
-        if (fill) fill.style.background = barColor(u.pct);
-    }
-}
-function tag(name) {
-    const w = frames[name], iframe = document.querySelector('iframe[data-name="' + CSS.escape(name) + '"]');
-    if (!w || !iframe) return;
-    const cur = lastCap.you === name, best = !!lastCap.best && lastCap.best.label === name;
-    iframe.classList.toggle('cur', cur);
-    iframe.classList.toggle('best', best);
-    let b = w.document.getElementById('badges');
-    if (!b) { b = w.document.createElement('span'); b.id = 'badges'; w.document.querySelector('header').append(b); }
-    b.innerHTML = (cur ? '<span class="badge cur">CURRENT</span>' : '') + (best ? '<span class="badge best">MOST HEADROOM</span>' : '');
-    // ccswitch actions: only for seats with an email (Claude seats) and when ccswitch is installed
-    if (lastCap.saved && iframe.dataset.claude) {
-        const isSaved = lastCap.saved.includes(name);
-        if (cur && !isSaved) b.insertAdjacentHTML('afterbegin', '<span class="act save" data-a="save" title="Save your current login as ' + esc(name) + ' so switching back is instant (ccswitch save)">SAVE</span>');
-        const dead = (lastCap.relogin || []).includes(name);
-        if (dead) b.insertAdjacentHTML('beforeend', '<span class="act relog" data-a="login" title="The saved login expired (ccswitch: re-login). Click for how to refresh it">re-login</span>');
-        else if (isSaved) b.insertAdjacentHTML('beforeend', '<span class="act del" data-a="del" aria-label="Delete saved login" title="Delete the saved login for ' + esc(name) + ' (ccswitch delete)">' + TRASH + '</span>');
-        else if (!cur) b.insertAdjacentHTML('beforeend', '<span class="dim" title="Not saved in ccswitch yet - click the seat name for the one-time steps">not saved</span>');
-        for (const el of b.querySelectorAll('[data-a]')) el.onclick = () => vsc.postMessage({ [el.dataset.a === 'login' ? 'seat' : el.dataset.a]: name });
-    }
-}
-function addFrame(name, data) {
-    const iframe = document.createElement('iframe');
-    iframe.addEventListener('load', () => {
-        const w = iframe.contentWindow;
-        w.pywebview = { api: { close() {}, open_url() {}, end_drag() {},
-            set_pinned: (p) => Promise.resolve(p), begin_drag: () => Promise.resolve(false), drag: () => Promise.resolve(false),
-            report_height(h) { iframe.style.height = h + 'px'; } } };
-        w.init({ colors: COLORS, t: { ...T, title: name }, app_version: '', compact_hide: [], data });
-        const t = w.document.getElementById('title');
-        if (iframe.dataset.claude) {  // the seat name is the switch button; the email lives in its tooltip
-            t.classList.add('link');
-            t.title = (data.profile ? data.profile.email + ' - ' : '') + 'click to switch Claude Code to this seat';
-            t.onclick = () => vsc.postMessage({ seat: name });
-        }
-        frames[name] = w;
-        tag(name);
-        paint(name, data);
-    }, { once: true });
-    iframe.dataset.name = name;
-    if (data.usage.some((u) => u.key === 'five_hour') || data.profile) iframe.dataset.claude = '1';  // codex rows aren't seats
-    iframe.srcdoc = DOC;
-    document.getElementById('grid').append(iframe);
-}
-const ago = (t) => { const m = Math.round((Date.now() / 1000 - t) / 60); return m < 1 ? 'just now' : m < 60 ? m + 'm ago' : Math.floor(m / 60) + 'h ' + (m % 60) + 'm ago'; };
-let infoOpen = false, last = null;
-const EXPLAIN = 'When your seat hits <b>100%</b> (5h or weekly), switch to the seat with the <b>most headroom</b> '
-    + 'automatically. Saved seats only, fresh usage data only, never to a full seat, at most once per 10 min. '
-    + 'New Claude Code sessions use the new seat; restart open Claude Code tabs to move them over. Only your own login changes.';
-const render = () => last && onData(last);
-window.addEventListener('message', ({ data }) => { last = data; onData(data); });
-function onData({ accounts, cap }) {
-    lastCap = cap;
-    const r = (v) => (v == null ? '–' : Math.round(v) + '%');
-    document.getElementById('cap').innerHTML = '<div class="head"><span class="k">WHERE&#39;S FREE</span>'
-        + (!cap.saved ? '<span class="install" id="installCc" title="Seat switching needs ccswitch (cc-usage-bar)">INSTALL CCSWITCH</span>' : '')
-        + (cap.saved ? '<span class="auto">Auto-switch'
-            + '<span class="sw' + (cap.auto ? ' on' : '') + '" id="auto" role="switch" tabindex="0" aria-checked="' + !!cap.auto + '" title="Auto-switch is ' + (cap.auto ? 'on' : 'off') + '"></span>'
-            + '<span class="info' + (infoOpen ? ' open' : '') + '" id="info" role="button" tabindex="0" aria-label="What does auto-switch do?" title="What does auto-switch do?">i</span></span>' : '')
-        + '</div>'
-        + (cap.saved && infoOpen ? '<div class="explain">' + EXPLAIN + '</div>' : '')
-        + '<b>' + cap.free + '/' + cap.total + '</b> seats free'
-        + (cap.best ? ' · most headroom <b class="best">' + esc(cap.best.label) + '</b> 5H ' + r(cap.best.five) + ' · WK ' + r(cap.best.week) : '')
-        + (cap.updated ? ' · <span class="' + (cap.stale ? 'stale' : 'k2') + '">updated ' + ago(cap.updated) + '</span>' : '');
-    const auto = document.getElementById('auto'), info = document.getElementById('info');
-    const key = (fn) => (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); fn(); } };
-    if (auto) { const flip = () => vsc.postMessage({ toggleAuto: 1 }); auto.onclick = flip; auto.onkeydown = key(flip); }
-    const inst = document.getElementById('installCc');
-    if (inst) inst.onclick = () => vsc.postMessage({ installCc: 1 });
-    if (info) { const show = () => { infoOpen = !infoOpen; render(); }; info.onclick = show; info.onkeydown = key(show); }
-    for (const { name, data } of accounts) {
-        if (frames[name]) { frames[name].updateData(data); tag(name); paint(name, data); }
-        else if (!(name in frames)) { frames[name] = null; addFrame(name, data); }
-    }
-}
-const vsc = acquireVsCodeApi();
-vsc.postMessage('ready');
-</script></body></html>`;
+${read('panel.js')}</script></body></html>`;
 }
 
 module.exports = { activate };

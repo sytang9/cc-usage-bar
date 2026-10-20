@@ -164,6 +164,7 @@ ccswitch <label>             switch to a saved account
 ccswitch <label> --relaunch  switch, then exec the `claude` CLI (override
                               the command with CCSWITCH_CLAUDE_CMD)
 ccswitch delete <label>      remove a saved account (prompts to confirm)
+ccswitch usage --json        usage of every saved account as one JSON document
 ccswitch refresh-pause       stop refreshing tokens (usage stays readable)
 ccswitch refresh-resume      re-enable token refresh
 ccswitch version             print the version (also --version, -V)
@@ -177,7 +178,7 @@ for `ccswitch <label> --relaunch`.
 ## Usage — the monitor
 
 ```
-ccswitch usage [--no-switch] [--refresh] [--relaunch]
+ccswitch usage [--no-switch] [--refresh] [--relaunch] [--json]
 ```
 
 Shows 5-hour and weekly usage for every saved account in one table, with each
@@ -199,9 +200,12 @@ window's reset countdown, so you can decide where to switch before you do it:
   by a real Claude Code session), the monitor refreshes it automatically and
   retries. The token-refresh endpoint rate-limits bursts, so if too many
   accounts refresh at once a row may briefly show `rate-limited` — that is
-  transient (the tool backs off and recovers), not a dead account. Only a
-  genuine refresh failure shows `re-login`; then run `ccswitch <label>` (or log
-  in again) to re-enroll that account.
+  transient (the tool backs off and recovers), not a dead account. A failed
+  refresh shows `re-login`; then run `ccswitch <label>` (or log in again) to
+  re-enroll that account. **An offline run can also mark expired accounts
+  `re-login`**: with no network, a server error (5xx) or a Cloudflare block the
+  refresh fails the same way. Run `ccswitch usage` again when you are online
+  before you log in again.
 - After the table it prompts for a label to switch to (Enter cancels).
 
 Flags:
@@ -238,6 +242,37 @@ after the Claude accounts:
 - The row needs at least one saved Claude account: with none, `ccswitch usage`
   stops at "no saved accounts" before the Codex row.
 
+### Machine-readable usage
+
+`ccswitch usage --json [--refresh]` prints one JSON document on stdout and
+nothing else (warnings stay on stderr). It implies `--no-switch`: it never
+prompts and never switches. The Codex row is not emitted and its request is
+skipped.
+
+```json
+{ "schema": 1, "generated_at": 1792500000,
+  "login_health": "known", "login_health_reason": null,
+  "accounts": [
+    { "label": "work", "active": true, "login": "ok", "state": "ok",
+      "five_hour_pct": 23, "seven_day_pct": 64,
+      "five_hour_reset_epoch": 1792515000, "seven_day_reset_epoch": 1792800000,
+      "fetched_at": 1792499900 } ] }
+```
+
+- `login_health`: `known` or `unknown`. `unknown` means this run could not
+  judge dead logins; `login_health_reason` says why: `node-missing`,
+  `node-too-old`, `refresh-paused` or `refresh-lock-busy` (else `null`).
+- `accounts`: saved Claude accounts only, in label order. `active` is the `*`
+  marker.
+- `state`: the table's row state: `ok`, `dash`, `wait` or `relogin`.
+- `login`: `ok` when `state` is `ok`; `re-login` when `state` is `relogin` and
+  `login_health` is `known`; otherwise `unknown`. `re-login` means the refresh
+  attempt failed, not proof of a dead login: an offline run (no network, 5xx)
+  also gives `re-login` with `login_health` `known`.
+- The five number fields come from the account's usage cache after the run, so
+  a `re-login` row keeps its last numbers and their `fetched_at`. A missing
+  value is `null` (for example 5h at 0% use has no reset time).
+
 ### Pausing token refresh
 
 The token-refresh endpoint rate-limits per machine. If a burst of expired
@@ -263,38 +298,85 @@ on the remote host, next to `ccswitch`):
 ```
 
 then **Developer: Reload Window**. It adds a sidebar icon and a status-bar item
-(`current work · 1/3 free · most headroom personal (10%/5%)`).
+(`● work 100%/40% · ⇄ personal`: the active account, its 5h/weekly usage and the
+next-best account, or `⇄ none`; `◷` after the numbers means its data is missing or over 30
+minutes old; `$(sync)` in front means auto-switch is on). The tooltip lists every
+account with its data age and re-login state.
 
-<img src="vscode/screenshot.png" width="320" alt="VS Code sidebar: one card per ccswitch account with 5h and weekly usage bars, CURRENT and MOST HEADROOM badges, a re-login flag and the auto-switch toggle">
+<p>
+<img src="vscode/screenshot-dark.png" width="320" alt="VS Code sidebar in Dark Modern, captured in VS Code: Active account 002 with an orange Session (5hr) bar at 90% and a blue Weekly (7 day) bar at 75% with their reset times; If you run out offering 004 with a Switch button; the Accounts list (4 saved) with the full account 001 open; and Automation on. Emails are blurred">
+<img src="vscode/screenshot-light.png" width="320" alt="The same sidebar in Light Modern, captured in VS Code. Emails are blurred">
+</p>
 
-- **Usage** — one card per saved account, read from `ccswitch`'s own usage
-  cache (`~/.claude/accounts/<label>/.usage-cache`); the sidebar runs
-  `ccswitch usage --no-switch` every 10 minutes (the cache TTL) to refresh it,
-  which also keeps idle accounts' tokens alive. Bars use the monitor's colours
-  (green to 59%, amber to 85%, red above). The account you are on is marked
-  **CURRENT**, the one with the lowest `max(5h, weekly)` **MOST HEADROOM**.
-- **Switch** — click an account's name. It runs `ccswitch <label>`; open Claude
-  Code sessions use the new account; restart open Claude Code tabs to move
-  them over (see Caveats).
-- **Save / delete** — **SAVE** appears on the current account's card when it is
-  not saved yet (`ccswitch save` only ever snapshots the active login); the
-  trash icon runs `ccswitch delete`. Both confirm first.
-- **re-login** — when `ccswitch usage` reports an account as `re-login`, its
-  card says so and clicking it opens a terminal with `claude` for a one-time
-  `/login`, then you SAVE. It runs `ccswitch usage` first so the account you
-  are leaving keeps its newest tokens.
-- **Auto-switch** (off by default, toggle in the sidebar, ⓘ explains it) — when
-  the current account reaches 100% (5h or weekly), switch to the one with the
-  most headroom. Only saved, non-full accounts; never on data older than 15
-  minutes; at most once every 10 minutes.
-- **Team view** — set `claudeUsage.usageFile` to a shared snapshot (the CtrlA
-  hub's `usage.json` format) to show shared seats instead of your own cache.
+Both screenshots are real VS Code captures with live accounts (emails blurred).
+
+The sidebar follows your VS Code theme (Dark, Light and High Contrast) and the
+look of Claude Code's own Account & Usage view. Every section folds. Top to
+bottom:
+
+- **Active account** — **Account**: the nickname and email of the account you
+  are on. **Usage**: **Session (5hr)** (orange bar) and **Weekly (7 day)** (the
+  theme's progress blue), each with its percent and when it resets. **Last
+  data** shows only when its data is over 30 minutes old. **View details**
+  opens claude.ai/settings/usage in your browser.
+- **If you run out** — the best account to switch to: the lowest
+  `max(5h, weekly)` among saved accounts with a working login, data under 15
+  minutes old and both windows below 100%. **Switch** runs `ccswitch <label>`;
+  new Claude Code sessions use it; restart open Claude Code tabs to move them
+  over (see Caveats). With no such account it says **No account to switch to**.
+- **Accounts** — the header says how many are saved (`4 saved`). Each row has
+  one status icon, the name and one summary: `82% · 74%` (session · weekly),
+  `Weekly full · resets Thu`, `Re-login needed` or `No recent data`. Click a
+  row for its email, usage and reset times (or its data age) and its actions:
+  **Switch**, **How to re-login**, **Delete** (`ccswitch delete`), and **Save
+  login** on the active account when it is not saved yet (`ccswitch save` only
+  ever snapshots the active login). Actions confirm first.
+- **Automation** — collapsed by default; the header says **On** or **Off**.
+  **Auto-switch at 100%** (off by default): when
+  the active account reaches 100% (5h or weekly), switch to the account in **If
+  you run out**, without asking. Turning it on opens one confirmation dialog
+  that says so, and VS Code records your answer on this machine. Auto-switch
+  never acts without that answer: if the setting is on from Settings,
+  settings.json or an older version, the sidebar shows the same dialog once, and
+  **No** turns the setting off. Turning it off needs no dialog. It applies to every new Claude Code session
+  on this machine (the setting is machine-scoped, so Settings Sync never carries
+  it to another machine). Open Claude Code tabs keep the old account until
+  restarted. It acts only after a login check since VS Code started that could
+  judge dead logins (`login_health` `known`), and never when the active
+  account's own data is over 15 minutes old. Right before it runs `ccswitch`, it
+  reads the live account again and stops unless that account is still the full
+  one. At most once every 10 minutes on this machine, across all VS Code windows:
+  the last switch time is in `~/.claude/accounts/.autoswitch.json`, and a lock
+  (`.autoswitch.lock`) lets one window at a time decide and switch.
+
+| Icon (codicon) | Meaning |
+|------|---------|
+| `circle-filled` (orange) | active account |
+| `arrow-swap` | you can switch here |
+| `circle-slash` | a limit is at 100% |
+| `warning` | needs re-login |
+
+Each icon has a tooltip. The icons are [Codicons](https://github.com/microsoft/vscode-codicons)
+by Microsoft (font CC BY 4.0, CSS MIT), vendored with their licences in
+`vscode/webview/codicons/` from `@vscode/codicons` 0.0.46-24.
+
+Usage comes from `ccswitch`'s own cache
+(`~/.claude/accounts/<label>/.usage-cache`). Every 10 minutes (the cache TTL)
+the sidebar runs `ccswitch usage --json`, which refreshes it, keeps idle
+accounts' tokens alive and reports each login as `ok` or `re-login`. **How to
+re-login** opens a terminal with `claude` for a one-time `/login`, then you save
+the login. A failed check (timeout, an error) keeps the last known re-login
+marks. An older ccswitch without `--json` marks nothing as re-login.
+
+**Team view** — set `claudeUsage.usageFile` to a shared snapshot (the CtrlA
+hub's `usage.json` format) to show shared seats instead of your own cache. The
+setting is machine-scoped, so a workspace's `.vscode/settings.json` cannot set
+it. A row whose label breaks ccswitch's label rule (letters, digits, `_` and
+`-`, no leading `-`) is dropped.
 
 If `ccswitch` is missing, the sidebar offers to install it (it runs this repo's
 `install.sh` in a visible terminal). `./uninstall.sh` removes the sidebar too.
-The popup design is Jens Duttke's
-[usage-monitor-for-claude](https://github.com/jens-duttke/usage-monitor-for-claude)
-(MIT, `vscode/ui/LICENSE`), used unchanged; the sidebar only restyles it.
+Layout first based on Jens Duttke's usage-monitor-for-claude (MIT).
 
 To change it: edit `vscode/`, bump `version` in `vscode/package.json`, run
 `vscode/build.sh` (rebuilds `vscode/claude-usage.vsix`), then
