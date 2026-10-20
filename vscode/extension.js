@@ -29,7 +29,9 @@ function activeLabel() {
 // Usage snapshot in one shape, from either source: { accounts: [{ label, state, fetched_at, five_pct, week_pct, ... }] }.
 // Every account carries its OWN fetched_at; there is no global age. ccswitch's cache: one file per saved account.
 // Team file: it has no per-account age, so an account's age is the file's generated_at (else its mtime).
-const FRESH_SECS = 1800;  // data younger than 30 min is fresh (ccswitch's cache TTL is 10 min)
+const FRESH_SECS = 1800;  // display: data younger than 30 min is shown as current (ccswitch's cache TTL is 10 min)
+const SWITCH_FRESH_SECS = 900;  // switching (a target, or the active account's 'full'): data younger than 15 min
+const CLOCK_SLACK_SECS = 60;  // a fetched_at further in the future than this is not fresh (clock skew, a bad file)
 function readSnapshot() {
     if (usageFile()) {
         const f = usageFile(), doc = JSON.parse(fs.readFileSync(f, 'utf8'));
@@ -46,13 +48,14 @@ function readSnapshot() {
     }) };
 }
 
-const isFresh = (a, now) => a.state === 'ok' && a.fetched_at != null && now - a.fetched_at < FRESH_SECS;
+const isFresh = (a, now, secs = FRESH_SECS) => a.state === 'ok' && a.fetched_at != null
+    && now - a.fetched_at < secs && a.fetched_at - now <= CLOCK_SLACK_SECS;
 const loadOf = (a) => Math.max(...[a.five_pct, a.week_pct].filter((v) => v != null));  // a missing window is not full
 
 // A switch target: saved, login not dead, its own data fresh, neither window full, not the active account, Claude only.
 function qualifies(a, ctx) {
     if ((a.provider || 'claude') !== 'claude' || (a.five_pct == null && a.week_pct == null)) return false;
-    return a.label !== ctx.you && ctx.isSaved(a.label) && !ctx.relogin.has(a.label) && isFresh(a, ctx.now) && loadOf(a) < 100;
+    return a.label !== ctx.you && ctx.isSaved(a.label) && !ctx.relogin.has(a.label) && isFresh(a, ctx.now, SWITCH_FRESH_SECS) && loadOf(a) < 100;
 }
 
 // HTML-escape a label before it goes into innerHTML or a quoted attribute. Labels come from folder names, or from
@@ -86,13 +89,14 @@ function capacity(u, ctx) {
     return { you: ctx.you,
         best: best ? { label: best.label, five: best.five_pct, week: best.week_pct } : null,
         loads: Object.fromEntries(seats.map((a) => [a.label, loadOf(a)])), fresh,
-        activeFresh: !!ctx.you && fresh[ctx.you] === true };
+        activeFresh: !!ctx.you && fresh[ctx.you] === true,
+        activeSwitchFresh: !!ctx.you && seats.some((a) => a.label === ctx.you && isFresh(a, ctx.now, SWITCH_FRESH_SECS)) };
 }
 
 // Auto-switch target: the best qualifying account, but only when the active account is full (100% on 5h or weekly)
-// and its own data is fresh. Returns a label (ccswitch's rule) or null.
+// and its own data is under 15 min old. Returns a label (ccswitch's rule) or null.
 function autoTarget(cap) {
-    if (!cap.you || !cap.activeFresh || !(cap.loads[cap.you] >= 100) || !cap.best) return null;
+    if (!cap.you || !cap.activeSwitchFresh || !(cap.loads[cap.you] >= 100) || !cap.best) return null;
     return isLabel(cap.best.label) ? cap.best.label : null;
 }
 
@@ -118,10 +122,12 @@ function statusTooltip(cap, accounts, auto, now = Date.now() / 1000) {
     return [`Auto-switch: ${auto ? 'ON' : 'off'}`, ...lines].join('\n');
 }
 
-// Data age as shown on a row: null while fresh by time, 'no data' when there never was any, else '45m old' / '5h old' / '13d old'.
+// Data age as shown on a row: null while fresh by time, 'no data' when there never was any, 'in the future' past the
+// clock slack, else '45m old' / '5h old' / '13d old'.
 function ageText(fetchedAt, now) {
     if (fetchedAt == null) return 'no data';
     const secs = now - fetchedAt;
+    if (secs < -CLOCK_SLACK_SECS) return 'in the future';
     if (secs < FRESH_SECS) return null;
     return secs >= 86400 ? Math.floor(secs / 86400) + 'd old' : secs >= 3600 ? Math.floor(secs / 3600) + 'h old' : Math.floor(secs / 60) + 'm old';
 }

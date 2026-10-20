@@ -218,10 +218,30 @@ const calls = () => (fs.existsSync(LOG) ? fs.readFileSync(LOG, 'utf8').trim().sp
 
     await check('autoTarget: never when the active account\'s data is stale or below 100%', () => {
         const cap = capNow();
-        assert.strictEqual(e.autoTarget({ ...cap, activeFresh: false }), null);
+        assert.strictEqual(e.autoTarget({ ...cap, activeFresh: false, activeSwitchFresh: false }), null);
         assert.strictEqual(e.autoTarget({ ...cap, loads: { ...cap.loads, work: 99 } }), null);
         assert.strictEqual(e.autoTarget({ ...cap, best: null }), null);
         assert.strictEqual(e.autoTarget({ ...cap, you: null }), null);
+    });
+
+    await check('switching needs data under 15 min; display keeps 30 min', () => {
+        const a = [acct('work', 100, 40, now - 1000), acct('p16', 10, 5, now - 1000), acct('p13', 20, 5, now - 800)];
+        const cap = capOf(a, 'work');
+        assert.strictEqual(cap.best.label, 'p13', 'a 16-min-old account is not a switch target');
+        assert.strictEqual(e.autoTarget(cap), null, 'a 16-min-old full reading does not auto-switch');
+        assert.strictEqual(cap.activeFresh, true, 'the status bar still shows it as current');
+        const d = e.panelData(a, cap, opts);
+        assert.strictEqual(d.rows[1].icon, '');
+        assert.strictEqual(d.rows[1].summary, '10% · 5%', 'display: not stale yet');
+        assert.strictEqual(e.autoTarget(capOf([acct('work', 100, 40, now - 800), a[2]], 'work')), 'p13');
+    });
+
+    await check('a fetched_at in the future is not fresh (beyond 60 s of clock slack)', () => {
+        const ahead = acct('x', 1, 1, now + 3600);
+        assert.strictEqual(e.isFresh(ahead, now), false);
+        assert.strictEqual(e.qualifies(ahead, ctxFor(new Set(), 'work')), false);
+        assert.strictEqual(e.ageText(ahead.fetched_at, now), 'in the future');
+        assert.strictEqual(e.isFresh(acct('x', 1, 1, now + 30), now), true, 'a few seconds of skew is fine');
     });
 
     await check('qualifies: a missing 5h window does not count as full', () => {
