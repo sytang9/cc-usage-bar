@@ -57,7 +57,7 @@ const orig = Module._load;
 Module._load = function (r, ...a) { return r === 'vscode' ? vscode : orig.call(this, r, ...a); };
 const file = path.join(__dirname, '..', 'vscode', 'extension.js');
 const m = new Module(file); m.filename = file; m.paths = Module._nodeModulePaths(path.dirname(file));
-m._compile(fs.readFileSync(file, 'utf8') + '\n;Object.assign(module.exports, { readSnapshot, isFresh, qualifies, capacity, parseUsageJson, mergeLogins, readAccounts, activeLabel, autoTarget, checkLogins, relogin, switchSeat, saveSeat, esc, webviewHtml, popupDoc, panelData, ageText });', file);
+m._compile(fs.readFileSync(file, 'utf8') + '\n;Object.assign(module.exports, { readSnapshot, isFresh, qualifies, capacity, parseUsageJson, mergeLogins, readAccounts, activeLabel, autoTarget, checkLogins, relogin, switchSeat, saveSeat, esc, webviewHtml, panelData, ageText });', file);
 const e = m.exports;
 const calls = () => (fs.existsSync(LOG) ? fs.readFileSync(LOG, 'utf8').trim().split('\n') : []);
 
@@ -296,14 +296,94 @@ const calls = () => (fs.existsSync(LOG) ? fs.readFileSync(LOG, 'utf8').trim().sp
         assert.strictEqual(e.esc(42), '42');
     });
 
-    await check('the webview locks itself down with a CSP and escapes every label it writes as HTML', () => {
-        const html = e.webviewHtml(e.popupDoc());
-        assert.match(html, /<meta http-equiv="Content-Security-Policy" content="default-src 'none'; [^"]*">/);
+    await check('the webview locks itself down with a CSP and carries esc; no iframe', () => {
+        const html = e.webviewHtml();
+        assert.match(html, /<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src data:">/);
         assert.ok(html.includes('function esc('), 'the page carries the same esc as the extension');
-        // every label/name that reaches innerHTML or an attribute string goes through esc()
-        assert.ok(html.includes("esc(cap.best.label)") && html.includes("Save your current login as ' + esc(name)")
-            && html.includes("Delete the saved login for ' + esc(name)"));
-        assert.ok(!/\+ cap\.best\.label \+|as ' \+ name \+|for ' \+ name \+/.test(html), 'no raw label in HTML strings');
+        assert.ok(html.includes('function render('), 'the page carries the panel script');
+        assert.ok(!html.includes('<iframe'));
+        assert.strictEqual(html.split('</script>').length, 2, 'one inline script, nothing in it closes it early');
+    });
+
+    // --- the native panel (vscode/webview/panel.*) ---------------------------------------------------
+    const WV = path.join(__dirname, '..', 'vscode', 'webview');
+    const readWv = (f) => fs.readFileSync(path.join(WV, f), 'utf8');
+    const panel = () => { const ctx = { esc: e.esc }; require('vm').runInNewContext(readWv('panel.js'), ctx); return ctx; };
+    const ui = (over = {}) => ({ accountsOpen: true, openRow: null, ...over });
+
+    await check('B4 no hard-coded colour in the panel', () => {
+        const src = readWv('panel.css') + readWv('panel.js') + e.webviewHtml();
+        assert.ok(!/#[0-9a-fA-F]{3,8}\b/.test(src), 'hex colour: ' + (src.match(/#[0-9a-fA-F]{3,8}\b/) || [])[0]);
+        assert.ok(!/\b(rgba?|hsla?)\(/.test(src), 'rgb()/hsl()');
+        assert.ok(!/:\s*(white|black)\b/.test(src), 'named colour');
+        const vars = src.match(/var\(--[\w-]*/g) || [];
+        assert.ok(vars.length > 0 && vars.every((v) => v.startsWith('var(--vscode-')), 'only --vscode-* variables');
+    });
+
+    await check('B4 the panel uses theme variables', () => {
+        const css = readWv('panel.css');
+        for (const v of ['--vscode-charts-red', '--vscode-editorWarning-foreground', '--vscode-contrastBorder']) assert.ok(css.includes(v), v);
+    });
+
+    await check('render: no account to switch to', () => {
+        const a = [acct('001', 5, 5, now - 7200), acct('002', 23, 64, now - 60)];
+        const html = panel().render(e.panelData(a, capOf(a, '002'), opts), ui());
+        assert.ok(html.includes('No account to switch to'));
+        assert.ok(!html.includes('data-a="switch"'));
+        assert.ok(!html.includes('If you run out</div><b>'), 'no account named in that line');
+    });
+
+    await check('render: next-best line has a Switch button; no ccswitch -> Install', () => {
+        const html = panel().render(pdFour(), ui());
+        assert.match(html, /⇄[\s\S]*004[\s\S]*5h 46% · wk 13%[\s\S]*data-a="switch" data-l="004"/);
+        const a = four();
+        const bare = panel().render(e.panelData(a, capOf(a, '002', ['003']), { ...opts, installed: false }), ui());
+        assert.ok(bare.includes('data-a="install"') && bare.includes('Install ccswitch'));
+        assert.ok(!bare.includes('data-a="switch"'));
+    });
+
+    await check('render: counts header', () => {
+        const p = panel();
+        assert.ok(p.render(pdFour(), ui()).includes('4 · 1 ⚠ · 1 ⛔'));
+        const closed = p.render(pdFour(), ui({ accountsOpen: false }));
+        assert.ok(closed.includes('4 · 1 ⚠ · 1 ⛔') && !closed.includes('data-a="row"'), 'collapsed: counts, no rows');
+    });
+
+    await check('render: a missing window shows –, not 0% or NaN', () => {
+        const a = [acct('002', 23, 64, now - 60), acct('half', null, 30, now - 60, { five_reset_epoch: null })];
+        const html = panel().render(e.panelData(a, capOf(a, 'half'), opts), ui());
+        assert.ok(html.includes('>–<') && !html.includes('NaN') && !html.includes('null'));
+    });
+
+    await check('render: escapes every label', () => {
+        const bad = '<img src=x onerror="a()">';
+        const a = [acct(bad, 5, 5, now - 60, { email: '"><b>x@y' }), acct('002', 23, 64, now - 60)];
+        const d = e.panelData(a, capOf(a, bad), opts);
+        d.next = { label: bad, five: 1, week: 1 };
+        for (const html of [panel().render(d, ui()), panel().render(d, ui({ openRow: bad }))]) {
+            assert.ok(html.includes('&lt;img'));
+            assert.ok(!html.includes('<img src=x'));
+            assert.ok(!html.includes('onerror="'), 'no raw quote inside an attribute');
+            assert.ok(!html.includes('"><b>'));
+        }
+    });
+
+    await check('render: the email appears only in the open row\'s details', () => {
+        const p = panel();
+        assert.ok(!p.render(pdFour(), ui()).includes('@'));
+        const open = p.render(pdFour(), ui({ openRow: '001' }));
+        assert.strictEqual(open.split('001@x.example').length - 1, 1);
+        assert.ok(open.includes('data-a="delete" data-l="001"'));
+    });
+
+    await check('render: auto-switch toggle row says its state', () => {
+        const p = panel();
+        assert.match(p.render(pdFour(), ui()), /role="switch"[^>]*aria-checked="false"/);
+        assert.match(p.render({ ...pdFour(), auto: true }, ui()), /role="switch"[^>]*aria-checked="true"/);
+    });
+
+    await check('the vendored popup is gone', () => {
+        assert.ok(!fs.existsSync(path.join(__dirname, '..', 'vscode', 'ui')));
     });
 
     await check('switch texts agree with ccswitch: open Claude Code tabs need a restart', () => {
