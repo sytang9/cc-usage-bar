@@ -1583,7 +1583,7 @@ usage_json_document() {
     [[ "$marker" == "*"* ]] && active=true
     objs+="$(jq -cn --arg label "$label" --argjson active "$active" --arg login "$login" \
       --arg state "$state" --argjson cache "$(read_usage_cache "$label")" \
-      '{label: $label, active: $active, login: $login, state: $state,
+      '($cache | objects) // {} | . as $cache | {label: $label, active: $active, login: $login, state: $state,
         five_hour_pct: ($cache.five_hour_pct // null),
         seven_day_pct: ($cache.seven_day_pct // null),
         five_hour_reset_epoch: ($cache.five_hour_reset_epoch // null),

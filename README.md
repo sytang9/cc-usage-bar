@@ -294,7 +294,7 @@ on the remote host, next to `ccswitch`):
 
 then **Developer: Reload Window**. It adds a sidebar icon and a status-bar item
 (`● work 100%/40% · ⇄ personal`: the active account, its 5h/weekly usage and the
-next-best account, or `⇄ none`; `◷` after the numbers means its data is over 30
+next-best account, or `⇄ none`; `◷` after the numbers means its data is missing or over 30
 minutes old; `$(sync)` in front means auto-switch is on). The tooltip lists every
 account with its data age and re-login state.
 

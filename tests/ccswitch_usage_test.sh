@@ -906,6 +906,27 @@ case28_json_relogin_keeps_last_numbers() {
   rm -rf "$home" "$ctl"
 }
 
+case28b_json_non_object_cache_keeps_account() {
+  local home ctl
+  home="$(new_home)"
+  ctl="$(new_ctl)"
+  write_claude_json "$home"
+  write_account_credentials "$home" "acct_dead" "REFRESH_DEAD" "TOK_DEAD" 1
+  printf '5' >"$home/.claude/accounts/acct_dead/.usage-cache"
+  set_token_response "$ctl" "REFRESH_DEAD" 400 '{"error":"invalid_grant"}'
+
+  run_cc_json "$home" "$ctl"
+
+  if [[ "$EXIT_CODE" -eq 0 ]] \
+    && jq -e '(.accounts | length) == 1 and .accounts[0].label == "acct_dead"
+      and .accounts[0].five_hour_pct == null and .accounts[0].fetched_at == null' <<<"$OUT" >/dev/null 2>&1; then
+    pass "case28b a non-object .usage-cache keeps the account with null numbers"
+  else
+    fail "case28b (exit=$EXIT_CODE): $OUT / $ERR"
+  fi
+  rm -rf "$home" "$ctl"
+}
+
 case29_json_no_accounts() {
   local home ctl
   home="$(new_home)"
@@ -1596,6 +1617,7 @@ main() {
   case26_lock_contention_is_transient_not_fatal
   case27_json_two_accounts
   case28_json_relogin_keeps_last_numbers
+  case28b_json_non_object_cache_keeps_account
   case29_json_no_accounts
   case30_json_refresh_paused
   case31_json_old_node

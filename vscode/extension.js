@@ -177,6 +177,9 @@ async function setAutoSwitch(on) {
     await vscode.workspace.getConfiguration('claudeUsage').update('autoSwitch', on, vscode.ConfigurationTarget.Global);
     return true;
 }
+// Fire-and-forget callers (toggle, toast): a failed settings write must be shown, not dropped.
+const changeAutoSwitch = (on) => setAutoSwitch(on).catch((err) =>
+    vscode.window.showErrorMessage('Could not change auto-switch: ' + (err && err.message || err)));
 
 // input = what to type at ccswitch's own [y/N] prompts; we always ask in VS Code first.
 const run = (cmd, args, input = '') => new Promise((res) => {
@@ -330,9 +333,9 @@ function activate(context) {
         if (!r.ok) { vscode.window.showErrorMessage(`Auto-switch to ${to} failed: ` + r.msg); return; }
         poll();
         const next = await vscode.window.showWarningMessage(`Auto-switched Claude Code: ${from} is full, now on ${to} (most headroom). Restart open Claude Code tabs to use it.`, 'Turn auto-switch off');
-        if (next === 'Turn auto-switch off') setAutoSwitch(false);
+        if (next === 'Turn auto-switch off') changeAutoSwitch(false);
     };
-    const toggleAuto = () => setAutoSwitch(!autoOn());
+    const toggleAuto = () => changeAutoSwitch(!autoOn());
 
     const poll = () => {
         try { ({ accounts, cap } = readAccounts()); cap.auto = autoOn(); } catch (err) { status.text = '$(warning) Claude usage unreadable'; status.tooltip = String(err); return; }

@@ -61,7 +61,7 @@ button { font: inherit; cursor: pointer; }
 
 .row { display: grid; grid-template-columns: 14px minmax(38px, auto) 1fr 12px; align-items: center; gap: 6px; padding: 5px 10px; cursor: pointer; }
 .row:hover { background: var(--vscode-list-hoverBackground); }
-.row.open { background: var(--vscode-list-inactiveSelectionBackground); }
+.row.open { background: var(--vscode-list-inactiveSelectionBackground); outline: 1px solid var(--vscode-contrastActiveBorder, transparent); outline-offset: -1px; }
 .row .nm { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 110px; }
 .row.muted .nm, .row.muted .mini { opacity: .55; }
 .mini { display: flex; flex-direction: column; gap: 3px; }

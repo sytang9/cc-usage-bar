@@ -60,7 +60,7 @@ const orig = Module._load;
 Module._load = function (r, ...a) { return r === 'vscode' ? vscode : orig.call(this, r, ...a); };
 const file = path.join(__dirname, '..', 'vscode', 'extension.js');
 const m = new Module(file); m.filename = file; m.paths = Module._nodeModulePaths(path.dirname(file));
-m._compile(fs.readFileSync(file, 'utf8') + '\n;Object.assign(module.exports, { readSnapshot, isFresh, qualifies, capacity, parseUsageJson, mergeLogins, readAccounts, activeLabel, autoTarget, checkLogins, relogin, switchSeat, saveSeat, esc, webviewHtml, panelData, ageText, setAutoSwitch, AUTO_DETAIL, statusText, statusTooltip });', file);
+m._compile(fs.readFileSync(file, 'utf8') + '\n;Object.assign(module.exports, { readSnapshot, isFresh, qualifies, capacity, parseUsageJson, mergeLogins, readAccounts, activeLabel, autoTarget, checkLogins, relogin, switchSeat, saveSeat, esc, webviewHtml, panelData, ageText, setAutoSwitch, changeAutoSwitch, AUTO_DETAIL, statusText, statusTooltip });', file);
 const e = m.exports;
 const calls = () => (fs.existsSync(LOG) ? fs.readFileSync(LOG, 'utf8').trim().split('\n') : []);
 
@@ -519,6 +519,14 @@ const calls = () => (fs.existsSync(LOG) ? fs.readFileSync(LOG, 'utf8').trim().sp
         const src = fs.readFileSync(file, 'utf8');
         assert.ok(!/carry on as the new seat/.test(src), 'no hot-swap claim');
         assert.match(src, /restart open Claude Code tabs/i);
+    });
+
+    await check('a failed settings write shows an error message instead of vanishing', async () => {
+        const realUpdate = vscode.workspace.getConfiguration;
+        vscode.workspace.getConfiguration = () => ({ get: (k) => cfg[k], update: async () => { throw new Error('settings.json is read-only'); } });
+        said.length = 0;
+        try { await e.changeAutoSwitch(false); } finally { vscode.workspace.getConfiguration = realUpdate; }
+        assert.deepStrictEqual(said, ['ERROR Could not change auto-switch: settings.json is read-only']);
     });
 
     console.log('----------------------------------------');
