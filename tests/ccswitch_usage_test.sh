@@ -201,6 +201,20 @@ run_cc() {
   cat "$ctl/calls/argv.log" >>"$ALL_ARGV_LOG" 2>/dev/null || true
 }
 
+# run_cc_json <home> <ctl> <args...> -> OUT = stdout only, ERR = stderr only.
+# The stdin "acct_other" proves --json never reads the switch prompt.
+run_cc_json() {
+  local home="$1" ctl="$2" errf
+  shift 2
+  errf="$(mktemp "${TMPDIR:-/tmp}/ccswitch-usage-test-err.XXXXXX")"
+  OUT="$(PATH="$STUB_BIN:$PATH" HOME="$home" CURL_STUB_DIR="$ctl" CCSWITCH_REFRESH_CMD="$STUB_BIN/refresh-helper" bash "$TARGET" usage --json "$@" <<<"acct_other" 2>"$errf")"
+  EXIT_CODE=$?
+  ERR="$(cat "$errf")"
+  rm -f "$errf"
+  printf '%s\n%s\n' "$OUT" "$ERR" >>"$ALL_OUTPUT_LOG"
+  cat "$ctl/calls/argv.log" >>"$ALL_ARGV_LOG" 2>/dev/null || true
+}
+
 write_live_credentials() {
   local home="$1" refresh="$2" access="$3" expires_ms="$4"
   mkdir -p "$home/.claude"
@@ -832,6 +846,82 @@ case26_lock_contention_is_transient_not_fatal() {
   rm -rf "$home" "$ctl"
 }
 
+# --- Cases 27-32: usage --json ------------------------------------------------
+case27_json_two_accounts() {
+  local home ctl live_rt
+  home="$(new_home)"
+  ctl="$(new_ctl)"
+  write_claude_json "$home" "UUID_ACTIVE"
+  write_live_credentials "$home" "REFRESH_ACTIVE" "TOK_ACTIVE_5H80" "$(future_ms)"
+  write_account_credentials "$home" "acct_active" "REFRESH_ACTIVE" "TOK_ACTIVE_5H80" "$(future_ms)"
+  write_account_oauth "$home" "acct_active" "UUID_ACTIVE"
+  write_account_credentials "$home" "acct_other" "REFRESH_OTHER" "TOK_OTHER_5H20" "$(future_ms)"
+  write_account_oauth "$home" "acct_other" "UUID_OTHER"
+  set_usage_response "$ctl" "TOK_ACTIVE_5H80" 200 "$(usage_body 80 50)"
+  set_usage_response "$ctl" "TOK_OTHER_5H20" 200 "$(usage_body 20 10)"
+
+  run_cc_json "$home" "$ctl"
+  live_rt="$(jq -r '.claudeAiOauth.refreshToken' "$home/.claude/.credentials.json")"
+
+  if [[ "$EXIT_CODE" -eq 0 ]] \
+    && jq -e . <<<"$OUT" >/dev/null 2>&1 \
+    && jq -e '.schema == 1 and .login_health == "known" and .login_health_reason == null
+      and ([.accounts[].label] == ["acct_active","acct_other"])
+      and ([.accounts[].active] == [true,false])
+      and all(.accounts[]; .login == "ok" and .state == "ok")
+      and .accounts[0].five_hour_pct == 80 and .accounts[1].seven_day_pct == 10
+      and ((.accounts[0].fetched_at - now | fabs) < 10)
+      and ((.accounts[0].five_hour_reset_epoch | type) == "number")' <<<"$OUT" >/dev/null \
+    && ! printf '%s' "$OUT" | grep -q $'\x1b\[' \
+    && ! printf '%s' "$OUT" | grep -q 'ACCOUNT' \
+    && [[ "$live_rt" == "REFRESH_ACTIVE" ]]; then
+    pass "case27 usage --json prints one JSON document, no table, no switch"
+  else
+    fail "case27 (exit=$EXIT_CODE live_rt=$live_rt): $OUT / $ERR"
+  fi
+  rm -rf "$home" "$ctl"
+}
+
+case28_json_relogin_keeps_last_numbers() {
+  local home ctl planted
+  home="$(new_home)"
+  ctl="$(new_ctl)"
+  planted=$(( $(date +%s) - 1123200 ))
+  write_claude_json "$home"
+  write_account_credentials "$home" "acct_dead" "REFRESH_DEAD" "TOK_DEAD" 1
+  jq -cn --argjson f "$planted" \
+    '{fetched_at: $f, five_hour_pct: 5, seven_day_pct: 7, five_hour_reset_epoch: null, seven_day_reset_epoch: null, rate_limited_until: null}' \
+    >"$home/.claude/accounts/acct_dead/.usage-cache"
+  set_token_response "$ctl" "REFRESH_DEAD" 400 '{"error":"invalid_grant"}'
+
+  run_cc_json "$home" "$ctl"
+
+  if [[ "$EXIT_CODE" -eq 0 ]] \
+    && jq -e --argjson p "$planted" '.accounts[0]
+      | .login == "re-login" and .state == "relogin" and .fetched_at == $p and .five_hour_pct == 5' <<<"$OUT" >/dev/null 2>&1; then
+    pass "case28 re-login row keeps its last numbers and fetched_at"
+  else
+    fail "case28 (exit=$EXIT_CODE): $OUT / $ERR"
+  fi
+  rm -rf "$home" "$ctl"
+}
+
+case29_json_no_accounts() {
+  local home ctl
+  home="$(new_home)"
+  ctl="$(new_ctl)"
+  write_claude_json "$home"
+  mkdir -p "$home/.claude/accounts"
+  run_cc_json "$home" "$ctl"
+  if [[ "$EXIT_CODE" -eq 0 ]] \
+    && jq -e '.schema == 1 and .accounts == [] and .login_health == "known"' <<<"$OUT" >/dev/null 2>&1; then
+    pass "case29 no saved accounts -> empty accounts document"
+  else
+    fail "case29 (exit=$EXIT_CODE): $OUT / $ERR"
+  fi
+  rm -rf "$home" "$ctl"
+}
+
 main() {
   if [[ ! -x "$TARGET" ]]; then
     echo "FAIL: target script not found or not executable: $TARGET"
@@ -1436,6 +1526,9 @@ main() {
   case24_blank_live_file_never_destroys_a_snapshot
   case25_unknown_outcome_token_is_retired_not_replayed
   case26_lock_contention_is_transient_not_fatal
+  case27_json_two_accounts
+  case28_json_relogin_keeps_last_numbers
+  case29_json_no_accounts
 
   # =========================================================================
   # Case 8 (security): none of the fake secret tokens ever appear in any

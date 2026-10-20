@@ -1541,12 +1541,56 @@ warn_if_refresh_unavailable() {
   fi
 }
 
+# usage_json_login <state> <login_health> -> echoes ok | re-login | unknown.
+# A "relogin" row only means the login is dead when login_health is "known";
+# when the refresh path itself could not run (old node, paused, lock busy) the
+# row says nothing about the account.
+usage_json_login() {
+  local state="$1" login_health="$2"
+  if [[ "$state" == "ok" ]]; then
+    echo ok
+  elif [[ "$state" == "relogin" && "$login_health" == "known" ]]; then
+    echo re-login
+  else
+    echo unknown
+  fi
+}
+
+# usage_json_document <rows> <login_health> <reason> -> prints the `usage --json`
+# document. <rows> is cmd_usage's "label|marker|state|p5|p7|r5|r7" lines;
+# <reason> empty means JSON null. The numbers come from each account's
+# .usage-cache AFTER the run, so a re-login row still carries its last numbers
+# and their fetched_at.
+usage_json_document() {
+  local rows="$1" login_health="$2" reason="$3"
+  local label marker state p5 p7 r5 r7 login active objs=""
+  while IFS='|' read -r label marker state p5 p7 r5 r7; do
+    [[ -z "$label" ]] && continue
+    login="$(usage_json_login "$state" "$login_health")"
+    active=false
+    [[ "$marker" == "*"* ]] && active=true
+    objs+="$(jq -cn --arg label "$label" --argjson active "$active" --arg login "$login" \
+      --arg state "$state" --argjson cache "$(read_usage_cache "$label")" \
+      '{label: $label, active: $active, login: $login, state: $state,
+        five_hour_pct: ($cache.five_hour_pct // null),
+        seven_day_pct: ($cache.seven_day_pct // null),
+        five_hour_reset_epoch: ($cache.five_hour_reset_epoch // null),
+        seven_day_reset_epoch: ($cache.seven_day_reset_epoch // null),
+        fetched_at: ($cache.fetched_at // null)}')"$'\n'
+  done <<<"$rows"
+  printf '%s' "$objs" | jq -s --arg health "$login_health" --arg reason "$reason" --argjson now "$(date +%s)" \
+    '{schema: 1, generated_at: $now, login_health: $health,
+      login_health_reason: (if $reason == "" then null else $reason end), accounts: .}'
+}
+
 cmd_usage() {
-  local no_switch=0 bypass_cache=0 relaunch=""
+  local no_switch=0 bypass_cache=0 relaunch="" json=0
+  local login_health=known reason=""
   local arg
   for arg in "$@"; do
     case "$arg" in
       --no-switch) no_switch=1 ;;
+      --json) json=1; no_switch=1 ;;
       --refresh) bypass_cache=1 ;;
       --relaunch) relaunch="--relaunch" ;;
       *)
@@ -1560,6 +1604,10 @@ cmd_usage() {
   local labels
   labels="$(saved_labels)"
   if [[ -z "$labels" ]]; then
+    if [[ "$json" == "1" ]]; then
+      usage_json_document "" "$login_health" "$reason"
+      return 0
+    fi
     echo "no saved accounts -- run: ccswitch save <label>"
     return 0
   fi
@@ -1651,6 +1699,12 @@ cmd_usage() {
 
   local headroom_label
   headroom_label="$(echo "$headroom_lookup" | find_headroom_label)"
+
+  # --json stops here: no Codex row (its GET is skipped), no table, no prompt.
+  if [[ "$json" == "1" ]]; then
+    usage_json_document "$rows" "$login_health" "$reason"
+    return 0
+  fi
 
   # The Codex row joins AFTER the headroom pick and the switch prompt only
   # accepts saved Claude labels, so it is never offered as a switch target.
