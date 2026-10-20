@@ -57,7 +57,7 @@ const orig = Module._load;
 Module._load = function (r, ...a) { return r === 'vscode' ? vscode : orig.call(this, r, ...a); };
 const file = path.join(__dirname, '..', 'vscode', 'extension.js');
 const m = new Module(file); m.filename = file; m.paths = Module._nodeModulePaths(path.dirname(file));
-m._compile(fs.readFileSync(file, 'utf8') + '\n;Object.assign(module.exports, { readSnapshot, isFresh, qualifies, capacity, parseUsageJson, mergeLogins, readAccounts, activeLabel, autoTarget, checkLogins, relogin, switchSeat, saveSeat, esc, webviewHtml, popupDoc });', file);
+m._compile(fs.readFileSync(file, 'utf8') + '\n;Object.assign(module.exports, { readSnapshot, isFresh, qualifies, capacity, parseUsageJson, mergeLogins, readAccounts, activeLabel, autoTarget, checkLogins, relogin, switchSeat, saveSeat, esc, webviewHtml, popupDoc, panelData, ageText });', file);
 const e = m.exports;
 const calls = () => (fs.existsSync(LOG) ? fs.readFileSync(LOG, 'utf8').trim().split('\n') : []);
 
@@ -70,14 +70,97 @@ const calls = () => (fs.existsSync(LOG) ? fs.readFileSync(LOG, 'utf8').trim().sp
 
     await check('readAccounts reads ccswitch usage caches and emails, no team file needed', () => {
         const { accounts, cap } = e.readAccounts();
-        assert.deepStrictEqual(accounts.map((a) => a.name), ['dead', 'half', 'personal', 'spare', 'work']);
-        assert.strictEqual(accounts.find((a) => a.name === 'work').data.profile.email, 'me@work.example');
-        assert.strictEqual(accounts.find((a) => a.name === 'work').data.usage[0].pct_text, '100%');
-        assert.strictEqual(accounts.find((a) => a.name === 'spare').data.usage.length, 0);
+        const by = (l) => accounts.find((a) => a.label === l);
+        assert.deepStrictEqual(accounts.map((a) => a.label), ['dead', 'half', 'personal', 'spare', 'work']);
+        assert.strictEqual(by('work').email, 'me@work.example');
+        assert.strictEqual(by('work').five_pct, 100);
+        assert.strictEqual(by('spare').five_pct, null);
         assert.strictEqual(cap.best.label, 'personal');
         assert.strictEqual(cap.free, 3);
         assert.strictEqual(cap.activeFresh, true);
-        assert.match(accounts.find((a) => a.name === 'dead').data.status.text, /^data 13d old$/);
+        assert.strictEqual(e.ageText(by('dead').fetched_at, now), '13d old');
+        const pd = e.panelData(accounts, cap, { now, installed: true, auto: false });
+        assert.strictEqual(pd.active.label, 'work');
+        assert.strictEqual(pd.next.label, 'personal');
+    });
+
+    // --- panelData: hand-built accounts (001 full, 002 active, 003 re-login and 13 d old, 004 fresh) ---
+    const acct = (label, five, week, fetched, extra = {}) => ({ label, provider: 'claude', state: 'ok', fetched_at: fetched,
+        five_pct: five, week_pct: week, five_reset_epoch: now + 3600, week_reset_epoch: now + 86400, email: label + '@x.example', ...extra });
+    const capOf = (accounts, you, relogin = [], saved = accounts.map((a) => a.label)) => ({
+        ...e.capacity({ accounts }, { you, isSaved: (l) => saved.includes(l), relogin: new Set(relogin), now }),
+        relogin, saved, loginHealth: 'known' });
+    const four = () => [acct('001', 76, 100, now - 120), acct('002', 23, 64, now - 60), acct('003', 5, 5, now - 13 * 86400), acct('004', 46, 13, now - 60)];
+    const opts = { now, installed: true, auto: false };
+    const pdFour = () => { const a = four(); return e.panelData(a, capOf(a, '002', ['003']), opts); };
+
+    await check('panelData: active hero, next-best, counts', () => {
+        const d = pdFour();
+        assert.strictEqual(d.active.label, '002');
+        assert.strictEqual(d.active.five, 23);
+        assert.strictEqual(d.active.age, null);
+        assert.strictEqual(d.next.label, '004');
+        assert.deepStrictEqual(d.counts, { total: 4, relogin: 1, full: 1 });
+        assert.deepStrictEqual(Object.fromEntries(d.rows.map((r) => [r.label, r.icon])), { '001': 'full', '002': 'active', '003': 'relogin', '004': 'switch' });
+        assert.strictEqual(d.rows[2].age, '13d old');
+        assert.strictEqual(d.rows[3].age, null);
+        assert.strictEqual(d.rows[0].tip, 'A limit is at 100%');
+        assert.deepStrictEqual(d.rows[2].actions, ['relogin', 'delete']);
+        assert.deepStrictEqual(d.rows[3].actions, ['switch', 'delete']);
+        assert.strictEqual(d.loginHealth, 'known');
+    });
+
+    await check('panelData: counts follow the row icons, not the free count (stale and dead are not free)', () => {
+        const a = [acct('001', 5, 5, now - 7200), acct('002', 23, 64, now - 60), acct('003', 100, 5, now - 60), acct('004', 5, 5, now - 60)];
+        const d = e.panelData(a, capOf(a, '002', ['004']), opts);
+        assert.deepStrictEqual(d.counts, { total: 4, relogin: 1, full: 1 });
+        assert.strictEqual(d.rows[0].icon, '', 'a stale account is not a switch target');
+        assert.strictEqual(d.rows[0].age, '2h old');
+    });
+
+    await check('panelData: nothing qualifies -> next is null', () => {
+        const a = [acct('001', 5, 5, now - 7200), acct('002', 23, 64, now - 60), acct('003', 5, 5, now - 60)];
+        const d = e.panelData(a, capOf(a, '002', ['003']), opts);
+        assert.strictEqual(d.next, null);
+        assert.ok(!d.rows.some((r) => r.icon === 'switch'));
+    });
+
+    await check('panelData: missing window is null, not 0', () => {
+        const a = [acct('002', 23, 64, now - 60), acct('half', null, 30, now - 60, { five_reset_epoch: null })];
+        const d = e.panelData(a, capOf(a, '002'), opts);
+        const half = d.rows.find((r) => r.label === 'half');
+        assert.strictEqual(half.five, null);
+        assert.strictEqual(half.week, 30);
+        assert.strictEqual(half.fiveReset, null);
+        assert.strictEqual(half.icon, 'switch');
+    });
+
+    await check('panelData: unsaved active account gets SAVE, never switch', () => {
+        const a = four();
+        const cap = capOf(a, 'newbie', ['003']);
+        const d = e.panelData(a, cap, opts);
+        assert.strictEqual(d.active.label, 'newbie');
+        assert.strictEqual(d.active.five, null);
+        const row = d.rows.find((r) => r.label === 'newbie');
+        assert.deepStrictEqual(row.actions, ['save']);
+        assert.strictEqual(row.icon, 'active');
+        assert.strictEqual(e.autoTarget({ ...cap, you: 'newbie' }), null);
+    });
+
+    await check('panelData: codex row has no actions and never ⇄', () => {
+        const a = [acct('002', 23, 64, now - 60), acct('codex', 1, 1, now - 60, { provider: 'codex' })];
+        const d = e.panelData(a, capOf(a, '002'), opts);
+        const cx = d.rows.find((r) => r.label === 'codex');
+        assert.deepStrictEqual(cx.actions, []);
+        assert.strictEqual(cx.icon, '');
+    });
+
+    await check('ageText: null when fresh, else minutes, hours or days; no data', () => {
+        assert.strictEqual(e.ageText(now - 60, now), null);
+        assert.strictEqual(e.ageText(now - 2700, now), '45m old');
+        assert.strictEqual(e.ageText(now - 5 * 3600, now), '5h old');
+        assert.strictEqual(e.ageText(now - 13 * 86400, now), '13d old');
+        assert.strictEqual(e.ageText(null, now), 'no data');
     });
 
     await check('B1 capacity never recommends a re-login account, even with the lowest load', () => {

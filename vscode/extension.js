@@ -61,29 +61,13 @@ const DAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 
 function resetText(epoch) {
     const secs = epoch - Date.now() / 1000;
-    if (secs < 60) return '↻ now';
+    if (secs < 60) return '⟳ now';
     const d = new Date(epoch * 1000), now = new Date();
     const clock = d.toTimeString().slice(0, 5);
     const dayDiff = Math.round((new Date(d).setHours(0, 0, 0, 0) - new Date(now).setHours(0, 0, 0, 0)) / 864e5);
-    if (dayDiff === 0) { const m = Math.floor(secs / 60); return `↻ ${m >= 60 ? `${Math.floor(m / 60)}h ${m % 60}m` : `${m}m`} (${clock})`; }
-    if (dayDiff === 1) return `↻ tomorrow ${clock}`;
-    return `↻ ${DAYS[d.getDay()]} ${clock}`;
-}
-
-function dividers(epoch, period) {
-    if (period < 86400) return [0.2, 0.4, 0.6, 0.8];
-    const start = epoch * 1000 - period * 1000, out = [];
-    const day = new Date(start); day.setHours(24, 0, 0, 0);  // next local midnight
-    for (; day.getTime() < epoch * 1000; day.setDate(day.getDate() + 1)) out.push((day.getTime() - start) / (period * 1000));
-    return out;
-}
-
-function bar(key, label, pct, epoch, period) {
-    if (pct == null) return null;
-    const elapsed = epoch ? Math.max(0, Math.min(1, 1 - (epoch - Date.now() / 1000) / period)) : null;
-    return { key, label, pct, pct_text: `${Math.round(pct)}%`, fill_pct: Math.max(0, Math.min(1, pct / 100)),
-        warn: pct >= 100 || (elapsed !== null && pct / 100 > elapsed),  // ahead of pace = red, like the app
-        reset_text: epoch ? resetText(epoch) : '', dividers: epoch ? dividers(epoch, period) : [], marker_rel: elapsed };
+    if (dayDiff === 0) { const m = Math.floor(secs / 60); return `⟳ ${m >= 60 ? `${Math.floor(m / 60)}h ${m % 60}m` : `${m}m`} (${clock})`; }
+    if (dayDiff === 1) return `⟳ tomorrow ${clock}`;
+    return `⟳ ${DAYS[d.getDay()]} ${clock}`;
 }
 
 // Load = max(5h, weekly) (the CtrlA hub's rules); free = load < 50%; best = lowest load among qualifying accounts.
@@ -104,25 +88,59 @@ function autoTarget(cap) {
     return cap.best.label;
 }
 
-const ageText = (secs) => (secs >= 86400 ? Math.floor(secs / 86400) + 'd' : secs >= 3600 ? Math.floor(secs / 3600) + 'h' : Math.max(1, Math.floor(secs / 60)) + 'm');
+// Data age as shown on a row: null while fresh by time, 'no data' when there never was any, else '45m old' / '5h old' / '13d old'.
+function ageText(fetchedAt, now) {
+    if (fetchedAt == null) return 'no data';
+    const secs = now - fetchedAt;
+    if (secs < FRESH_SECS) return null;
+    return secs >= 86400 ? Math.floor(secs / 86400) + 'd old' : secs >= 3600 ? Math.floor(secs / 3600) + 'h old' : Math.floor(secs / 60) + 'm old';
+}
 
 function readAccounts() {
     const u = readSnapshot();
     const now = Date.now() / 1000;
     const cap = capacity(u, { you: activeLabel(), isSaved: saved, relogin, now });
-    const accounts = u.accounts.map((a) => ({ name: a.label, data: {
-        profile: emailOf(a.label) ? { email: emailOf(a.label), plan: '' } : null, extra: null, installations: [],
-        usage: [bar('five_hour', '5H', a.five_pct, a.five_reset_epoch, 18000),
-                bar('seven_day', 'Week', a.week_pct, a.week_reset_epoch, 604800)].filter(Boolean),
-        status: isFresh(a, now)
-            ? { last_success_time: a.fetched_at, next_poll_time: null, refreshing: false, error: null }
-            : a.state === 'ok' ? { text: 'data ' + ageText(Math.max(0, now - a.fetched_at)) + ' old', is_error: true }
-            : { text: a.state, is_error: a.state !== 'no data yet' },
-    } }));
+    const accounts = u.accounts.map((a) => ({ ...a, email: emailOf(a.label) }));
     cap.loginHealth = loginHealth;
-    cap.saved = fs.existsSync(CCSWITCH) ? accounts.map((a) => a.name).filter(saved) : null;  // null = no ccswitch
+    cap.saved = fs.existsSync(CCSWITCH) ? accounts.map((a) => a.label).filter(saved) : null;  // null = no ccswitch
     cap.relogin = [...relogin];
     return { accounts, cap };
+}
+
+// What the panel shows (layout A), decided here so the webview only draws it. Every status is one icon with a fixed
+// tooltip, and the Accounts header counts the same icons. An active account with no row (not saved, no data) gets one.
+const TIPS = { active: 'Active account', relogin: 'Needs re-login', full: 'A limit is at 100%', switch: 'You can switch here', '': '' };
+function panelData(accounts, cap, { now, installed, auto }) {
+    const savedSet = new Set(cap.saved || []), dead = new Set(cap.relogin || []);
+    const ctx = { you: cap.you, isSaved: (l) => savedSet.has(l), relogin: dead, now };
+    const pct = (v) => (v == null ? null : Math.round(v));
+    const reset = (epoch) => (epoch ? resetText(epoch) : null);
+    const age = (a) => (isFresh(a, now) ? null : ageText(a.fetched_at, now) || a.state);
+    const list = cap.you && !accounts.some((a) => a.label === cap.you)
+        ? [...accounts, { label: cap.you, provider: 'claude', state: 'no data yet', fetched_at: null, five_pct: null, week_pct: null, email: null }]
+        : accounts;
+    const rows = list.map((a) => {
+        const claude = (a.provider || 'claude') === 'claude', you = a.label === cap.you;
+        const icon = you ? 'active' : dead.has(a.label) ? 'relogin' : (a.five_pct >= 100 || a.week_pct >= 100) ? 'full'
+            : qualifies(a, ctx) ? 'switch' : '';
+        const actions = !claude || !installed ? [] : [
+            ...(you && !savedSet.has(a.label) ? ['save'] : []),
+            ...(!you && !dead.has(a.label) ? ['switch'] : []),
+            ...(dead.has(a.label) ? ['relogin'] : []),
+            ...(savedSet.has(a.label) ? ['delete'] : []),
+        ];
+        return { label: a.label, provider: a.provider || 'claude', icon, tip: TIPS[icon], five: pct(a.five_pct), week: pct(a.week_pct),
+            fiveReset: reset(a.five_reset_epoch), weekReset: reset(a.week_reset_epoch), age: age(a), email: a.email || null, actions };
+    });
+    const mine = list.find((a) => a.label === cap.you);
+    return {
+        installed, auto, loginHealth: cap.loginHealth || 'unknown',
+        active: mine ? { label: mine.label, five: pct(mine.five_pct), week: pct(mine.week_pct),
+            fiveReset: reset(mine.five_reset_epoch), weekReset: reset(mine.week_reset_epoch), age: age(mine) } : null,
+        next: cap.best ? { label: cap.best.label, five: pct(cap.best.five), week: pct(cap.best.week) } : null,
+        counts: { total: rows.length, relogin: rows.filter((r) => r.icon === 'relogin').length, full: rows.filter((r) => r.icon === 'full').length },
+        rows,
+    };
 }
 
 // Compact sidebar layout on top of the unchanged popup.css: title = seat (click to switch), one
@@ -317,12 +335,11 @@ function activate(context) {
 
     const poll = () => {
         try { ({ accounts, cap } = readAccounts()); cap.auto = autoOn(); } catch (err) { status.text = '$(warning) Claude usage unreadable'; status.tooltip = String(err); return; }
-        const pct = (a, key) => (a.data.usage.find((u) => u.key === key) || {}).pct_text || '–';
         const r = (v) => (v == null ? '–' : Math.round(v) + '%');
         status.text = (cap.you && !cap.activeFresh ? '$(warning) ' : '$(pulse) ') + (cap.auto ? '$(sync) ' : '') + (cap.you ? `current ${cap.you} · ` : '') + `${cap.free}/${cap.total} free`
             + (cap.best ? ` · most headroom ${cap.best.label} (${r(cap.best.five)}/${r(cap.best.week)})` : '');
         status.tooltip = (cap.you && !cap.activeFresh ? `Data for ${cap.you} is over 30 min old\n` : '') + `Auto-switch: ${cap.auto ? 'ON' : 'off'}\n` + 'Accounts (5h / weekly)\n'
-            + accounts.map((a) => `${a.data.profile ? a.data.profile.email : a.label}: session ${pct(a, 'five_hour')}, weekly ${pct(a, 'seven_day')}`).join('\n');
+            + accounts.map((a) => `${a.email || a.label}: session ${r(a.five_pct)}, weekly ${r(a.week_pct)}`).join('\n');
         push();
         autoSwitch();
     };
