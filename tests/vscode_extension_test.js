@@ -264,20 +264,21 @@ const calls = () => (fs.existsSync(LOG) ? fs.readFileSync(LOG, 'utf8').trim().sp
         assert.deepStrictEqual([...out], ['personal']);
     });
 
-    await check('old ccswitch without --json: marks nothing, health unknown', async () => {
-        e.relogin.add('personal');
+    await check('old ccswitch without --json: forgets nothing, health unknown', async () => {
+        e.relogin.clear(); e.relogin.add('personal');
         usageReply("Error: unknown option '--json' for 'usage'.", 1);
         await e.checkLogins();
-        assert.strictEqual(e.relogin.size, 0);
+        assert.deepStrictEqual([...e.relogin], ['personal'], 'a failed check keeps the known re-login verdicts');
         assert.strictEqual(e.readAccounts().cap.loginHealth, 'unknown');
     });
 
-    await check('garbage on stdout is not trusted', async () => {
-        e.relogin.add('personal');
+    await check('garbage on stdout is not trusted, and forgets nothing', async () => {
+        e.relogin.clear(); e.relogin.add('personal');
         usageReply('warning\n{"schema":1');
         await e.checkLogins();
-        assert.strictEqual(e.relogin.size, 0);
+        assert.deepStrictEqual([...e.relogin], ['personal']);
         assert.strictEqual(e.readAccounts().cap.loginHealth, 'unknown');
+        assert.deepStrictEqual([...e.mergeLogins(new Set(['personal']), null, () => true)], ['personal'], 'no document keeps the previous set');
         assert.strictEqual(e.parseUsageJson('{"schema":2,"accounts":[]}'), null);
         assert.strictEqual(e.parseUsageJson('{"schema":1,"accounts":{}}'), null);
     });

@@ -262,6 +262,7 @@ async function installCcswitch() {
 // account's tokens and reports each account's login (`ok` | `re-login` | `unknown`) as data, not as text to parse.
 const relogin = new Set();
 let loginHealth = 'unknown';  // 'known' | 'unknown': whether the last run could judge dead logins at all
+let loginChecked = false;  // true once a check returned a valid document; auto-switch waits for it
 
 // The parsed `usage --json` document, or null unless it is schema 1 with an accounts array.
 function parseUsageJson(text) {
@@ -271,9 +272,10 @@ function parseUsageJson(text) {
     } catch { return null; }
 }
 
-// New re-login set: no document -> empty; re-login adds, ok removes, unknown keeps the previous verdict; saved only.
+// New re-login set: no document (failed run) -> the previous set; re-login adds, ok removes, unknown keeps the
+// previous verdict; saved only. One failed run must never forget a dead login.
 function mergeLogins(prev, doc, isSaved) {
-    if (!doc) return new Set();
+    if (!doc) return new Set(prev);
     const next = new Set(prev);
     for (const a of doc.accounts) {
         if (a.login === 're-login') next.add(a.label);
@@ -290,6 +292,7 @@ async function checkLogins() {
     relogin.clear();  // same Set object, so saveSeat's relogin.delete keeps working
     for (const l of next) relogin.add(l);
     loginHealth = doc && doc.login_health === 'known' ? 'known' : 'unknown';
+    if (doc) loginChecked = true;
 }
 
 // Save the CURRENT login under its seat name (ccswitch save always snapshots whichever login is active).
