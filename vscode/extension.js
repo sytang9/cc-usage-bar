@@ -18,6 +18,8 @@ const saved = (label) => fs.existsSync(path.join(ACCOUNTS, label, 'credentials.j
 const readJson = (f) => { try { return JSON.parse(fs.readFileSync(f, 'utf8')); } catch { return null; } };
 const emailOf = (label) => (readJson(path.join(ACCOUNTS, label, 'oauthAccount.json')) || {}).emailAddress || null;
 const savedLabels = () => { try { return fs.readdirSync(ACCOUNTS).filter((l) => isLabel(l) && saved(l)).sort(); } catch { return []; } };
+const isClaude = (a) => (a.provider || 'claude') === 'claude';
+const CODEX = process.env.CODEX_HOME || path.join(HOME, '.codex');  // ccswitch's ${CODEX_HOME:-~/.codex}
 
 // The saved account the live login belongs to (matched by email, like ccswitch's '*'); else the email's local part.
 function activeLabel() {
@@ -40,12 +42,23 @@ function readSnapshot() {
         const rows = (doc.accounts || []).filter((a) => a && isLabel(a.label));
         return { accounts: rows.map((a) => ({ ...a, fetched_at: a.fetched_at ?? fileAge })) };
     }
-    return { accounts: savedLabels().map((label) => {
+    return { accounts: [...savedLabels().map((label) => {
         const c = readJson(path.join(ACCOUNTS, label, '.usage-cache')) || {};
         return { label, provider: 'claude', state: c.fetched_at ? 'ok' : 'no data yet', fetched_at: c.fetched_at ?? null,
             five_pct: c.five_hour_pct ?? null, week_pct: c.seven_day_pct ?? null,
             five_reset_epoch: c.five_hour_reset_epoch ?? null, week_reset_epoch: c.seven_day_reset_epoch ?? null };
-    }) };
+    }), ...codexRows()] };
+}
+
+// The read-only Codex row: ccswitch's Codex cache, which `ccswitch usage --json` (the 10-min health check) refreshes.
+// Shown when that cache or a Codex login exists; auth.json is only checked for existence, never read.
+function codexRows() {
+    const f = path.join(CODEX, '.usage-cache');
+    if (!fs.existsSync(f) && !fs.existsSync(path.join(CODEX, 'auth.json'))) return [];
+    const c = readJson(f) || {};
+    return [{ label: 'codex', provider: 'codex', state: c.fetched_at ? 'ok' : 'no data yet', fetched_at: c.fetched_at || null,  // 0 = never fetched
+        five_pct: c.five_hour_pct ?? null, week_pct: c.seven_day_pct ?? null,
+        five_reset_epoch: c.five_hour_reset_epoch ?? null, week_reset_epoch: c.seven_day_reset_epoch ?? null }];
 }
 
 const isFresh = (a, now, secs = FRESH_SECS) => a.state === 'ok' && a.fetched_at != null
@@ -106,18 +119,19 @@ const pctOr = (v) => (v == null ? '–' : Math.round(v) + '%');
 function statusText(cap, accounts, auto) {
     const lead = auto ? '$(sync) ' : '';
     if (!cap.you) return lead + '● none';
-    const me = accounts.find((a) => a.label === cap.you) || {};
+    const me = accounts.find((a) => isClaude(a) && a.label === cap.you) || {};
     return `${lead}● ${cap.you} ${pctOr(me.five_pct)}/${pctOr(me.week_pct)}${cap.activeFresh ? '' : ' ◷'} · ⇄ ${cap.best ? cap.best.label : 'none'}`;
 }
 
 // Tooltip: the auto-switch state, then one line per account (an active account with no row gets one too).
 function statusTooltip(cap, accounts, auto, now = Date.now() / 1000) {
-    const list = cap.you && !accounts.some((a) => a.label === cap.you) ? [...accounts, { label: cap.you, fetched_at: null, state: 'no data yet' }] : accounts;
+    const list = cap.you && !accounts.some((a) => isClaude(a) && a.label === cap.you) ? [...accounts, { label: cap.you, fetched_at: null, state: 'no data yet' }] : accounts;
     const dead = new Set(cap.relogin || []);
     const lines = list.map((a) => {
-        const age = isFresh(a, now) ? null : ageText(a.fetched_at, now);
-        return `${a.label}: 5h ${pctOr(a.five_pct)}, wk ${pctOr(a.week_pct)}` + (dead.has(a.label) ? ' · re-login' : '')
-            + (age === 'no data' ? ' · no data' : age ? ` · data ${age}` : !isFresh(a, now) ? ` · ${a.state}` : '') + (a.label === cap.you ? ' · active' : '');
+        const age = isFresh(a, now) ? null : ageText(a.fetched_at, now), claude = isClaude(a);
+        return `${a.label}: 5h ${pctOr(a.five_pct)}, wk ${pctOr(a.week_pct)}` + (claude && dead.has(a.label) ? ' · re-login' : '')
+            + (age === 'no data' ? ' · no data' : age ? ` · data ${age}` : !isFresh(a, now) ? ` · ${a.state}` : '')
+            + (!claude ? ' · ' + TIPS.readonly : a.label === cap.you ? ' · active' : '');
     });
     return [`Auto-switch: ${auto ? 'ON' : 'off'}`, ...lines].join('\n');
 }
@@ -136,7 +150,7 @@ function readAccounts() {
     const u = readSnapshot();
     const now = Date.now() / 1000;
     const cap = capacity(u, { you: activeLabel(), isSaved: saved, relogin, now });
-    const accounts = u.accounts.map((a) => ({ ...a, email: emailOf(a.label) }));
+    const accounts = u.accounts.map((a) => ({ ...a, email: isClaude(a) ? emailOf(a.label) : null }));
     cap.loginHealth = loginHealth;
     cap.saved = fs.existsSync(CCSWITCH) ? accounts.map((a) => a.label).filter(saved) : null;  // null = no ccswitch
     cap.relogin = [...relogin];
@@ -145,8 +159,9 @@ function readAccounts() {
 
 // What the panel shows, decided here so the webview only draws it. Every status is one icon with a fixed tooltip and
 // one grey summary ('82% · 74%', 'Weekly full · resets Thu', 'Re-login needed', 'No recent data').
-// An active account with no row (not saved, no data) gets one.
-const TIPS = { active: 'Active account', relogin: 'Needs re-login', full: 'A limit is at 100%', switch: 'You can switch here', '': '' };
+// An active account with no row (not saved, no data) gets one. A Codex row is read-only: a lock (or 'full'), no actions.
+const TIPS = { active: 'Active account', relogin: 'Needs re-login', full: 'A limit is at 100%', switch: 'You can switch here',
+    readonly: 'Codex (read-only)', '': '' };
 function panelData(accounts, cap, { now, installed, auto }) {
     const savedSet = new Set(cap.saved || []), dead = new Set(cap.relogin || []);
     const ctx = { you: cap.you, isSaved: (l) => savedSet.has(l), relogin: dead, now };
@@ -155,13 +170,14 @@ function panelData(accounts, cap, { now, installed, auto }) {
     const reset = (epoch) => (live(epoch) ? resetText(epoch) : null);
     const full = (name, epoch) => name + ' full' + (live(epoch) ? ' · resets ' + resetText(epoch, true) : '');
     const age = (a) => (isFresh(a, now) ? null : ageText(a.fetched_at, now) || a.state);
-    const list = cap.you && !accounts.some((a) => a.label === cap.you)
+    const list = cap.you && !accounts.some((a) => isClaude(a) && a.label === cap.you)
         ? [...accounts, { label: cap.you, provider: 'claude', state: 'no data yet', fetched_at: null, five_pct: null, week_pct: null, email: null }]
         : accounts;
     const rows = list.map((a) => {
-        const claude = (a.provider || 'claude') === 'claude', you = a.label === cap.you;
-        const icon = you ? 'active' : dead.has(a.label) ? 'relogin' : (a.five_pct >= 100 || a.week_pct >= 100) ? 'full'
-            : qualifies(a, ctx) ? 'switch' : '';
+        const claude = isClaude(a), you = claude && a.label === cap.you;
+        const icon = you ? 'active' : claude && dead.has(a.label) ? 'relogin' : (a.five_pct >= 100 || a.week_pct >= 100) ? 'full'
+            : !claude ? 'readonly' : qualifies(a, ctx) ? 'switch' : '';
+        const tip = claude ? TIPS[icon] : TIPS.readonly + (icon === 'full' ? ' · ' + TIPS.full : '');
         const actions = !claude || !installed ? [] : [
             ...(you && !savedSet.has(a.label) ? ['save'] : []),
             ...(!you && !dead.has(a.label) ? ['switch'] : []),
@@ -171,16 +187,16 @@ function panelData(accounts, cap, { now, installed, auto }) {
         const summary = icon === 'relogin' ? 'Re-login needed' : age(a) ? 'No recent data'
             : icon === 'full' ? (a.week_pct >= 100 ? full('Weekly', a.week_reset_epoch) : full('Session', a.five_reset_epoch))
             : pctOr(a.five_pct) + ' · ' + pctOr(a.week_pct);
-        return { label: a.label, provider: a.provider || 'claude', icon, tip: TIPS[icon], summary, five: pct(a.five_pct), week: pct(a.week_pct),
+        return { label: a.label, provider: a.provider || 'claude', icon, tip, summary, five: pct(a.five_pct), week: pct(a.week_pct),
             fiveReset: reset(a.five_reset_epoch), weekReset: reset(a.week_reset_epoch), age: age(a), email: a.email || null, actions };
     });
-    const mine = list.find((a) => a.label === cap.you);
+    const mine = list.find((a) => isClaude(a) && a.label === cap.you);
     return {
         installed, auto, loginHealth: cap.loginHealth || 'unknown',
         active: mine ? { label: mine.label, email: mine.email || null, five: pct(mine.five_pct), week: pct(mine.week_pct),
             fiveReset: reset(mine.five_reset_epoch), weekReset: reset(mine.week_reset_epoch), age: age(mine) } : null,
         next: cap.best ? { label: cap.best.label, five: pct(cap.best.five), week: pct(cap.best.week) } : null,
-        counts: { total: rows.length, saved: rows.filter((r) => savedSet.has(r.label)).length,
+        counts: { total: rows.length, saved: rows.filter((r) => r.provider === 'claude' && savedSet.has(r.label)).length,
             relogin: rows.filter((r) => r.icon === 'relogin').length, full: rows.filter((r) => r.icon === 'full').length },
         rows,
     };

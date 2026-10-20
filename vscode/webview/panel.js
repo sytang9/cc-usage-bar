@@ -3,7 +3,7 @@
 // which extension.js inlines before this script. Icons are codicons (vendored font). The bootstrap at the end runs
 // only inside a VS Code webview.
 
-const ICON = { active: 'circle-filled', relogin: 'warning', full: 'circle-slash', switch: 'arrow-swap' };
+const ICON = { active: 'circle-filled', relogin: 'warning', full: 'circle-slash', switch: 'arrow-swap', readonly: 'lock' };
 const ACTION = { switch: 'Switch', save: 'Save login', relogin: 'How to re-login', delete: 'Delete' };
 const ACTION_TIP = { save: 'Save your current login under this name (ccswitch save)', delete: 'Delete the saved login (ccswitch delete)' };
 
@@ -54,6 +54,7 @@ function row(r, open) {
     const use = (p, reset) => pctText(p) + (reset ? ' · resets ' + esc(reset) : '');
     html += '<div class="det">'
         + (r.email ? kv('Email', esc(r.email)) : '')
+        + (r.provider && r.provider !== 'claude' ? kv('Read-only', 'Codex usage, never a switch target') : '')
         + (r.age ? kv('Last data', esc(r.age))
             : kv('Session (5hr)', use(r.five, r.fiveReset)) + kv('Weekly (7 day)', use(r.week, r.weekReset)))
         + (r.actions.length ? '<div class="acts">' + r.actions.map((a) => '<button class="lnk" data-a="' + a + '" data-l="' + l + '"'

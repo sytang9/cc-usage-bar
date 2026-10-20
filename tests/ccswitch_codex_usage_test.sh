@@ -522,20 +522,153 @@ case12_no_known_window_not_cached() {
   rm -rf "$env"
 }
 
-# --- Case 13: usage --json omits the Codex row and never calls wham ----------
-case13_json_omits_codex() {
-  local env out
+# --- Cases 13-17: usage --json carries one read-only Codex row ---------------
+# run_json <env> <args...> -> OUT = stdout only (the JSON document). The same
+# logs as run_cc, so the leak scan covers every document.
+run_json() {
+  local env="$1"
+  shift
+  OUT="$(CODEX_HOME="$env/codex" PATH="$STUB_BIN:$PATH" HOME="$env/home" CURL_STUB_DIR="$env/ctl" \
+    CCSWITCH_REFRESH_CMD=/bin/false bash "$TARGET" usage --json "$@" <<<"codex" 2>/dev/null)"
+  EXIT_CODE=$?
+  printf '%s\n' "$OUT" >>"$ALL_OUTPUT_LOG"
+  cat "$env/ctl/calls/argv.log" >>"$ALL_ARGV_LOG" 2>/dev/null || true
+  cat "$env/codex/.usage-cache" >>"$ALL_CACHE_LOG" 2>/dev/null || true
+}
+codex_obj() { jq -c '[.accounts[] | select(.provider == "codex")]' <<<"$OUT" 2>/dev/null; }
+CODEX_ROW_KEYS='["active","fetched_at","five_hour_pct","five_hour_reset_epoch","label","login","provider","seven_day_pct","seven_day_reset_epoch","state"]'
+
+case13_json_codex_ok() {
+  local env r5 r7
+  env="$(new_env)"
+  setup_claude "$env" 10 20
+  write_codex_auth "$env" chatgpt "$(future 864000)"
+  r5="$(future 7200)"; r7="$(future 300000)"
+  set_wham "$env" 200 "$(wham_body "$(window 42 18000 "$r5")" "$(window 7 604800 "$r7")")"
+  run_json "$env"
+
+  if [[ "$EXIT_CODE" -eq 0 ]] \
+    && jq -e --argjson r5 "$r5" --argjson r7 "$r7" --argjson keys "$CODEX_ROW_KEYS" '
+      .schema == 1
+      and ([.accounts[] | [.label, .provider]] == [["work","claude"],["codex","codex"]])
+      and (.accounts[1] | (keys == $keys) and .active == false and .login == null and .state == "ok"
+        and .five_hour_pct == 42 and .seven_day_pct == 7
+        and .five_hour_reset_epoch == $r5 and .seven_day_reset_epoch == $r7
+        and ((.fetched_at - now | fabs) < 10))' <<<"$OUT" >/dev/null 2>&1 \
+    && [[ "$(count "$env" wham_count)" == "1" ]] \
+    && [[ "$(cache_get "$env" .five_hour_pct)" == "42" ]]; then
+    pass "case13 usage --json: Codex row ok with its own numbers and resets, Claude rows say provider claude"
+  else
+    fail "case13 json codex ok (exit=$EXIT_CODE wham=$(count "$env" wham_count)): $OUT"
+  fi
+  rm -rf "$env"
+}
+
+case14_json_codex_cache_ttl_and_refresh() {
+  local env first second third
   env="$(new_env)"
   setup_claude "$env" 10 20
   write_codex_auth "$env" chatgpt "$(future 864000)"
   set_wham "$env" 200 "$(cat "$REAL_FIXTURE")"
-  out="$(CODEX_HOME="$env/codex" PATH="$STUB_BIN:$PATH" HOME="$env/home" CURL_STUB_DIR="$env/ctl" \
-    CCSWITCH_REFRESH_CMD=/bin/false bash "$TARGET" usage --json 2>/dev/null)"
-  if jq -e '[.accounts[].label] == ["work"]' <<<"$out" >/dev/null 2>&1 \
-    && [[ "$(count "$env" wham_count)" == "0" ]]; then
-    pass "case13 usage --json omits the Codex row and skips its GET"
+  run_json "$env"; first="$(count "$env" wham_count)"
+  run_json "$env"; second="$(count "$env" wham_count)"
+  run_json "$env" --refresh; third="$(count "$env" wham_count)"
+
+  if [[ "$first" == "1" ]] && [[ "$second" == "1" ]] && [[ "$third" == "2" ]] \
+    && jq -e '[.accounts[] | select(.provider == "codex") | .state, .seven_day_pct] == ["ok", 0]' <<<"$OUT" >/dev/null 2>&1; then
+    pass "case14 usage --json reuses the 10-min Codex cache; --refresh bypasses it"
   else
-    fail "case13 json codex (wham=$(count "$env" wham_count)): $out"
+    fail "case14 json codex ttl (calls $first/$second/$third): $OUT"
+  fi
+  rm -rf "$env"
+}
+
+case15_json_codex_missing_login() {
+  local env fa without
+  env="$(new_env)"
+  setup_claude "$env" 10 20
+  # No auth.json and no cache: no Codex row at all.
+  run_json "$env"
+  without="$OUT"
+  # No auth.json but an old cache: a row whose state says the login is missing.
+  fa=$(( $(date +%s) - 90000 ))
+  jq -cn --argjson fa "$fa" '{fetched_at: $fa, five_hour_pct: 5, seven_day_pct: 6, five_hour_reset_epoch: null, seven_day_reset_epoch: 1999999999, rate_limited_until: null, plan_type: "plus"}' \
+    >"$env/codex/.usage-cache"
+  run_json "$env"
+
+  if jq -e '[.accounts[].provider] == ["claude"]' <<<"$without" >/dev/null 2>&1 \
+    && jq -e --argjson fa "$fa" '[.accounts[] | select(.provider == "codex")] | length == 1 and (.[0]
+      | .state == "no-login" and .login == null and .fetched_at == $fa and .seven_day_pct == 6
+      and .seven_day_reset_epoch == 1999999999)' <<<"$OUT" >/dev/null 2>&1 \
+    && [[ "$(count "$env" wham_count)" == "0" ]] && [[ "$EXIT_CODE" -eq 0 ]]; then
+    pass "case15 usage --json: no login and no cache -> no row; cache only -> no-login row with its last numbers"
+  else
+    fail "case15 json missing login: $without / $OUT"
+  fi
+  rm -rf "$env"
+}
+
+case16_json_codex_expired_keeps_stale_numbers() {
+  local env before
+  env="$(new_env)"
+  setup_claude "$env" 10 20
+  write_codex_auth "$env" chatgpt "$(( $(date +%s) - 100 ))"
+  jq -cn '{fetched_at: 1000, five_hour_pct: 5, seven_day_pct: 6, five_hour_reset_epoch: null, seven_day_reset_epoch: null, rate_limited_until: null, plan_type: "plus"}' \
+    >"$env/codex/.usage-cache"
+  before="$(cat "$env/codex/.usage-cache")"
+  run_json "$env"
+
+  if [[ "$EXIT_CODE" -eq 0 ]] \
+    && jq -e '[.accounts[] | select(.provider == "codex")] | length == 1 and (.[0]
+      | .state == "expired" and .fetched_at == 1000 and .five_hour_pct == 5)' <<<"$OUT" >/dev/null 2>&1 \
+    && [[ "$(cat "$env/codex/.usage-cache")" == "$before" ]] \
+    && [[ "$(count "$env" wham_count)" == "0" ]]; then
+    pass "case16 usage --json: expired Codex token -> expired row with the stale fetched_at, no call, cache kept"
+  else
+    fail "case16 json codex expired: $OUT"
+  fi
+  rm -rf "$env"
+}
+
+case17_json_codex_errors() {
+  local env s500 s401 s429 never
+  env="$(new_env)"
+  setup_claude "$env" 10 20
+  write_codex_auth "$env" chatgpt "$(future 864000)"
+  set_wham "$env" 500 '{}'
+  run_json "$env"; s500="$(codex_obj)"
+  set_wham "$env" 401 '{}'
+  run_json "$env"; s401="$(codex_obj)"
+  set_wham "$env" 429 '{}'
+  run_json "$env"; s429="$(codex_obj)"
+  never="$(jq -c '{fetched_at, rate_limited_until: (.rate_limited_until | type)}' "$env/codex/.usage-cache" 2>/dev/null)"
+
+  # 500 and 401 leave no cache, so their rows exist only because of the login.
+  if jq -e '.[0].state == "dash" and .[0].fetched_at == null and .[0].seven_day_pct == null' <<<"$s500" >/dev/null 2>&1 \
+    && jq -e '.[0].state == "expired" and .[0].fetched_at == null' <<<"$s401" >/dev/null 2>&1 \
+    && jq -e '.[0].state == "wait" and .[0].fetched_at == null' <<<"$s429" >/dev/null 2>&1 \
+    && [[ "$never" == '{"fetched_at":0,"rate_limited_until":"number"}' ]] \
+    && [[ "$EXIT_CODE" -eq 0 ]]; then
+    pass "case17 usage --json: 500 -> dash, 401 -> expired, 429 -> wait; never-fetched is fetched_at null"
+  else
+    fail "case17 json codex errors: 500=$s500 401=$s401 429=$s429 cache=$never"
+  fi
+  rm -rf "$env"
+}
+
+case18_json_codex_without_claude_accounts() {
+  local env
+  env="$(new_env)"
+  mkdir -p "$env/home/.claude/accounts"
+  write_codex_auth "$env" chatgpt "$(future 864000)"
+  set_wham "$env" 200 "$(cat "$REAL_FIXTURE")"
+  run_json "$env"
+
+  if [[ "$EXIT_CODE" -eq 0 ]] \
+    && jq -e '.schema == 1 and ([.accounts[] | [.label, .provider, .state]] == [["codex","codex","ok"]])' <<<"$OUT" >/dev/null 2>&1; then
+    pass "case18 usage --json with no saved Claude account still has the Codex row"
+  else
+    fail "case18 json codex no claude: $OUT"
   fi
   rm -rf "$env"
 }
@@ -556,7 +689,12 @@ main() {
   case9_bad_response_dash
   case11_forbidden_is_not_expired
   case12_no_known_window_not_cached
-  case13_json_omits_codex
+  case13_json_codex_ok
+  case14_json_codex_cache_ttl_and_refresh
+  case15_json_codex_missing_login
+  case16_json_codex_expired_keeps_stale_numbers
+  case17_json_codex_errors
+  case18_json_codex_without_claude_accounts
 
   # Security, LAST so every case above has logged its output first: no Codex
   # access token, account id or JWT subject may appear in any output, any

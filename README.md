@@ -246,25 +246,37 @@ after the Claude accounts:
 
 `ccswitch usage --json [--refresh]` prints one JSON document on stdout and
 nothing else (warnings stay on stderr). It implies `--no-switch`: it never
-prompts and never switches. The Codex row is not emitted and its request is
-skipped.
+prompts and never switches. It runs the Codex step exactly as the table does
+(same cache, `--refresh` and error rules), so it also keeps
+`${CODEX_HOME:-~/.codex}/.usage-cache` fresh.
 
 ```json
 { "schema": 1, "generated_at": 1792500000,
   "login_health": "known", "login_health_reason": null,
   "accounts": [
-    { "label": "work", "active": true, "login": "ok", "state": "ok",
+    { "label": "work", "provider": "claude", "active": true, "login": "ok", "state": "ok",
       "five_hour_pct": 23, "seven_day_pct": 64,
       "five_hour_reset_epoch": 1792515000, "seven_day_reset_epoch": 1792800000,
-      "fetched_at": 1792499900 } ] }
+      "fetched_at": 1792499900 },
+    { "label": "codex", "provider": "codex", "active": false, "login": null, "state": "ok",
+      "five_hour_pct": null, "seven_day_pct": 3,
+      "five_hour_reset_epoch": null, "seven_day_reset_epoch": 1792900000,
+      "fetched_at": 1792499950 } ] }
 ```
 
 - `login_health`: `known` or `unknown`. `unknown` means this run could not
   judge dead logins; `login_health_reason` says why: `node-missing`,
   `node-too-old`, `refresh-paused` or `refresh-lock-busy` (else `null`).
-- `accounts`: saved Claude accounts only, in label order. `active` is the `*`
-  marker.
+- `accounts`: saved Claude accounts (`provider` `claude`) in label order, then
+  at most one Codex row (`provider` `codex`). `active` is the `*` marker. Tell
+  the rows apart by `provider`, not `label`: a Claude account may also be
+  called `codex`.
 - `state`: the table's row state: `ok`, `dash`, `wait` or `relogin`.
+- The Codex row is there when a Codex login or its cache exists, even with no
+  saved Claude account. It is read-only: `active` is always `false` and
+  `login` is always `null`. Its `state` is `ok`, `dash`, `wait`, `expired`, or
+  `no-login` (no usable Codex login, numbers from the last cache). Its numbers
+  come from the Codex cache after the run; no token or account id is printed.
 - `login`: `ok` when `state` is `ok`; `re-login` when `state` is `relogin` and
   `login_health` is `known`; otherwise `unknown`. `re-login` means the refresh
   attempt failed, not proof of a dead login: an offline run (no network, 5xx)
@@ -331,6 +343,11 @@ bottom:
   **Switch**, **How to re-login**, **Delete** (`ccswitch delete`), and **Save
   login** on the active account when it is not saved yet (`ccswitch save` only
   ever snapshots the active login). Actions confirm first.
+  If Codex CLI is set up, a last row, `codex`, shows its usage read-only
+  (`lock` icon, or `circle-slash` when full; tooltip `Codex (read-only)`): its own percentages and reset
+  times, `No recent data` when its numbers are over 30 minutes old, and no
+  actions. It is never a switch target, never in **If you run out**, never
+  counted as saved and never in the status bar's `⇄`.
 - **Automation** — collapsed by default; the header says **On** or **Off**.
   **Auto-switch at 100%** (off by default): when
   the active account reaches 100% (5h or weekly), switch to the account in **If
@@ -355,6 +372,7 @@ bottom:
 | `arrow-swap` | you can switch here |
 | `circle-slash` | a limit is at 100% |
 | `warning` | needs re-login |
+| `lock` | Codex, read-only |
 
 Each icon has a tooltip. The icons are [Codicons](https://github.com/microsoft/vscode-codicons)
 by Microsoft (font CC BY 4.0, CSS MIT), vendored with their licences in
@@ -367,12 +385,16 @@ accounts' tokens alive and reports each login as `ok` or `re-login`. **How to
 re-login** opens a terminal with `claude` for a one-time `/login`, then you save
 the login. A failed check (timeout, an error) keeps the last known re-login
 marks. An older ccswitch without `--json` marks nothing as re-login.
+The Codex row reads `${CODEX_HOME:-~/.codex}/.usage-cache`, which the same
+`ccswitch usage --json` run refreshes; the sidebar only checks that
+`auth.json` exists and never reads it.
 
 **Team view** — set `claudeUsage.usageFile` to a shared snapshot (the CtrlA
 hub's `usage.json` format) to show shared seats instead of your own cache. The
 setting is machine-scoped, so a workspace's `.vscode/settings.json` cannot set
 it. A row whose label breaks ccswitch's label rule (letters, digits, `_` and
-`-`, no leading `-`) is dropped.
+`-`, no leading `-`) is dropped. A row with `provider` `codex` is the same
+read-only Codex row.
 
 If `ccswitch` is missing, the sidebar offers to install it (it runs this repo's
 `install.sh` in a visible terminal). `./uninstall.sh` removes the sidebar too.

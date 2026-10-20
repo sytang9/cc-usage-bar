@@ -18,8 +18,8 @@ mkdir -p "$PROBE-other"
 trap 'rm -rf "$SANDBOX" "$PROBE" "$PROBE-other"' EXIT
 mkdir -p "$SANDBOX/.claude"
 
-# The guard: a probe HOME (a throwaway dir) without the marker, and with the marker but HOME outside
-# TMPDIR, must both exit 2 and write nothing.
+# The guard: a probe HOME (a throwaway dir) without the marker, with the marker but HOME outside TMPDIR,
+# or with CODEX_HOME outside that HOME, must exit 2 and write nothing.
 guard_failed=0
 probe() {  # probe <name> <env...>
   local name="$1"; shift
@@ -34,8 +34,9 @@ probe() {  # probe <name> <env...>
 }
 probe "a run without the sandbox marker" HOME="$PROBE" CCUB_TEST_SANDBOX=
 probe "a HOME outside TMPDIR" HOME="$PROBE" CCUB_TEST_SANDBOX=1 TMPDIR="$PROBE-other"
+probe "a CODEX_HOME outside the sandbox HOME" HOME="$PROBE" CODEX_HOME="$PROBE-other" CCUB_TEST_SANDBOX=1
 
-HOME="$SANDBOX" CCUB_TEST_SANDBOX=1 node "$TEST_JS"
+HOME="$SANDBOX" CODEX_HOME="$SANDBOX/.codex" CCUB_TEST_SANDBOX=1 node "$TEST_JS"
 rc=$?
 [[ "$guard_failed" -eq 0 ]] || exit 1
 exit "$rc"
