@@ -700,6 +700,15 @@ const calls = () => (fs.existsSync(LOG) ? fs.readFileSync(LOG, 'utf8').trim().sp
             } finally { fs.writeFileSync(live, was); fs.writeFileSync(cache, wasCache); }
         });
 
+        await check('auto-switch: during the cooldown no lock is taken, so the watched folder stays still', async () => {
+            // Every window watches the accounts folder; a lock made and removed on each poll would wake them all.
+            autoReset(); fs.writeFileSync(STAMP, JSON.stringify({ last_switch: minsAgo(2) }));
+            const w = await win(), before = fs.statSync(ACC).mtimeMs;
+            await new Promise((ok) => setTimeout(ok, 20));
+            assert.strictEqual((await tryAuto(w)).skip, 'cooldown');
+            assert.strictEqual(fs.statSync(ACC).mtimeMs, before, 'no mkdir/rmdir in the accounts folder');
+        });
+
         await check('auto-switch: a failed switch shows the error and still starts the cooldown', async () => {
             autoReset(); fs.writeFileSync(SWITCH_RC, '1');
             const res = await tryAuto(await win());
