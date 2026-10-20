@@ -309,14 +309,16 @@ then **Developer: Reload Window**. It adds a sidebar icon and a status-bar item
 - **Save / delete** — **SAVE** appears on the current account's card when it is
   not saved yet (`ccswitch save` only ever snapshots the active login); the
   trash icon runs `ccswitch delete`. Both confirm first.
-- **re-login** — when `ccswitch usage` reports an account as `re-login`, its
-  card says so and clicking it opens a terminal with `claude` for a one-time
-  `/login`, then you SAVE. It runs `ccswitch usage` first so the account you
-  are leaving keeps its newest tokens.
+- **re-login** — when `ccswitch usage --json` reports an account's login as
+  `re-login`, its card says so and clicking it opens a terminal with `claude`
+  for a one-time `/login`, then you SAVE. It runs `ccswitch usage --json`
+  first so the account you are leaving keeps its newest tokens. An older
+  ccswitch without `--json` marks nothing.
 - **Auto-switch** (off by default, toggle in the sidebar, ⓘ explains it) — when
   the current account reaches 100% (5h or weekly), switch to the one with the
-  most headroom. Only saved, non-full accounts; never on data older than 15
-  minutes; at most once every 10 minutes.
+  most headroom. Only saved, non-full accounts with a working login and their
+  own data under 30 minutes old; never when the current account's own data is
+  older than 30 minutes; at most once every 10 minutes.
 - **Team view** — set `claudeUsage.usageFile` to a shared snapshot (the CtrlA
   hub's `usage.json` format) to show shared seats instead of your own cache.
 
