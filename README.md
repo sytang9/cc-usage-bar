@@ -300,12 +300,10 @@ account with its data age and re-login state.
 
 <p>
 <img src="vscode/screenshot-dark.png" width="320" alt="VS Code sidebar in Dark Modern, captured in VS Code: Active account 002 with an orange Session (5hr) bar at 90% and a blue Weekly (7 day) bar at 75% with their reset times; If you run out offering 004 with a Switch button; the Accounts list (4 saved) with the full account 001 open; and Automation on. Emails are blurred">
-<img src="vscode/screenshot-light.png" width="320" alt="The same sidebar in Light Modern, with no account open and Automation collapsed">
+<img src="vscode/screenshot-light.png" width="320" alt="The same sidebar in Light Modern, captured in VS Code. Emails are blurred">
 </p>
 
-The dark screenshot is a real VS Code capture (emails blurred). The light one is
-a headless render of the real panel with demo accounts and Light Modern colours
-filled in by hand.
+Both screenshots are real VS Code captures with live accounts (emails blurred).
 
 The sidebar follows your VS Code theme (Dark, Light and High Contrast) and the
 look of Claude Code's own Account & Usage view. Every section folds. Top to
