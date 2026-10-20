@@ -343,6 +343,11 @@ bottom:
   **Switch**, **How to re-login**, **Delete** (`ccswitch delete`), and **Save
   login** on the active account when it is not saved yet (`ccswitch save` only
   ever snapshots the active login). Actions confirm first.
+  If Codex CLI is set up, a last row, `codex`, shows its usage read-only
+  (`lock` icon, tooltip `Codex (read-only)`): its own percentages and reset
+  times, `No recent data` when its numbers are over 30 minutes old, and no
+  actions. It is never a switch target, never in **If you run out**, never
+  counted as saved and never in the status bar's `⇄`.
 - **Automation** — collapsed by default; the header says **On** or **Off**.
   **Auto-switch at 100%** (off by default): when
   the active account reaches 100% (5h or weekly), switch to the account in **If
@@ -367,6 +372,7 @@ bottom:
 | `arrow-swap` | you can switch here |
 | `circle-slash` | a limit is at 100% |
 | `warning` | needs re-login |
+| `lock` | Codex, read-only |
 
 Each icon has a tooltip. The icons are [Codicons](https://github.com/microsoft/vscode-codicons)
 by Microsoft (font CC BY 4.0, CSS MIT), vendored with their licences in
@@ -379,12 +385,16 @@ accounts' tokens alive and reports each login as `ok` or `re-login`. **How to
 re-login** opens a terminal with `claude` for a one-time `/login`, then you save
 the login. A failed check (timeout, an error) keeps the last known re-login
 marks. An older ccswitch without `--json` marks nothing as re-login.
+The Codex row reads `${CODEX_HOME:-~/.codex}/.usage-cache`, which the same
+`ccswitch usage --json` run refreshes; the sidebar only checks that
+`auth.json` exists and never reads it.
 
 **Team view** — set `claudeUsage.usageFile` to a shared snapshot (the CtrlA
 hub's `usage.json` format) to show shared seats instead of your own cache. The
 setting is machine-scoped, so a workspace's `.vscode/settings.json` cannot set
 it. A row whose label breaks ccswitch's label rule (letters, digits, `_` and
-`-`, no leading `-`) is dropped.
+`-`, no leading `-`) is dropped. A row with `provider` `codex` is the same
+read-only Codex row.
 
 If `ccswitch` is missing, the sidebar offers to install it (it runs this repo's
 `install.sh` in a visible terminal). `./uninstall.sh` removes the sidebar too.
