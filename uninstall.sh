@@ -168,6 +168,21 @@ handle_accounts() {
   fi
 }
 
+VSCODE_EXTENSION_ID="cc-usage-bar.claude-usage"
+
+# remove_vscode_extension: the sidebar (install.sh --vscode) is a front end for
+# ccswitch, so it goes with it. Only when the `code` CLI is here and lists it.
+remove_vscode_extension() {
+  command -v code >/dev/null 2>&1 || return 0
+  if code --list-extensions 2>/dev/null | grep -qx "$VSCODE_EXTENSION_ID"; then
+    if code --uninstall-extension "$VSCODE_EXTENSION_ID" >/dev/null 2>&1; then
+      echo "Removed the VS Code sidebar ($VSCODE_EXTENSION_ID)."
+    else
+      echo "Warning: could not remove the VS Code sidebar; run: code --uninstall-extension $VSCODE_EXTENSION_ID" >&2
+    fi
+  fi
+}
+
 main() {
   if [[ "$PRINT_ONLY" == "1" ]]; then
     echo "Would remove:"
@@ -175,6 +190,7 @@ main() {
     echo "  $CLAUDE_DIR/ccswitch"
     echo "  $BIN_DIR/ccswitch (only if it symlinks to the above)"
     echo "  the .statusLine key in $SETTINGS_FILE (only if it points at cc-usage-bar)"
+    echo "  the VS Code sidebar $VSCODE_EXTENSION_ID (only if the 'code' CLI lists it)"
     if [[ "$PURGE_ACCOUNTS" == "1" ]]; then
       echo "Would DELETE (after interactive confirmation): $ACCOUNTS_DIR"
     else
@@ -190,6 +206,7 @@ main() {
   remove_symlink
   remove_statusline statusLine "$OUR_STATUSLINE_COMMAND"
   remove_statusline subagentStatusLine "$OUR_SUBAGENT_STATUSLINE_COMMAND"
+  remove_vscode_extension
   handle_accounts
   report_ccw_function
 

@@ -1,0 +1,64 @@
+{
+  "name": "claude-usage",
+  "displayName": "Claude Usage (ccswitch)",
+  "description": "All your ccswitch accounts in the sidebar: 5h/weekly usage, most headroom, one-click switch, auto-switch",
+  "version": "1.0.1",
+  "publisher": "cc-usage-bar",
+  "license": "MIT",
+  "repository": "https://github.com/sytang9/cc-usage-bar",
+  "engines": {
+    "vscode": "^1.80.0"
+  },
+  "extensionKind": [
+    "workspace"
+  ],
+  "main": "extension.js",
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "claudeUsage",
+          "title": "Claude Usage",
+          "icon": "icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "claudeUsage": [
+        {
+          "type": "webview",
+          "id": "claudeUsage.view",
+          "name": "Accounts"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "claudeUsage.refresh",
+        "title": "Claude Usage: Refresh"
+      },
+      {
+        "command": "claudeUsage.toggleAutoSwitch",
+        "title": "Claude Usage: Toggle auto-switch to most headroom"
+      }
+    ],
+    "configuration": {
+      "title": "Claude Usage",
+      "properties": {
+        "claudeUsage.autoSwitch": {
+          "type": "boolean",
+          "default": false,
+          "description": "When your current seat hits 100% (5-hour or weekly), switch Claude Code to the seat with most headroom via ccswitch. Running sessions still need a restart."
+        },
+        "claudeUsage.usageFile": {
+          "type": "string",
+          "default": "",
+          "description": "Leave empty to use ccswitch's own usage cache. Set to a team snapshot (CtrlA hub usage.json) to show shared seats instead."
+        }
+      }
+    }
+  }
+}

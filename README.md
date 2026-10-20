@@ -32,6 +32,9 @@ block above is the plain-text equivalent.
 - **`ccswitch usage`** — an all-account monitor: polls the 5h/weekly usage
   for every saved account so you can see at a glance which one has the most
   headroom, then optionally switch straight to it.
+- **`vscode/`** (optional, `./install.sh --vscode`) — the same accounts in a
+  VS Code sidebar and status bar: usage bars, which account has the most
+  headroom, one-click switching, and an opt-in auto-switch.
 
 ## Requirements
 
@@ -250,6 +253,53 @@ While paused, an account whose stored token has expired shows `rate-limited`
 rather than being refreshed. The pause is a flag file under
 `~/.claude/accounts/`, so it survives across runs until you resume.
 
+## Usage — the VS Code sidebar
+
+Optional. From a VS Code terminal (works over Remote-SSH: the extension runs
+on the remote host, next to `ccswitch`):
+
+```
+./install.sh --vscode
+```
+
+then **Developer: Reload Window**. It adds a sidebar icon and a status-bar item
+(`current work · 1/3 free · most headroom personal (10%/5%)`).
+
+<img src="vscode/screenshot.png" width="320" alt="VS Code sidebar: one card per ccswitch account with 5h and weekly usage bars, CURRENT and MOST HEADROOM badges, a re-login flag and the auto-switch toggle">
+
+- **Usage** — one card per saved account, read from `ccswitch`'s own usage
+  cache (`~/.claude/accounts/<label>/.usage-cache`); the sidebar runs
+  `ccswitch usage --no-switch` every 10 minutes (the cache TTL) to refresh it,
+  which also keeps idle accounts' tokens alive. Bars use the monitor's colours
+  (green to 59%, amber to 85%, red above). The account you are on is marked
+  **CURRENT**, the one with the lowest `max(5h, weekly)` **MOST HEADROOM**.
+- **Switch** — click an account's name. It runs `ccswitch <label>`; open Claude
+  Code sessions use the new account; restart open Claude Code tabs to move
+  them over (see Caveats).
+- **Save / delete** — **SAVE** appears on the current account's card when it is
+  not saved yet (`ccswitch save` only ever snapshots the active login); the
+  trash icon runs `ccswitch delete`. Both confirm first.
+- **re-login** — when `ccswitch usage` reports an account as `re-login`, its
+  card says so and clicking it opens a terminal with `claude` for a one-time
+  `/login`, then you SAVE. It runs `ccswitch usage` first so the account you
+  are leaving keeps its newest tokens.
+- **Auto-switch** (off by default, toggle in the sidebar, ⓘ explains it) — when
+  the current account reaches 100% (5h or weekly), switch to the one with the
+  most headroom. Only saved, non-full accounts; never on data older than 15
+  minutes; at most once every 10 minutes.
+- **Team view** — set `claudeUsage.usageFile` to a shared snapshot (the CtrlA
+  hub's `usage.json` format) to show shared seats instead of your own cache.
+
+If `ccswitch` is missing, the sidebar offers to install it (it runs this repo's
+`install.sh` in a visible terminal). `./uninstall.sh` removes the sidebar too.
+The popup design is Jens Duttke's
+[usage-monitor-for-claude](https://github.com/jens-duttke/usage-monitor-for-claude)
+(MIT, `vscode/ui/LICENSE`), used unchanged; the sidebar only restyles it.
+
+To change it: edit `vscode/`, bump `version` in `vscode/package.json`, run
+`vscode/build.sh` (rebuilds `vscode/claude-usage.vsix`), then
+`./install.sh --vscode` again.
+
 ## Caveats / honest limitations
 
 - **Switching requires restarting Claude Code.** A running session caches
@@ -284,8 +334,9 @@ Run every test suite:
 bash tests/run_all.sh
 ```
 
-Six self-contained bash suites (statusline, subagent rows, ccswitch,
-ccswitch usage, the Codex row, installer). No test framework, no network:
+Seven self-contained suites (statusline, subagent rows, ccswitch,
+ccswitch usage, the Codex row, installer, VS Code sidebar — the last one is
+node, run from a bash wrapper). No test framework, no network:
 each suite sandboxes `HOME` under `mktemp -d` and the usage suites answer
 HTTP from a stub `curl` on `PATH`, so nothing ever touches your real
 `~/.claude`, `~/.codex`, or either vendor's API. CI runs the same command on
@@ -294,7 +345,7 @@ every push and pull request.
 Lint every script (CI runs the same command):
 
 ```
-shellcheck --severity=warning --shell=bash ccswitch statusline-usage.sh install.sh uninstall.sh tests/*.sh
+shellcheck --severity=warning --shell=bash ccswitch statusline-usage.sh install.sh uninstall.sh tests/*.sh vscode/build.sh
 ```
 
 ## License

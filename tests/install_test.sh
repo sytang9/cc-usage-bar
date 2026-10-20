@@ -36,6 +36,20 @@ run_install() {
   EXIT_CODE=$?
 }
 
+# A stub `code` (VS Code CLI) shadows any real one for the WHOLE run: uninstall.sh
+# asks `code` about the sidebar, and on a developer machine the real CLI would
+# uninstall the developer's own extension. The stub only records its arguments.
+CODE_STUB_DIR="$(mktemp -d "${TMPDIR:-/tmp}/cc-usage-bar-install-test-code.XXXXXX")"
+CODE_LOG="$CODE_STUB_DIR/code.log"
+cat >"$CODE_STUB_DIR/code" <<STUB
+#!/usr/bin/env bash
+echo "\$*" >>"$CODE_LOG"
+[[ "\$1" == "--list-extensions" ]] && [[ -n "\${CODE_STUB_LISTS:-}" ]] && echo "\$CODE_STUB_LISTS"
+exit 0
+STUB
+chmod +x "$CODE_STUB_DIR/code"
+export PATH="$CODE_STUB_DIR:$PATH"
+
 main() {
   if [[ ! -f "$TARGET" ]]; then
     echo "FAIL: target script not found: $TARGET"
@@ -404,10 +418,79 @@ main() {
   fi
   rm -rf "$home14"
 
+  # --- Case 15: without --vscode the installer never touches VS Code ----------
+  local home15
+  home15="$(make_sandbox)"
+  : >"$CODE_LOG"
+  run_install "$home15" "n"
+  if [[ "$EXIT_CODE" -eq 0 ]] && [[ ! -s "$CODE_LOG" ]]; then
+    pass "case15 plain install does not call the VS Code CLI"
+  else
+    fail "case15 plain install called code (exit=$EXIT_CODE log=$(cat "$CODE_LOG")): $OUT"
+  fi
+  rm -rf "$home15"
+
+  # --- Case 16: --vscode installs the bundled .vsix through the code CLI -----
+  local home16
+  home16="$(make_sandbox)"
+  : >"$CODE_LOG"
+  run_install "$home16" "n" --vscode
+  if [[ "$EXIT_CODE" -eq 0 ]] \
+    && grep -qF -- "--install-extension $REPO_DIR/vscode/claude-usage.vsix --force" "$CODE_LOG" \
+    && [[ -x "$home16/.claude/ccswitch" ]] \
+    && [[ -f "$REPO_DIR/vscode/claude-usage.vsix" ]]; then
+    pass "case16 --vscode installs vscode/claude-usage.vsix and still installs the scripts"
+  else
+    fail "case16 --vscode wrong (exit=$EXIT_CODE log=$(cat "$CODE_LOG")): $OUT"
+  fi
+  rm -rf "$home16"
+
+  # --- Case 17: --vscode without a code CLI is a hint, never a failure --------
+  local home17 fake_bin17
+  home17="$(make_sandbox)"
+  fake_bin17="$(mktemp -d "${TMPDIR:-/tmp}/cc-usage-bar-install-test-bin.XXXXXX")"
+  for tool in bash mkdir cp chmod mktemp mv grep cat dirname ln readlink jq curl node; do
+    tool_path="$(command -v "$tool" 2>/dev/null || true)"
+    [[ -n "$tool_path" ]] && ln -sf "$tool_path" "$fake_bin17/$tool"
+  done
+  OUT="$(HOME="$home17" SHELL=/bin/bash PATH="$fake_bin17" bash "$TARGET" --vscode <<<"n" 2>&1)"
+  EXIT_CODE=$?
+  if [[ "$EXIT_CODE" -eq 0 ]] \
+    && printf '%s' "$OUT" | grep -q "'code' (VS Code CLI) not found" \
+    && [[ -x "$home17/.claude/ccswitch" ]]; then
+    pass "case17 --vscode with no code CLI prints a hint and installs the scripts"
+  else
+    fail "case17 --vscode without code mishandled (exit=$EXIT_CODE): $OUT"
+  fi
+  rm -rf "$home17" "$fake_bin17"
+
+  # --- Case 18: uninstall removes the sidebar only when code lists it --------
+  local home18
+  home18="$(make_sandbox)"
+  run_install "$home18" "n"
+  : >"$CODE_LOG"
+  OUT="$(HOME="$home18" SHELL=/bin/bash bash "$REPO_DIR/uninstall.sh" <<<"" 2>&1)"
+  if ! grep -q -- "--uninstall-extension" "$CODE_LOG"; then
+    pass "case18a uninstall leaves VS Code alone when the sidebar is not installed"
+  else
+    fail "case18a uninstall tried to remove an extension that is not installed: $(cat "$CODE_LOG")"
+  fi
+  run_install "$home18" "n"
+  : >"$CODE_LOG"
+  OUT="$(HOME="$home18" SHELL=/bin/bash CODE_STUB_LISTS="cc-usage-bar.claude-usage" bash "$REPO_DIR/uninstall.sh" <<<"" 2>&1)"
+  if grep -qx -- "--uninstall-extension cc-usage-bar.claude-usage" "$CODE_LOG" \
+    && printf '%s' "$OUT" | grep -q "Removed the VS Code sidebar"; then
+    pass "case18b uninstall removes the installed sidebar"
+  else
+    fail "case18b uninstall did not remove the sidebar (log=$(cat "$CODE_LOG")): $OUT"
+  fi
+  rm -rf "$home18"
+
   echo
   echo "----------------------------------------"
   echo "Passed: $PASS_COUNT  Failed: $FAIL_COUNT"
 
+  rm -rf "$CODE_STUB_DIR"
   if [[ "$FAIL_COUNT" -gt 0 ]]; then
     exit 1
   fi

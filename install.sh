@@ -2,7 +2,8 @@
 # install.sh — installs cc-usage-bar (statusline-usage.sh, subagent-statusline.sh,
 # ccswitch) into $HOME/.claude, wires up the statusLine and subagentStatusLine
 # entries in $HOME/.claude/settings.json,
-# and optionally adds a `ccw` shell shortcut.
+# and optionally adds a `ccw` shell shortcut. With --vscode it also installs the
+# VS Code sidebar (vscode/claude-usage.vsix) through the `code` CLI.
 #
 # Safe to re-run: every step is idempotent. settings.json is backed up once on
 # the first run that finds an existing file (never overwritten); the ccw shell
@@ -205,7 +206,30 @@ offer_ccw_function() {
   esac
 }
 
+# install_vscode_extension: opt-in (--vscode). Uses the `code` CLI, which exists
+# in a VS Code terminal -- including one attached over Remote-SSH, where the
+# extension then runs on the remote host next to ccswitch. Never fatal: the
+# scripts above are already installed, so a missing `code` is a hint, not an error.
+install_vscode_extension() {
+  local vsix="$SCRIPT_DIR/vscode/claude-usage.vsix"
+  if ! command -v code >/dev/null 2>&1; then
+    echo "Note: 'code' (VS Code CLI) not found -- run this from a VS Code terminal to install the sidebar:"
+    echo "  code --install-extension \"$vsix\" --force"
+    return 0
+  fi
+  if code --install-extension "$vsix" --force; then
+    echo "Installed the VS Code sidebar. Reload the VS Code window (Developer: Reload Window) to see it."
+  else
+    echo "Warning: 'code --install-extension' failed; the ccswitch scripts are installed regardless." >&2
+  fi
+}
+
 main() {
+  local want_vscode=0
+  if [[ "${1:-}" == "--vscode" ]]; then
+    want_vscode=1
+    shift
+  fi
   if [[ "${1:-}" == "--print-only" ]]; then
     print_snippets
     exit 0
@@ -224,6 +248,10 @@ main() {
   echo
 
   echo "To undo all of this later: ./uninstall.sh"
+
+  if [[ "$want_vscode" -eq 1 ]]; then
+    install_vscode_extension
+  fi
 
   offer_ccw_function
 }
