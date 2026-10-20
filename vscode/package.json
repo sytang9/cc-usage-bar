@@ -57,6 +57,7 @@
         "claudeUsage.usageFile": {
           "type": "string",
           "default": "",
+          "scope": "machine",
           "description": "Leave empty to use ccswitch's own usage cache. Set to a team snapshot (CtrlA hub usage.json) to show shared seats instead."
         }
       }

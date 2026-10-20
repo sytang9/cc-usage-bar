@@ -34,7 +34,9 @@ function readSnapshot() {
     if (usageFile()) {
         const f = usageFile(), doc = JSON.parse(fs.readFileSync(f, 'utf8'));
         const fileAge = doc.generated_at ?? Math.floor(fs.statSync(f).mtimeMs / 1000);
-        return { accounts: (doc.accounts || []).map((a) => ({ ...a, fetched_at: a.fetched_at ?? fileAge })) };
+        // Team labels are input: a row that breaks ccswitch's label rule never reaches a path.join or ccswitch.
+        const rows = (doc.accounts || []).filter((a) => a && isLabel(a.label));
+        return { accounts: rows.map((a) => ({ ...a, fetched_at: a.fetched_at ?? fileAge })) };
     }
     return { accounts: savedLabels().map((label) => {
         const c = readJson(path.join(ACCOUNTS, label, '.usage-cache')) || {};

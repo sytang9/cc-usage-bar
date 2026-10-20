@@ -246,6 +246,16 @@ const calls = () => (fs.existsSync(LOG) ? fs.readFileSync(LOG, 'utf8').trim().sp
         } finally { delete cfg.usageFile; }
     });
 
+    await check('team file: rows whose label breaks the label rule are dropped; usageFile is machine-scoped', () => {
+        const tf = path.join(HOME, 'team.json');
+        fs.writeFileSync(tf, JSON.stringify({ generated_at: now, accounts: ['../../etc', '-h', 'a.b', 42, null, {}, 't1'].map((label) =>
+            ({ label, provider: 'claude', state: 'ok', five_pct: 1, week_pct: 1 })) }));
+        cfg.usageFile = tf;
+        try { assert.deepStrictEqual(e.readAccounts().accounts.map((a) => a.label), ['t1']); } finally { delete cfg.usageFile; }
+        const p = require('../vscode/package.json').contributes.configuration.properties['claudeUsage.usageFile'];
+        assert.strictEqual(p.scope, 'machine', 'a workspace .vscode/settings.json cannot point it at a crafted file');
+    });
+
     await check('B5 checkLogins reads usage --json: re-login marks, ok clears, unknown keeps', async () => {
         e.relogin.clear(); e.relogin.add('personal'); e.relogin.add('spare'); fs.rmSync(LOG, { force: true });
         usageReply(usageDoc({ personal: 're-login', spare: 'unknown', work: 'ok' }));
