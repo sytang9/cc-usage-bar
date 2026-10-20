@@ -246,25 +246,37 @@ after the Claude accounts:
 
 `ccswitch usage --json [--refresh]` prints one JSON document on stdout and
 nothing else (warnings stay on stderr). It implies `--no-switch`: it never
-prompts and never switches. The Codex row is not emitted and its request is
-skipped.
+prompts and never switches. It runs the Codex step exactly as the table does
+(same cache, `--refresh` and error rules), so it also keeps
+`${CODEX_HOME:-~/.codex}/.usage-cache` fresh.
 
 ```json
 { "schema": 1, "generated_at": 1792500000,
   "login_health": "known", "login_health_reason": null,
   "accounts": [
-    { "label": "work", "active": true, "login": "ok", "state": "ok",
+    { "label": "work", "provider": "claude", "active": true, "login": "ok", "state": "ok",
       "five_hour_pct": 23, "seven_day_pct": 64,
       "five_hour_reset_epoch": 1792515000, "seven_day_reset_epoch": 1792800000,
-      "fetched_at": 1792499900 } ] }
+      "fetched_at": 1792499900 },
+    { "label": "codex", "provider": "codex", "active": false, "login": null, "state": "ok",
+      "five_hour_pct": null, "seven_day_pct": 3,
+      "five_hour_reset_epoch": null, "seven_day_reset_epoch": 1792900000,
+      "fetched_at": 1792499950 } ] }
 ```
 
 - `login_health`: `known` or `unknown`. `unknown` means this run could not
   judge dead logins; `login_health_reason` says why: `node-missing`,
   `node-too-old`, `refresh-paused` or `refresh-lock-busy` (else `null`).
-- `accounts`: saved Claude accounts only, in label order. `active` is the `*`
-  marker.
+- `accounts`: saved Claude accounts (`provider` `claude`) in label order, then
+  at most one Codex row (`provider` `codex`). `active` is the `*` marker. Tell
+  the rows apart by `provider`, not `label`: a Claude account may also be
+  called `codex`.
 - `state`: the table's row state: `ok`, `dash`, `wait` or `relogin`.
+- The Codex row is there when a Codex login or its cache exists, even with no
+  saved Claude account. It is read-only: `active` is always `false` and
+  `login` is always `null`. Its `state` is `ok`, `dash`, `wait`, `expired`, or
+  `no-login` (no usable Codex login, numbers from the last cache). Its numbers
+  come from the Codex cache after the run; no token or account id is printed.
 - `login`: `ok` when `state` is `ok`; `re-login` when `state` is `relogin` and
   `login_health` is `known`; otherwise `unknown`. `re-login` means the refresh
   attempt failed, not proof of a dead login: an offline run (no network, 5xx)

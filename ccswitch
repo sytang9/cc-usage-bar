@@ -1568,13 +1568,26 @@ usage_json_login() {
   fi
 }
 
-# usage_json_document <rows> <login_health> <reason> -> prints the `usage --json`
-# document. <rows> is cmd_usage's "label|marker|state|p5|p7|r5|r7" lines;
-# <reason> empty means JSON null. The numbers come from each account's
-# .usage-cache AFTER the run, so a re-login row still carries its last numbers
-# and their fetched_at.
+# codex_json_state -> the Codex row's state for `usage --json`: the table's
+# codex_usage_row state (same cache, --refresh and error rules), or "no-login"
+# when only a cache is left. Non-zero with no output when there is neither.
+codex_json_state() {
+  local row
+  if row="$(codex_usage_row "$USAGE_BYPASS_CACHE")"; then
+    echo "${row%%|*}"
+    return 0
+  fi
+  [[ -f "$CODEX_USAGE_CACHE_FILE" ]] || return 1
+  echo no-login
+}
+
+# usage_json_document <rows> <login_health> <reason> <codex_state> -> prints the
+# `usage --json` document. <rows> is cmd_usage's "label|marker|state|p5|p7|r5|r7"
+# lines; <reason> empty means JSON null; <codex_state> empty means no Codex row.
+# The numbers come from each account's .usage-cache AFTER the run, so a re-login
+# row still carries its last numbers and their fetched_at.
 usage_json_document() {
-  local rows="$1" login_health="$2" reason="$3"
+  local rows="$1" login_health="$2" reason="$3" codex_state="$4"
   local label marker state login active objs=""
   while IFS='|' read -r label marker state _ _ _ _; do
     [[ -z "$label" ]] && continue
@@ -1583,13 +1596,24 @@ usage_json_document() {
     [[ "$marker" == "*"* ]] && active=true
     objs+="$(jq -cn --arg label "$label" --argjson active "$active" --arg login "$login" \
       --arg state "$state" --argjson cache "$(read_usage_cache "$label")" \
-      '($cache | objects) // {} | . as $cache | {label: $label, active: $active, login: $login, state: $state,
+      '($cache | objects) // {} | . as $cache | {label: $label, provider: "claude", active: $active, login: $login, state: $state,
         five_hour_pct: ($cache.five_hour_pct // null),
         seven_day_pct: ($cache.seven_day_pct // null),
         five_hour_reset_epoch: ($cache.five_hour_reset_epoch // null),
         seven_day_reset_epoch: ($cache.seven_day_reset_epoch // null),
         fetched_at: ($cache.fetched_at // null)}')"$'\n'
   done <<<"$rows"
+  # Read-only and never a switch target: no login verdict. Explicit fields only,
+  # so nothing else from the cache reaches the output; fetched_at 0 is the 429
+  # path's "never fetched".
+  if [[ -n "$codex_state" ]]; then
+    objs+="$(read_codex_usage_cache | jq -c --arg state "$codex_state" \
+      '{label: "codex", provider: "codex", active: false, login: null, state: $state,
+        five_hour_pct: (.five_hour_pct // null), seven_day_pct: (.seven_day_pct // null),
+        five_hour_reset_epoch: (.five_hour_reset_epoch // null),
+        seven_day_reset_epoch: (.seven_day_reset_epoch // null),
+        fetched_at: ((.fetched_at | numbers | select(. > 0)) // null)}')"$'\n'
+  fi
   printf '%s' "$objs" | jq -s --arg health "$login_health" --arg reason "$reason" --argjson now "$(date +%s)" \
     '{schema: 1, generated_at: $now, login_health: $health,
       login_health_reason: (if $reason == "" then null else $reason end), accounts: .}'
@@ -1617,7 +1641,7 @@ cmd_usage() {
   labels="$(saved_labels)"
   if [[ -z "$labels" ]]; then
     if [[ "$json" == "1" ]]; then
-      usage_json_document "" "$login_health" "$reason"
+      usage_json_document "" "$login_health" "$reason" "$(codex_json_state)"
       return 0
     fi
     echo "no saved accounts -- run: ccswitch save <label>"
@@ -1718,9 +1742,10 @@ cmd_usage() {
   local headroom_label
   headroom_label="$(echo "$headroom_lookup" | find_headroom_label)"
 
-  # --json stops here: no Codex row (its GET is skipped), no table, no prompt.
+  # --json stops here with the Codex row added after the headroom pick: no
+  # table, no prompt.
   if [[ "$json" == "1" ]]; then
-    usage_json_document "$rows" "$login_health" "$reason"
+    usage_json_document "$rows" "$login_health" "$reason" "$(codex_json_state)"
     return 0
   fi
 
