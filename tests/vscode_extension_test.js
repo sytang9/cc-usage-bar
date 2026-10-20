@@ -711,6 +711,17 @@ const calls = () => (fs.existsSync(LOG) ? fs.readFileSync(LOG, 'utf8').trim().sp
             assert.ok(!fs.existsSync(LOCK));
         });
 
+        await check('auto-switch: an error (stamp not writable) is shown, not dropped, and the lock is released', async () => {
+            autoReset(); fs.mkdirSync(STAMP);  // a directory where the stamp file goes
+            try {
+                const res = await tryAuto(await win());
+                assert.strictEqual(res.skip, 'error');
+                assert.deepStrictEqual(calls(), [], 'no stamp, no switch');
+                assert.ok(said.some((t) => t.startsWith('ERROR Auto-switch failed: ')), said.join('|'));
+                assert.ok(!fs.existsSync(LOCK));
+            } finally { for (const f of fs.readdirSync(ACC)) if (f.startsWith('.autoswitch.json.')) fs.rmSync(path.join(ACC, f)); }
+        });
+
         await check('auto-switch: nothing before the first login check, or after a failed one', async () => {
             autoReset();
             const fresh = load();

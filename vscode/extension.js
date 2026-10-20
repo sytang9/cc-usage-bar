@@ -395,8 +395,13 @@ async function autoSwitchOnce(cap, state) {
     } finally { fs.rmSync(AUTO_LOCK, { recursive: true, force: true }); }
 }
 
+// Polls call this without waiting, so an error (an unreadable file, a stamp it cannot write) is shown here.
 async function autoSwitch(cap, state, onDone) {
-    const res = await autoSwitchOnce(cap, state);
+    let res;
+    try { res = await autoSwitchOnce(cap, state); } catch (err) {
+        vscode.window.showErrorMessage('Auto-switch failed: ' + (err && err.message || err));
+        return { skip: 'error' };
+    }
     if (!res.r) return res;
     if (!res.r.ok) { vscode.window.showErrorMessage(`Auto-switch to ${res.to} failed: ` + res.r.msg); return res; }
     onDone();
