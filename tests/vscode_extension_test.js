@@ -7,6 +7,11 @@ const path = require('path');
 const Module = require('module');
 
 const HOME = process.env.HOME;
+// This file writes ~/.claude.json and ~/.claude/ccswitch: refuse unless vscode_extension_test.sh made a sandbox HOME.
+if (process.env.CCUB_TEST_SANDBOX !== '1' || !path.resolve(HOME || '/').startsWith(path.resolve(require('os').tmpdir()) + path.sep)) {
+    console.error('Refusing to run: this test writes into $HOME. Run it with: bash tests/vscode_extension_test.sh');
+    process.exit(2);
+}
 const ACC = path.join(HOME, '.claude', 'accounts');
 const LOG = path.join(HOME, 'ccswitch.log');
 const now = Math.floor(Date.now() / 1000);
