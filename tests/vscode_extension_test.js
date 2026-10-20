@@ -385,6 +385,7 @@ const calls = () => (fs.existsSync(LOG) ? fs.readFileSync(LOG, 'utf8').trim().sp
         assert.ok(html.includes('<link rel="stylesheet" href="https://res.test' + path.join(e.CODICONS, 'codicon.css') + '">'));
         for (const f of ['codicon.css', 'codicon.ttf', 'LICENSE']) assert.ok(fs.existsSync(path.join(e.CODICONS, f)), f);
         assert.match(fs.readFileSync(path.join(e.CODICONS, 'codicon.css'), 'utf8'), /url\("\.\/codicon\.ttf/, 'the font loads from next to the css');
+        assert.ok(fs.readFileSync(path.join(__dirname, '..', 'README.md'), 'utf8').includes('`@vscode/codicons` 0.0.46-24'), 'README names the vendored version');
         const src = fs.readFileSync(file, 'utf8');
         assert.match(src, /localResourceRoots: \[vscode\.Uri\.file\(CODICONS\)\]/, 'the webview may load the codicons folder and nothing else');
     });
@@ -611,6 +612,7 @@ const calls = () => (fs.existsSync(LOG) ? fs.readFileSync(LOG, 'utf8').trim().sp
         assert.ok(!('description' in p), 'markdownDescription replaces description');
         assert.match(p.markdownDescription, /without asking/);
         assert.match(p.markdownDescription, /100%/);
+        assert.ok(!/skips/.test(p.markdownDescription), 'no door skips the dialog any more');
     });
 
     await check('the toggle command and the panel both go through setAutoSwitch', () => {
