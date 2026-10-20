@@ -8,7 +8,7 @@ const path = require('path');
 const { execFile } = require('child_process');
 
 const usageFile = () => vscode.workspace.getConfiguration('claudeUsage').get('usageFile') || '';  // '' = ccswitch's cache
-const POLL_MS = 60 * 1000;  // keeps "Updated X ago", reset times and the stale warning current
+const POLL_MS = 60 * 1000;  // keeps reset times and the per-account data age current
 const HOME = require('os').homedir();
 const CCSWITCH = path.join(HOME, '.claude', 'ccswitch');
 const ACCOUNTS = path.join(HOME, '.claude', 'accounts');
@@ -24,18 +24,31 @@ function activeLabel() {
     return savedLabels().find((l) => emailOf(l) === email) || email.split('@')[0];
 }
 
-// Usage snapshot in one shape, from either source: { generated_at, accounts: [{ label, five_pct, week_pct, ... }] }.
-// ccswitch's cache: one file per saved account; "updated" is the OLDEST fetch, so staleness is never understated.
+// Usage snapshot in one shape, from either source: { accounts: [{ label, state, fetched_at, five_pct, week_pct, ... }] }.
+// Every account carries its OWN fetched_at; there is no global age. ccswitch's cache: one file per saved account.
+// Team file: it has no per-account age, so an account's age is the file's generated_at (else its mtime).
+const FRESH_SECS = 1800;  // data younger than 30 min is fresh (ccswitch's cache TTL is 10 min)
 function readSnapshot() {
-    if (usageFile()) return JSON.parse(fs.readFileSync(usageFile(), 'utf8'));
-    const accounts = savedLabels().map((label) => {
+    if (usageFile()) {
+        const f = usageFile(), doc = JSON.parse(fs.readFileSync(f, 'utf8'));
+        const fileAge = doc.generated_at ?? Math.floor(fs.statSync(f).mtimeMs / 1000);
+        return { accounts: (doc.accounts || []).map((a) => ({ ...a, fetched_at: a.fetched_at ?? fileAge })) };
+    }
+    return { accounts: savedLabels().map((label) => {
         const c = readJson(path.join(ACCOUNTS, label, '.usage-cache')) || {};
-        return { label, provider: 'claude', state: c.fetched_at ? 'ok' : 'no data yet', fetched_at: c.fetched_at,
+        return { label, provider: 'claude', state: c.fetched_at ? 'ok' : 'no data yet', fetched_at: c.fetched_at ?? null,
             five_pct: c.five_hour_pct ?? null, week_pct: c.seven_day_pct ?? null,
             five_reset_epoch: c.five_hour_reset_epoch ?? null, week_reset_epoch: c.seven_day_reset_epoch ?? null };
-    });
-    const times = accounts.map((a) => a.fetched_at).filter(Boolean);
-    return { generated_at: times.length ? Math.min(...times) : null, accounts };
+    }) };
+}
+
+const isFresh = (a, now) => a.state === 'ok' && a.fetched_at != null && now - a.fetched_at < FRESH_SECS;
+const loadOf = (a) => Math.max(...[a.five_pct, a.week_pct].filter((v) => v != null));  // a missing window is not full
+
+// A switch target: saved, login not dead, its own data fresh, neither window full, not the active account, Claude only.
+function qualifies(a, ctx) {
+    if ((a.provider || 'claude') !== 'claude' || (a.five_pct == null && a.week_pct == null)) return false;
+    return a.label !== ctx.you && ctx.isSaved(a.label) && !ctx.relogin.has(a.label) && isFresh(a, ctx.now) && loadOf(a) < 100;
 }
 
 // HTML-escape a label before it goes into innerHTML or a quoted attribute. Labels come from folder names, or from
@@ -73,39 +86,40 @@ function bar(key, label, pct, epoch, period) {
         reset_text: epoch ? resetText(epoch) : '', dividers: epoch ? dividers(epoch, period) : [], marker_rel: elapsed };
 }
 
-// Load = max(5h, weekly) (the CtrlA hub's rules);
-// free = load < 50%; most headroom = lowest load among readable Claude seats (codex never counts).
-function capacity(u) {
+// Load = max(5h, weekly) (the CtrlA hub's rules); free = load < 50%; best = lowest load among qualifying accounts.
+function capacity(u, ctx) {
     const seats = u.accounts.filter((a) => (a.provider || 'claude') === 'claude' && (a.five_pct != null || a.week_pct != null));
-    const load = (a) => Math.max(...[a.five_pct, a.week_pct].filter((v) => v != null));
-    const best = seats.filter((a) => a.state === 'ok').sort((x, y) => load(x) - load(y))[0];
-    return { free: seats.filter((a) => load(a) < 50).length, total: seats.length,
-        best: best && { label: best.label, five: best.five_pct, week: best.week_pct },
-        loads: Object.fromEntries(seats.map((a) => [a.label, load(a)])),
-        stale: !u.generated_at || Date.now() / 1000 - u.generated_at > 900, updated: u.generated_at };
+    const best = seats.filter((a) => qualifies(a, ctx)).sort((x, y) => loadOf(x) - loadOf(y))[0];
+    const fresh = Object.fromEntries(seats.map((a) => [a.label, isFresh(a, ctx.now)]));
+    return { you: ctx.you, free: seats.filter((a) => loadOf(a) < 50).length, total: seats.length,
+        best: best ? { label: best.label, five: best.five_pct, week: best.week_pct } : null,
+        loads: Object.fromEntries(seats.map((a) => [a.label, loadOf(a)])), fresh,
+        activeFresh: !!ctx.you && fresh[ctx.you] === true };
 }
 
-// Auto-switch target: the most-headroom seat, but only when the current seat is full (100% on 5h or weekly),
-// usage data is fresh, and the target is saved and not full itself. Returns a label or null.
-function autoTarget(cap, isSaved) {
-    if (cap.stale || !cap.you || !cap.best || cap.best.label === cap.you) return null;
-    if (!(cap.loads[cap.you] >= 100)) return null;
-    if (!(cap.loads[cap.best.label] < 100) || !isSaved(cap.best.label)) return null;
+// Auto-switch target: the best qualifying account, but only when the active account is full (100% on 5h or weekly)
+// and its own data is fresh. Returns a label or null.
+function autoTarget(cap) {
+    if (!cap.you || !cap.activeFresh || !(cap.loads[cap.you] >= 100) || !cap.best) return null;
     return cap.best.label;
 }
 
+const ageText = (secs) => (secs >= 86400 ? Math.floor(secs / 86400) + 'd' : secs >= 3600 ? Math.floor(secs / 3600) + 'h' : Math.max(1, Math.floor(secs / 60)) + 'm');
+
 function readAccounts() {
     const u = readSnapshot();
-    const cap = capacity(u);
+    const now = Date.now() / 1000;
+    const cap = capacity(u, { you: activeLabel(), isSaved: saved, relogin, now });
     const accounts = u.accounts.map((a) => ({ name: a.label, data: {
         profile: emailOf(a.label) ? { email: emailOf(a.label), plan: '' } : null, extra: null, installations: [],
         usage: [bar('five_hour', '5H', a.five_pct, a.five_reset_epoch, 18000),
                 bar('seven_day', 'Week', a.week_pct, a.week_reset_epoch, 604800)].filter(Boolean),
-        status: a.state === 'ok'
-            ? { last_success_time: u.generated_at, next_poll_time: null, refreshing: false, error: null }
+        status: isFresh(a, now)
+            ? { last_success_time: a.fetched_at, next_poll_time: null, refreshing: false, error: null }
+            : a.state === 'ok' ? { text: 'data ' + ageText(Math.max(0, now - a.fetched_at)) + ' old', is_error: true }
             : { text: a.state, is_error: a.state !== 'no data yet' },
     } }));
-    cap.you = activeLabel();
+    cap.loginHealth = loginHealth;
     cap.saved = fs.existsSync(CCSWITCH) ? accounts.map((a) => a.name).filter(saved) : null;  // null = no ccswitch
     cap.relogin = [...relogin];
     return { accounts, cap };
@@ -211,21 +225,38 @@ async function installCcswitch() {
     t.sendText(`(git -C "${dir}" pull -q 2>/dev/null || git clone -q https://github.com/sytang9/cc-usage-bar.git "${dir}") && bash "${dir}/install.sh"`);
 }
 
-// Keep-alive + health check, all decided by ccswitch itself: `ccswitch usage --no-switch` refreshes every
-// saved seat's tokens and prints `re-login` for a seat whose saved refresh token is dead.
+// Keep-alive + health check, all decided by ccswitch itself: `ccswitch usage --json` refreshes every saved
+// account's tokens and reports each account's login (`ok` | `re-login` | `unknown`) as data, not as text to parse.
 const relogin = new Set();
+let loginHealth = 'unknown';  // 'known' | 'unknown': whether the last run could judge dead logins at all
+
+// The parsed `usage --json` document, or null unless it is schema 1 with an accounts array.
+function parseUsageJson(text) {
+    try {
+        const d = JSON.parse(text);
+        return d && d.schema === 1 && Array.isArray(d.accounts) ? d : null;
+    } catch { return null; }
+}
+
+// New re-login set: no document -> empty; re-login adds, ok removes, unknown keeps the previous verdict; saved only.
+function mergeLogins(prev, doc, isSaved) {
+    if (!doc) return new Set();
+    const next = new Set(prev);
+    for (const a of doc.accounts) {
+        if (a.login === 're-login') next.add(a.label);
+        else if (a.login === 'ok') next.delete(a.label);
+    }
+    return new Set([...next].filter(isSaved));
+}
+
 async function checkLogins() {
     if (!fs.existsSync(CCSWITCH)) return;
-    const r = await run(CCSWITCH, ['usage', '--no-switch']);
-    // ccswitch says when its re-login verdict can't be trusted (node missing, refresh paused) - then mark nothing
-    if (!r.ok || /regardless of account health|until node is installed/.test(r.err)) return;
-    const next = new Set();
-    for (const line of r.out.replace(/\x1b\[[0-9;]*m/g, '').split('\n')) {
-        const m = line.match(/^[* ]\s*([\w-]+)\s+(.*)$/);
-        if (m && saved(m[1]) && /\bre-login\b/.test(m[2])) next.add(m[1]);
-    }
-    relogin.clear();
+    const r = await run(CCSWITCH, ['usage', '--json']);
+    const doc = r.ok ? parseUsageJson(r.out) : null;  // old ccswitch (no --json) or stray output: trust nothing
+    const next = mergeLogins(relogin, doc, saved);
+    relogin.clear();  // same Set object, so saveSeat's relogin.delete keeps working
     for (const l of next) relogin.add(l);
+    loginHealth = doc && doc.login_health === 'known' ? 'known' : 'unknown';
 }
 
 // Save the CURRENT login under its seat name (ccswitch save always snapshots whichever login is active).
@@ -273,7 +304,7 @@ function activate(context) {
     let lastAuto = 0;  // cooldown so a lagging snapshot can't bounce us between seats
     const autoSwitch = async () => {
         if (!autoOn() || !fs.existsSync(CCSWITCH) || Date.now() - lastAuto < 10 * 60 * 1000) return;
-        const from = cap.you, to = autoTarget(cap, (l) => saved(l) && !relogin.has(l));
+        const from = cap.you, to = autoTarget(cap);
         if (!to) return;
         lastAuto = Date.now();
         const r = await ccswitch([to]);
@@ -288,9 +319,9 @@ function activate(context) {
         try { ({ accounts, cap } = readAccounts()); cap.auto = autoOn(); } catch (err) { status.text = '$(warning) Claude usage unreadable'; status.tooltip = String(err); return; }
         const pct = (a, key) => (a.data.usage.find((u) => u.key === key) || {}).pct_text || '–';
         const r = (v) => (v == null ? '–' : Math.round(v) + '%');
-        status.text = (cap.stale ? '$(warning) ' : '$(pulse) ') + (cap.auto ? '$(sync) ' : '') + (cap.you ? `current ${cap.you} · ` : '') + `${cap.free}/${cap.total} free`
+        status.text = (cap.you && !cap.activeFresh ? '$(warning) ' : '$(pulse) ') + (cap.auto ? '$(sync) ' : '') + (cap.you ? `current ${cap.you} · ` : '') + `${cap.free}/${cap.total} free`
             + (cap.best ? ` · most headroom ${cap.best.label} (${r(cap.best.five)}/${r(cap.best.week)})` : '');
-        status.tooltip = (cap.stale ? 'Usage data is over 15 min old\n' : '') + `Auto-switch: ${cap.auto ? 'ON' : 'off'}\n` + 'Accounts (5h / weekly)\n'
+        status.tooltip = (cap.you && !cap.activeFresh ? `Data for ${cap.you} is over 30 min old\n` : '') + `Auto-switch: ${cap.auto ? 'ON' : 'off'}\n` + 'Accounts (5h / weekly)\n'
             + accounts.map((a) => `${a.data.profile ? a.data.profile.email : a.label}: session ${pct(a, 'five_hour')}, weekly ${pct(a, 'seven_day')}`).join('\n');
         push();
         autoSwitch();
@@ -420,7 +451,6 @@ function addFrame(name, data) {
     iframe.srcdoc = DOC;
     document.getElementById('grid').append(iframe);
 }
-const ago = (t) => { const m = Math.round((Date.now() / 1000 - t) / 60); return m < 1 ? 'just now' : m < 60 ? m + 'm ago' : Math.floor(m / 60) + 'h ' + (m % 60) + 'm ago'; };
 let infoOpen = false, last = null;
 const EXPLAIN = 'When your seat hits <b>100%</b> (5h or weekly), switch to the seat with the <b>most headroom</b> '
     + 'automatically. Saved seats only, fresh usage data only, never to a full seat, at most once per 10 min. '
@@ -438,8 +468,7 @@ function onData({ accounts, cap }) {
         + '</div>'
         + (cap.saved && infoOpen ? '<div class="explain">' + EXPLAIN + '</div>' : '')
         + '<b>' + cap.free + '/' + cap.total + '</b> seats free'
-        + (cap.best ? ' · most headroom <b class="best">' + esc(cap.best.label) + '</b> 5H ' + r(cap.best.five) + ' · WK ' + r(cap.best.week) : '')
-        + (cap.updated ? ' · <span class="' + (cap.stale ? 'stale' : 'k2') + '">updated ' + ago(cap.updated) + '</span>' : '');
+        + (cap.best ? ' · most headroom <b class="best">' + esc(cap.best.label) + '</b> 5H ' + r(cap.best.five) + ' · WK ' + r(cap.best.week) : '');
     const auto = document.getElementById('auto'), info = document.getElementById('info');
     const key = (fn) => (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); fn(); } };
     if (auto) { const flip = () => vsc.postMessage({ toggleAuto: 1 }); auto.onclick = flip; auto.onkeydown = key(flip); }
