@@ -325,8 +325,9 @@ bottom:
   (`ccswitch save` only ever snapshots the active login). Actions confirm first.
 - **Automation** — collapsed by default. **Auto-switch** (off by default): when
   the active account reaches 100% (5h or weekly), switch to the account in **If
-  you run out**, without asking. Turning it on opens one confirmation dialog that
-  says so; turning it off needs none. It applies to every new Claude Code session
+  you run out**, without asking. Turning it on from the sidebar or the Toggle
+  command opens one confirmation dialog that says so; turning it on in Settings
+  or settings.json skips the dialog. Turning it off needs none. It applies to every new Claude Code session
   on this machine (the setting is machine-scoped, so Settings Sync never carries
   it to another machine). Open Claude Code tabs keep the old account until
   restarted. Never when the active account's own data is over 30 minutes old; at

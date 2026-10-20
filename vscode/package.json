@@ -52,7 +52,7 @@
           "type": "boolean",
           "default": false,
           "scope": "machine",
-          "markdownDescription": "When the active account reaches 100% (5h or weekly), switch Claude Code to the next-best account via ccswitch, **without asking**. It applies to every new Claude Code session on this machine; open tabs keep the old account until restarted. Turning it on asks once. Machine-scoped, so Settings Sync never carries it to another machine."
+          "markdownDescription": "When the active account reaches 100% (5h or weekly), switch Claude Code to the next-best account via ccswitch, **without asking**. It applies to every new Claude Code session on this machine; open tabs keep the old account until restarted. Turning it on from the sidebar or the Toggle command asks once in a dialog; ticking it here or editing settings.json skips that dialog. Machine-scoped, so Settings Sync never carries it to another machine."
         },
         "claudeUsage.usageFile": {
           "type": "string",
