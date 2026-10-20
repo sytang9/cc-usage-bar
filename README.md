@@ -344,7 +344,7 @@ bottom:
   login** on the active account when it is not saved yet (`ccswitch save` only
   ever snapshots the active login). Actions confirm first.
   If Codex CLI is set up, a last row, `codex`, shows its usage read-only
-  (`lock` icon, tooltip `Codex (read-only)`): its own percentages and reset
+  (`lock` icon, or `circle-slash` when full; tooltip `Codex (read-only)`): its own percentages and reset
   times, `No recent data` when its numbers are over 30 minutes old, and no
   actions. It is never a switch target, never in **If you run out**, never
   counted as saved and never in the status bar's `⇄`.

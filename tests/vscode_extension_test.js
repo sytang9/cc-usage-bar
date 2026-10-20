@@ -907,6 +907,12 @@ const calls = () => (fs.existsSync(LOG) ? fs.readFileSync(LOG, 'utf8').trim().sp
         assert.strictEqual(e.statusText(sb(a, 'work'), a, false), '● work 100%/40% · ⇄ personal');
     });
 
+    await check('statusText: a Codex row with the active label never shows as your numbers', () => {
+        // A saved Claude account may be named codex; its own row is the one the status bar reads.
+        const a = [{ ...acct('codex', 77, 66, now - 60), provider: 'codex' }, acct('codex', 20, 30, now - 60), acct('personal', 10, 5, now - 30)];
+        assert.ok(e.statusText(sb(a, 'codex'), a, false).startsWith('● codex 20%/30%'));
+    });
+
     await check('statusText: nothing qualifies (Review Focus 1)', () => {
         const a = [acct('work', 100, 40, now - 60), acct('old', 5, 5, now - 7200), acct('dead', 5, 5, now - 60)];
         const t = e.statusText(sb(a, 'work', ['dead']), a, false);

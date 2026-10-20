@@ -119,7 +119,7 @@ const pctOr = (v) => (v == null ? '–' : Math.round(v) + '%');
 function statusText(cap, accounts, auto) {
     const lead = auto ? '$(sync) ' : '';
     if (!cap.you) return lead + '● none';
-    const me = accounts.find((a) => a.label === cap.you) || {};
+    const me = accounts.find((a) => isClaude(a) && a.label === cap.you) || {};
     return `${lead}● ${cap.you} ${pctOr(me.five_pct)}/${pctOr(me.week_pct)}${cap.activeFresh ? '' : ' ◷'} · ⇄ ${cap.best ? cap.best.label : 'none'}`;
 }
 
