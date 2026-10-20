@@ -393,6 +393,13 @@ const calls = () => (fs.existsSync(LOG) ? fs.readFileSync(LOG, 'utf8').trim().sp
         assert.ok(!fs.existsSync(path.join(__dirname, '..', 'vscode', 'ui')));
     });
 
+    await check('dialog texts name the panel\'s own control: Save login, no SAVE card', () => {
+        const src = fs.readFileSync(file, 'utf8');
+        assert.ok(!/\bSAVE\b/.test(src), 'no SAVE button any more');
+        assert.ok(!/\bcard\b/.test(src), 'no cards any more');
+        assert.match(src, /click the \$\{label\} row in the sidebar and choose Save login/);
+    });
+
     await check('switch texts agree with ccswitch: open Claude Code tabs need a restart', () => {
         const src = fs.readFileSync(file, 'utf8');
         assert.ok(!/carry on as the new seat/.test(src), 'no hot-swap claim');

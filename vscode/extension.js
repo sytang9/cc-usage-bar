@@ -164,7 +164,7 @@ async function ccswitch(args, input) {
 }
 
 // Click a seat: saved -> `ccswitch <label>` (instant). Everything goes through ccswitch; a seat that isn't
-// saved yet (or whose saved login expired) is enrolled once with Claude's own /login, then SAVE.
+// saved yet (or whose saved login expired) is enrolled once with Claude's own /login, then Save login.
 async function switchSeat(label, onDone) {
     if (!/^[\w-]+$/.test(label)) return;  // ccswitch's own label charset - never anything else
     if (!fs.existsSync(CCSWITCH)) return installCcswitch();
@@ -181,12 +181,12 @@ async function switchSeat(label, onDone) {
     vscode.window.showInformationMessage(`Switched Claude Code to ${label}. Restart open Claude Code tabs to use it.`);
 }
 
-// One-time enrolment of a seat ccswitch can't switch to yet: log in to it with Claude's /login, then SAVE.
+// One-time enrolment of a seat ccswitch can't switch to yet: log in to it with Claude's /login, then Save login.
 async function enroll(label, expired, onDone) {
     const ok = await vscode.window.showInformationMessage(
         expired ? `The saved login for ${label} has expired (ccswitch: re-login).` : `${label} isn't saved in ccswitch yet.`,
         { modal: true, detail: `Log in to ${label} once: a terminal opens with Claude Code - type /login and sign in as ${label}. `
-            + `Then click SAVE on the ${label} card. After that, switching to it is instant.` },
+            + `Then click the ${label} row in the sidebar and choose Save login. After that, switching to it is instant.` },
         'Open terminal');
     if (ok !== 'Open terminal') return;
     await checkLogins();  // ccswitch copies your current seat's newest tokens into its saved copy before /login replaces them
@@ -259,7 +259,7 @@ async function saveSeat(label, onDone) {
 
 async function deleteSeat(label, onDone) {
     const ok = await vscode.window.showWarningMessage(`Delete the saved login for ${label}?`,
-        { modal: true, detail: 'Your current Claude Code login is not affected. To switch to this seat again you will need to log in to it once and SAVE.' }, 'Delete');
+        { modal: true, detail: 'Your current Claude Code login is not affected. To switch to this seat again you will need to log in to it once and choose Save login in its row.' }, 'Delete');
     if (ok !== 'Delete') return;
     const r = await ccswitch(['delete', label], 'y\n');
     if (r.ok && !saved(label)) vscode.window.showInformationMessage(`Deleted the saved login for ${label}.`);
