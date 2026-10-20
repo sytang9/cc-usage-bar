@@ -164,6 +164,7 @@ ccswitch <label>             switch to a saved account
 ccswitch <label> --relaunch  switch, then exec the `claude` CLI (override
                               the command with CCSWITCH_CLAUDE_CMD)
 ccswitch delete <label>      remove a saved account (prompts to confirm)
+ccswitch usage --json        usage of every saved account as one JSON document
 ccswitch refresh-pause       stop refreshing tokens (usage stays readable)
 ccswitch refresh-resume      re-enable token refresh
 ccswitch version             print the version (also --version, -V)
@@ -177,7 +178,7 @@ for `ccswitch <label> --relaunch`.
 ## Usage — the monitor
 
 ```
-ccswitch usage [--no-switch] [--refresh] [--relaunch]
+ccswitch usage [--no-switch] [--refresh] [--relaunch] [--json]
 ```
 
 Shows 5-hour and weekly usage for every saved account in one table, with each
@@ -237,6 +238,35 @@ after the Claude accounts:
 - No Codex login, or an API-key login, means no row and no other change.
 - The row needs at least one saved Claude account: with none, `ccswitch usage`
   stops at "no saved accounts" before the Codex row.
+
+### Machine-readable usage
+
+`ccswitch usage --json [--refresh]` prints one JSON document on stdout and
+nothing else (warnings stay on stderr). It implies `--no-switch`: it never
+prompts and never switches. The Codex row is not emitted and its request is
+skipped.
+
+```json
+{ "schema": 1, "generated_at": 1792500000,
+  "login_health": "known", "login_health_reason": null,
+  "accounts": [
+    { "label": "work", "active": true, "login": "ok", "state": "ok",
+      "five_hour_pct": 23, "seven_day_pct": 64,
+      "five_hour_reset_epoch": 1792515000, "seven_day_reset_epoch": 1792800000,
+      "fetched_at": 1792499900 } ] }
+```
+
+- `login_health`: `known` or `unknown`. `unknown` means this run could not
+  judge dead logins; `login_health_reason` says why: `node-missing`,
+  `node-too-old`, `refresh-paused` or `refresh-lock-busy` (else `null`).
+- `accounts`: saved Claude accounts only, in label order. `active` is the `*`
+  marker.
+- `state`: the table's row state: `ok`, `dash`, `wait` or `relogin`.
+- `login`: `ok` when `state` is `ok`; `re-login` when `state` is `relogin` and
+  `login_health` is `known`; otherwise `unknown`.
+- The five number fields come from the account's usage cache after the run, so
+  a `re-login` row keeps its last numbers and their `fetched_at`. A missing
+  value is `null` (for example 5h at 0% use has no reset time).
 
 ### Pausing token refresh
 

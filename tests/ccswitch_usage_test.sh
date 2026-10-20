@@ -922,6 +922,74 @@ case29_json_no_accounts() {
   rm -rf "$home" "$ctl"
 }
 
+# setup_expired_account <home> <ctl> -> one expired, non-active account.
+setup_expired_account() {
+  write_claude_json "$1"
+  write_account_credentials "$1" "acct_exp" "REFRESH_EXP" "TOK_EXP_OLD" 1
+  write_account_oauth "$1" "acct_exp" "UUID_EXP"
+  set_token_response "$2" "REFRESH_EXP" 200 "$(refresh_success_body TOK_EXP_NEW REFRESH_EXP_ROT)"
+}
+
+case30_json_refresh_paused() {
+  local home ctl
+  home="$(new_home)"
+  ctl="$(new_ctl)"
+  setup_expired_account "$home" "$ctl"
+  : >"$home/.claude/accounts/.no-refresh"
+  run_cc_json "$home" "$ctl"
+  if [[ "$EXIT_CODE" -eq 0 ]] \
+    && jq -e '.login_health == "unknown" and .login_health_reason == "refresh-paused"
+      and .accounts[0].login == "unknown" and .accounts[0].state == "wait"' <<<"$OUT" >/dev/null 2>&1; then
+    pass "case30 paused refresh -> login_health unknown, refresh-paused"
+  else
+    fail "case30 (exit=$EXIT_CODE): $OUT / $ERR"
+  fi
+  rm -rf "$home" "$ctl"
+}
+
+case31_json_old_node() {
+  local home ctl fakebin errf
+  home="$(new_home)"
+  ctl="$(new_ctl)"
+  fakebin="$(mktemp -d "${TMPDIR:-/tmp}/ccswitch-usage-test-fakenode.XXXXXX")"
+  printf '#!/usr/bin/env bash\nexit 1\n' >"$fakebin/node"
+  chmod +x "$fakebin/node"
+  setup_expired_account "$home" "$ctl"
+  errf="$(mktemp "${TMPDIR:-/tmp}/ccswitch-usage-test-err.XXXXXX")"
+  OUT="$(PATH="$fakebin:$STUB_BIN:$PATH" HOME="$home" CURL_STUB_DIR="$ctl" \
+    bash "$TARGET" usage --json 2>"$errf")"
+  EXIT_CODE=$?
+  ERR="$(cat "$errf")"
+  rm -f "$errf"
+  printf '%s\n%s\n' "$OUT" "$ERR" >>"$ALL_OUTPUT_LOG"
+  if [[ "$EXIT_CODE" -eq 0 ]] \
+    && jq -e '.login_health == "unknown" and .login_health_reason == "node-too-old"
+      and .accounts[0].login == "unknown"' <<<"$OUT" >/dev/null 2>&1 \
+    && printf '%s' "$ERR" | grep -q 'node 18+'; then
+    pass "case31 old node -> node-too-old, account login unknown, warning kept on stderr"
+  else
+    fail "case31 (exit=$EXIT_CODE): $OUT / $ERR"
+  fi
+  rm -rf "$home" "$ctl" "$fakebin"
+}
+
+case32_json_lock_busy() {
+  local home ctl
+  home="$(new_home)"
+  ctl="$(new_ctl)"
+  setup_expired_account "$home" "$ctl"
+  mkdir -p "$home/.claude/accounts/.refresh-lock"
+  echo "$$" >"$home/.claude/accounts/.refresh-lock/pid"
+  CCSWITCH_LOCK_WAIT_SECONDS=0 run_cc_json "$home" "$ctl"
+  if [[ "$EXIT_CODE" -eq 0 ]] \
+    && jq -e '.login_health_reason == "refresh-lock-busy" and .accounts[0].login == "unknown"' <<<"$OUT" >/dev/null 2>&1; then
+    pass "case32 busy refresh lock -> refresh-lock-busy, account login unknown"
+  else
+    fail "case32 (exit=$EXIT_CODE): $OUT / $ERR"
+  fi
+  rm -rf "$home" "$ctl"
+}
+
 main() {
   if [[ ! -x "$TARGET" ]]; then
     echo "FAIL: target script not found or not executable: $TARGET"
@@ -1529,6 +1597,9 @@ main() {
   case27_json_two_accounts
   case28_json_relogin_keeps_last_numbers
   case29_json_no_accounts
+  case30_json_refresh_paused
+  case31_json_old_node
+  case32_json_lock_busy
 
   # =========================================================================
   # Case 8 (security): none of the fake secret tokens ever appear in any
