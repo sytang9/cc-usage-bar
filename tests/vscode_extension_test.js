@@ -497,6 +497,8 @@ const calls = () => (fs.existsSync(LOG) ? fs.readFileSync(LOG, 'utf8').trim().sp
         assert.strictEqual(s['002'], '23% · –');
         assert.strictEqual(s['003'], 'No recent data');
         assert.strictEqual(s['004'], 'Weekly full', 'a past reset is not named');
+        const old = [acct('002', 23, 64, now - 60), acct('005', 5, 100, now - 7200)];
+        assert.strictEqual(e.panelData(old, capOf(old, '002', []), opts).rows[1].summary, 'No recent data', 'stale data is not shown as a current full');
     });
 
     await check('render: a missing window shows –, not 0% or NaN', () => {

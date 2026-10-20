@@ -168,9 +168,9 @@ function panelData(accounts, cap, { now, installed, auto }) {
             ...(dead.has(a.label) ? ['relogin'] : []),
             ...(savedSet.has(a.label) ? ['delete'] : []),
         ];
-        const summary = icon === 'relogin' ? 'Re-login needed'
+        const summary = icon === 'relogin' ? 'Re-login needed' : age(a) ? 'No recent data'
             : icon === 'full' ? (a.week_pct >= 100 ? full('Weekly', a.week_reset_epoch) : full('Session', a.five_reset_epoch))
-            : age(a) ? 'No recent data' : pctOr(a.five_pct) + ' · ' + pctOr(a.week_pct);
+            : pctOr(a.five_pct) + ' · ' + pctOr(a.week_pct);
         return { label: a.label, provider: a.provider || 'claude', icon, tip: TIPS[icon], summary, five: pct(a.five_pct), week: pct(a.week_pct),
             fiveReset: reset(a.five_reset_epoch), weekReset: reset(a.week_reset_epoch), age: age(a), email: a.email || null, actions };
     });
