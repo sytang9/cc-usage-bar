@@ -385,7 +385,10 @@ async function autoSwitchOnce(cap, state) {
     const why = autoBlock({ on, consented: !!state.get(CONSENT), installed: fs.existsSync(CCSWITCH), checked: loginChecked, health: loginHealth, cap });
     if (why) return { skip: why };
     const now = Date.now() / 1000;
-    const cooling = () => now - ((readJson(AUTO_STAMP) || {}).last_switch || 0) < AUTO_COOLDOWN_SECS;
+    const cooling = () => {
+        const last = Number((readJson(AUTO_STAMP) || {}).last_switch) || 0;
+        return last <= now && now - last < AUTO_COOLDOWN_SECS;  // a stamp in the future (a wrong clock) is ignored
+    };
     if (cooling()) return { skip: 'cooldown' };  // before the lock: a lock made on every poll wakes every window's watcher
     if (!takeAutoLock(now)) return { skip: 'busy' };
     try {

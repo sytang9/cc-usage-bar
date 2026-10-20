@@ -700,6 +700,12 @@ const calls = () => (fs.existsSync(LOG) ? fs.readFileSync(LOG, 'utf8').trim().sp
             } finally { fs.writeFileSync(live, was); fs.writeFileSync(cache, wasCache); }
         });
 
+        await check('auto-switch: a stamp in the future (a wrong clock) does not block switching', async () => {
+            autoReset(); fs.writeFileSync(STAMP, JSON.stringify({ last_switch: minsAgo(-24 * 60) }));
+            const res = await tryAuto(await win());
+            assert.notStrictEqual(res.skip, 'cooldown');
+        });
+
         await check('auto-switch: during the cooldown no lock is taken, so the watched folder stays still', async () => {
             // Every window watches the accounts folder; a lock made and removed on each poll would wake them all.
             autoReset(); fs.writeFileSync(STAMP, JSON.stringify({ last_switch: minsAgo(2) }));
