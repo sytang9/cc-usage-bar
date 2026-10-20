@@ -42,22 +42,25 @@ fs.chmodSync(ccswitch, 0o755);
 
 // --- stub vscode ----------------------------------------------------------------------------------
 const said = [];
+const saidOpts = [];
+const updates = [];
 let answer;
 const vscode = {
     window: {
-        showWarningMessage: async (m, o, ...b) => { said.push(m); return answer; },
+        showWarningMessage: async (m, o, ...b) => { said.push(m); saidOpts.push(o); return answer; },
         showInformationMessage: async (m, o, ...b) => { said.push(m); return typeof o === 'object' ? answer : undefined; },
         showErrorMessage: (m) => said.push('ERROR ' + m),
         createTerminal: () => ({ show() {}, sendText(t) { said.push('TERMINAL ' + t); } }),
     },
-    workspace: { getConfiguration: () => ({ get: (k) => cfg[k] }) },
+    workspace: { getConfiguration: () => ({ get: (k) => cfg[k], update: async (k, v, t) => { updates.push([k, v, t]); } }) },
+    ConfigurationTarget: { Global: 1 },
     commands: {}, env: {},
 };
 const orig = Module._load;
 Module._load = function (r, ...a) { return r === 'vscode' ? vscode : orig.call(this, r, ...a); };
 const file = path.join(__dirname, '..', 'vscode', 'extension.js');
 const m = new Module(file); m.filename = file; m.paths = Module._nodeModulePaths(path.dirname(file));
-m._compile(fs.readFileSync(file, 'utf8') + '\n;Object.assign(module.exports, { readSnapshot, isFresh, qualifies, capacity, parseUsageJson, mergeLogins, readAccounts, activeLabel, autoTarget, checkLogins, relogin, switchSeat, saveSeat, esc, webviewHtml, panelData, ageText });', file);
+m._compile(fs.readFileSync(file, 'utf8') + '\n;Object.assign(module.exports, { readSnapshot, isFresh, qualifies, capacity, parseUsageJson, mergeLogins, readAccounts, activeLabel, autoTarget, checkLogins, relogin, switchSeat, saveSeat, esc, webviewHtml, panelData, ageText, setAutoSwitch, AUTO_DETAIL, statusText, statusTooltip });', file);
 const e = m.exports;
 const calls = () => (fs.existsSync(LOG) ? fs.readFileSync(LOG, 'utf8').trim().split('\n') : []);
 
@@ -76,7 +79,7 @@ const calls = () => (fs.existsSync(LOG) ? fs.readFileSync(LOG, 'utf8').trim().sp
         assert.strictEqual(by('work').five_pct, 100);
         assert.strictEqual(by('spare').five_pct, null);
         assert.strictEqual(cap.best.label, 'personal');
-        assert.strictEqual(cap.free, 3);
+        assert.ok(!('free' in cap) && !('total' in cap), 'the free count is gone: it counted stale and dead accounts');
         assert.strictEqual(cap.activeFresh, true);
         assert.strictEqual(e.ageText(by('dead').fetched_at, now), '13d old');
         const pd = e.panelData(accounts, cap, { now, installed: true, auto: false });
@@ -316,7 +319,7 @@ const calls = () => (fs.existsSync(LOG) ? fs.readFileSync(LOG, 'utf8').trim().sp
     const WV = path.join(__dirname, '..', 'vscode', 'webview');
     const readWv = (f) => fs.readFileSync(path.join(WV, f), 'utf8');
     const panel = () => { const ctx = { esc: e.esc }; require('vm').runInNewContext(readWv('panel.js'), ctx); return ctx; };
-    const ui = (over = {}) => ({ accountsOpen: true, openRow: null, ...over });
+    const ui = (over = {}) => ({ accountsOpen: true, automationOpen: false, openRow: null, ...over });
 
     await check('B4 no hard-coded colour in the panel', () => {
         const src = readWv('panel.css') + readWv('panel.js') + e.webviewHtml();
@@ -383,10 +386,122 @@ const calls = () => (fs.existsSync(LOG) ? fs.readFileSync(LOG, 'utf8').trim().sp
         assert.ok(open.includes('data-a="delete" data-l="001"'));
     });
 
-    await check('render: auto-switch toggle row says its state', () => {
+    await check('render: auto-switch toggle says its state', () => {
+        const p = panel(), open = ui({ automationOpen: true });
+        assert.match(p.render(pdFour(), open), /role="switch"[^>]*aria-checked="false"/);
+        assert.match(p.render({ ...pdFour(), auto: true }, open), /role="switch"[^>]*aria-checked="true"/);
+        assert.ok(p.render({ ...pdFour(), auto: true }, ui()).includes('>on<'), 'the collapsed header still shows the state');
+    });
+
+    await check('render: Automation is collapsed by default and holds the toggle and a visible line', () => {
         const p = panel();
-        assert.match(p.render(pdFour(), ui()), /role="switch"[^>]*aria-checked="false"/);
-        assert.match(p.render({ ...pdFour(), auto: true }, ui()), /role="switch"[^>]*aria-checked="true"/);
+        const shut = p.render(pdFour(), ui());
+        assert.ok(!shut.includes('role="switch"'));
+        assert.ok(shut.includes('Automation') && /data-a="automation"[^>]*aria-expanded="false"/.test(shut));
+        const open = p.render(pdFour(), ui({ automationOpen: true }));
+        assert.strictEqual(open.split('role="switch"').length - 1, 1);
+        assert.match(open, /role="switch"[^>]*aria-checked="false"/);
+        assert.ok(open.includes('Switches at 100%.'), 'one visible line, not only a tooltip');
+        assert.ok(!p.render({ ...pdFour(), installed: false }, ui({ automationOpen: true })).includes('role="switch"'), 'no ccswitch, no toggle');
+    });
+
+    // --- G7: turning auto-switch on asks once ----------------------------------------------------------
+    await check('G7 turning auto-switch on asks once, in a modal', async () => {
+        said.length = saidOpts.length = updates.length = 0;
+        answer = undefined;
+        assert.strictEqual(await e.setAutoSwitch(true), false);
+        assert.deepStrictEqual(updates, []);
+        assert.strictEqual(said.length, 1);
+        assert.strictEqual(saidOpts[0].modal, true);
+        assert.strictEqual(said[0], 'Turn on auto-switch?');
+        answer = 'Turn on';
+        assert.strictEqual(await e.setAutoSwitch(true), true);
+        assert.deepStrictEqual(updates, [['autoSwitch', true, 1]]);
+        answer = undefined;
+    });
+
+    await check('G7 turning auto-switch off needs no dialog', async () => {
+        said.length = saidOpts.length = updates.length = 0;
+        assert.strictEqual(await e.setAutoSwitch(false), true);
+        assert.strictEqual(said.length, 0);
+        assert.deepStrictEqual(updates, [['autoSwitch', false, 1]]);
+    });
+
+    await check('G7 the dialog states the effect', () => {
+        for (const re of [/every new Claude Code session/, /without asking/, /100%/, /restart/i, /this machine/]) assert.match(e.AUTO_DETAIL, re);
+    });
+
+    await check('autoSwitch setting is machine-scoped and its description says what it does', () => {
+        const p = require('../vscode/package.json').contributes.configuration.properties['claudeUsage.autoSwitch'];
+        assert.strictEqual(p.scope, 'machine');
+        assert.ok(!('description' in p), 'markdownDescription replaces description');
+        assert.match(p.markdownDescription, /without asking/);
+        assert.match(p.markdownDescription, /100%/);
+    });
+
+    await check('the toggle command and the panel both go through setAutoSwitch', () => {
+        const src = fs.readFileSync(file, 'utf8');
+        assert.ok(!/update\('autoSwitch'/.test(src.replace(/async function setAutoSwitch[\s\S]*?\n}\n/, '')), 'one writer of the setting');
+    });
+
+    // --- status bar text ---------------------------------------------------------------------------------
+    const sb = (a, you, relogin = [], over = {}) => ({ ...capOf(a, you, relogin), ...over });
+    const sbAcc = () => [acct('work', 100, 40, now - 60), acct('personal', 10, 5, now - 30)];
+
+    await check('statusText: active and next-best', () => {
+        const a = sbAcc();
+        assert.strictEqual(e.statusText(sb(a, 'work'), a, false), '● work 100%/40% · ⇄ personal');
+    });
+
+    await check('statusText: nothing qualifies (Review Focus 1)', () => {
+        const a = [acct('work', 100, 40, now - 60), acct('old', 5, 5, now - 7200), acct('dead', 5, 5, now - 60)];
+        const t = e.statusText(sb(a, 'work', ['dead']), a, false);
+        assert.ok(t.endsWith('· ⇄ none'), t);
+        assert.ok(!/free/.test(t), 'stale and dead accounts are not counted as free');
+    });
+
+    await check('statusText: stale active data and auto on', () => {
+        const a = [acct('work', 100, 40, now - 7200), acct('personal', 10, 5, now - 30)];
+        const t = e.statusText(sb(a, 'work'), a, true);
+        assert.ok(t.startsWith('$(sync) ● work'), t);
+        assert.ok(t.includes('100%/40% ◷'), t);
+    });
+
+    await check('statusText: no active account, and a missing window', () => {
+        const a = sbAcc();
+        assert.strictEqual(e.statusText(sb(a, null), a, false), '● none');
+        assert.strictEqual(e.statusText(sb(a, null), a, true), '$(sync) ● none');
+        const h = [acct('half', null, 30, now - 60)];
+        assert.strictEqual(e.statusText(sb(h, 'half'), h, false), '● half –/30% · ⇄ none');
+    });
+
+    await check('statusText: an active account with no data at all', () => {
+        const a = sbAcc();
+        const t = e.statusText(sb(a, 'ghost'), a, false);  // not saved, no row
+        assert.strictEqual(t, '● ghost –/– ◷ · ⇄ personal');
+    });
+
+    await check('statusTooltip lists every account', () => {
+        const a = [...sbAcc(), acct('old', 5, 5, now - 7200), acct('dead', 5, 5, now - 13 * 86400)];
+        const tip = e.statusTooltip(sb(a, 'work', ['dead']), a, false);
+        const lines = tip.split('\n');
+        assert.strictEqual(lines.length, a.length + 1);
+        assert.strictEqual(lines[0], 'Auto-switch: off');
+        assert.strictEqual(lines[1], 'work: 5h 100%, wk 40% · active');
+        assert.strictEqual(lines[2], 'personal: 5h 10%, wk 5%');
+        assert.strictEqual(lines[3], 'old: 5h 5%, wk 5% · data 2h old');
+        assert.strictEqual(lines[4], 'dead: 5h 5%, wk 5% · re-login · data 13d old');
+        assert.strictEqual(e.statusTooltip(sb(a, 'work'), a, true).split('\n')[0], 'Auto-switch: ON');
+    });
+
+    await check('statusTooltip says the truth about the active account\'s data (fresh, stale, none)', () => {
+        const a = [acct('work', 100, 40, now - 60), acct('old', 5, 5, now - 7200)];
+        assert.strictEqual(e.statusTooltip(sb(a, 'work'), a, false).split('\n')[1], 'work: 5h 100%, wk 40% · active', 'fresh active: no age claim');
+        assert.ok(e.statusTooltip(sb(a, 'old'), a, false).includes('old: 5h 5%, wk 5% · data 2h old · active'));
+        const ghost = e.statusTooltip(sb(a, 'ghost'), a, false);  // active, unsaved, in no list
+        assert.strictEqual(ghost.split('\n').length, a.length + 2);
+        assert.ok(ghost.includes('ghost: 5h –, wk – · no data · active'), ghost);
+        assert.ok(!/over 30 min/.test(fs.readFileSync(file, 'utf8')), 'the old unconditional claim is gone');
     });
 
     await check('the vendored popup is gone', () => {

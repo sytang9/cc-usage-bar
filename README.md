@@ -293,10 +293,13 @@ on the remote host, next to `ccswitch`):
 ```
 
 then **Developer: Reload Window**. It adds a sidebar icon and a status-bar item
-(`current work · 1/3 free · most headroom personal (10%/5%)`).
+(`● work 100%/40% · ⇄ personal`: the active account, its 5h/weekly usage and the
+next-best account, or `⇄ none`; `◷` after the numbers means its data is over 30
+minutes old; `$(sync)` in front means auto-switch is on). The tooltip lists every
+account with its data age and re-login state.
 
 <p>
-<img src="vscode/screenshot-dark.png" width="320" alt="VS Code sidebar in Dark Modern: the Active account card for 002 with 5h and weekly bars and reset times, an If you run out line offering 004 with a Switch button, the Accounts list with counts 4 · 1 ⚠ · 1 ⛔ and the details of 001 open, and the Auto-switch toggle">
+<img src="vscode/screenshot-dark.png" width="320" alt="VS Code sidebar in Dark Modern: the Active account card for 002 with 5h and weekly bars and reset times, an If you run out line offering 004 with a Switch button, the Accounts list with counts 4 · 1 ⚠ · 1 ⛔ and the details of 001 open, and the Automation section with the Auto-switch toggle">
 <img src="vscode/screenshot-light.png" width="320" alt="The same sidebar in Light Modern, with the details of the re-login account 003 open">
 </p>
 
@@ -320,10 +323,14 @@ bottom:
   actions: **Switch**, **Re-login help**, delete (trash icon, `ccswitch
   delete`), and **Save login** on the active account when it is not saved yet
   (`ccswitch save` only ever snapshots the active login). Actions confirm first.
-- **Auto-switch** (off by default) — when the active account reaches 100% (5h
-  or weekly), switch to the account in **If you run out**. Never when the
-  active account's own data is over 30 minutes old; at most once every 10
-  minutes. The toggle's tooltip says this.
+- **Automation** — collapsed by default. **Auto-switch** (off by default): when
+  the active account reaches 100% (5h or weekly), switch to the account in **If
+  you run out**, without asking. Turning it on opens one confirmation dialog that
+  says so; turning it off needs none. It applies to every new Claude Code session
+  on this machine (the setting is machine-scoped, so Settings Sync never carries
+  it to another machine). Open Claude Code tabs keep the old account until
+  restarted. Never when the active account's own data is over 30 minutes old; at
+  most once every 10 minutes.
 
 | Icon | Meaning |
 |------|---------|

@@ -65,6 +65,17 @@ function row(r, open) {
     return html;
 }
 
+// Collapsed by default: the one switch that acts without you watching. The line stays visible when open so touch and
+// keyboard users can read it (the tooltip is not reachable for them).
+function automation(d, ui) {
+    const open = ui.automationOpen === true;
+    return '<div class="sec tog" data-a="automation" role="button" tabindex="0" aria-expanded="' + open + '">'
+        + '<span class="chev">' + (open ? '▾' : '▸') + '</span>⚠ Automation<span class="n">' + (d.auto ? 'on' : 'off') + '</span></div>'
+        + (open ? '<div class="auto"><div class="lbl">Switches at 100%. Asks once, when you turn it on.</div><div class="tgrow"><span>Auto-switch</span>'
+            + '<button class="tg' + (d.auto ? ' on' : '') + '" data-a="auto" role="switch" aria-checked="' + !!d.auto + '" aria-label="Auto-switch"'
+            + ' title="When the active account reaches 100%, switch to the next-best account (fresh data, working login, at most once per 10 min), without asking. Restart open Claude Code tabs to use it."></button></div></div>' : '');
+}
+
 function render(d, ui) {
     const open = ui.accountsOpen !== false;
     const health = d.loginHealth === 'unknown' ? ' title="ccswitch could not check logins, so none is marked re-login"' : '';
@@ -72,15 +83,12 @@ function render(d, ui) {
         + '<div class="sec tog" data-a="accounts" role="button" tabindex="0" aria-expanded="' + open + '"' + health + '>'
         + '<span class="chev">' + (open ? '▾' : '▸') + '</span>Accounts<span class="n">' + countsText(d.counts) + '</span></div>'
         + (open ? '<div class="rows">' + d.rows.map((r) => row(r, r.label === ui.openRow)).join('') + '</div>' : '')
-        + (d.installed
-            ? '<div class="auto"><span>Auto-switch</span><button class="tg' + (d.auto ? ' on' : '') + '" data-a="auto" role="switch" aria-checked="' + !!d.auto
-                + '" title="When the active account reaches 100%, switch to the next-best account (fresh data, working login, at most once per 10 min). Restart open Claude Code tabs to use it."></button></div>'
-            : '');
+        + (d.installed ? automation(d, ui) : '');
 }
 
 if (typeof acquireVsCodeApi === 'function') {
     const vsc = acquireVsCodeApi();
-    const ui = Object.assign({ accountsOpen: true, openRow: null }, vsc.getState() || {});
+    const ui = Object.assign({ accountsOpen: true, automationOpen: false, openRow: null }, vsc.getState() || {});
     const root = document.getElementById('root');
     let data = null;
     const paint = () => {
@@ -95,6 +103,7 @@ if (typeof acquireVsCodeApi === 'function') {
     const act = (el) => {
         const a = el.dataset.a, l = el.dataset.l;
         if (a === 'accounts') ui.accountsOpen = !ui.accountsOpen;
+        else if (a === 'automation') ui.automationOpen = !ui.automationOpen;
         else if (a === 'row') ui.openRow = ui.openRow === l ? null : l;
         else if (a === 'switch' || a === 'relogin') return vsc.postMessage({ seat: l });  // switchSeat routes re-login to enrol
         else if (a === 'save') return vsc.postMessage({ save: l });

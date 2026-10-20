@@ -70,12 +70,12 @@ function resetText(epoch) {
     return `⟳ ${DAYS[d.getDay()]} ${clock}`;
 }
 
-// Load = max(5h, weekly) (the CtrlA hub's rules); free = load < 50%; best = lowest load among qualifying accounts.
+// Load = max(5h, weekly) (the CtrlA hub's rules); best = lowest load among qualifying accounts.
 function capacity(u, ctx) {
     const seats = u.accounts.filter((a) => (a.provider || 'claude') === 'claude' && (a.five_pct != null || a.week_pct != null));
     const best = seats.filter((a) => qualifies(a, ctx)).sort((x, y) => loadOf(x) - loadOf(y))[0];
     const fresh = Object.fromEntries(seats.map((a) => [a.label, isFresh(a, ctx.now)]));
-    return { you: ctx.you, free: seats.filter((a) => loadOf(a) < 50).length, total: seats.length,
+    return { you: ctx.you,
         best: best ? { label: best.label, five: best.five_pct, week: best.week_pct } : null,
         loads: Object.fromEntries(seats.map((a) => [a.label, loadOf(a)])), fresh,
         activeFresh: !!ctx.you && fresh[ctx.you] === true };
@@ -86,6 +86,28 @@ function capacity(u, ctx) {
 function autoTarget(cap) {
     if (!cap.you || !cap.activeFresh || !(cap.loads[cap.you] >= 100) || !cap.best) return null;
     return cap.best.label;
+}
+
+// Status bar: `● <you> <5h>%/<wk>% · ⇄ <next-best>`. ◷ marks data that is not fresh; $(sync) marks auto-switch on.
+// Only the best qualifying account is named, so a stale or dead account is never counted as available.
+const pctOr = (v) => (v == null ? '–' : Math.round(v) + '%');
+function statusText(cap, accounts, auto) {
+    const lead = auto ? '$(sync) ' : '';
+    if (!cap.you) return lead + '● none';
+    const me = accounts.find((a) => a.label === cap.you) || {};
+    return `${lead}● ${cap.you} ${pctOr(me.five_pct)}/${pctOr(me.week_pct)}${cap.activeFresh ? '' : ' ◷'} · ⇄ ${cap.best ? cap.best.label : 'none'}`;
+}
+
+// Tooltip: the auto-switch state, then one line per account (an active account with no row gets one too).
+function statusTooltip(cap, accounts, auto, now = Date.now() / 1000) {
+    const list = cap.you && !accounts.some((a) => a.label === cap.you) ? [...accounts, { label: cap.you, fetched_at: null, state: 'no data yet' }] : accounts;
+    const dead = new Set(cap.relogin || []);
+    const lines = list.map((a) => {
+        const age = isFresh(a, now) ? null : ageText(a.fetched_at, now);
+        return `${a.label}: 5h ${pctOr(a.five_pct)}, wk ${pctOr(a.week_pct)}` + (dead.has(a.label) ? ' · re-login' : '')
+            + (age === 'no data' ? ' · no data' : age ? ` · data ${age}` : !isFresh(a, now) ? ` · ${a.state}` : '') + (a.label === cap.you ? ' · active' : '');
+    });
+    return [`Auto-switch: ${auto ? 'ON' : 'off'}`, ...lines].join('\n');
 }
 
 // Data age as shown on a row: null while fresh by time, 'no data' when there never was any, else '45m old' / '5h old' / '13d old'.
@@ -141,6 +163,19 @@ function panelData(accounts, cap, { now, installed, auto }) {
         counts: { total: rows.length, relogin: rows.filter((r) => r.icon === 'relogin').length, full: rows.filter((r) => r.icon === 'full').length },
         rows,
     };
+}
+
+// Turning auto-switch ON switches accounts with nobody watching, so it asks once, in a modal. OFF needs no dialog.
+// Returns true when the setting changed.
+const AUTO_DETAIL = 'Auto-switch changes the Claude Code account for every new Claude Code session on this machine, without asking, '
+    + 'when the active account reaches 100% (5h or weekly). Open Claude Code tabs keep the old account until you restart them.';
+async function setAutoSwitch(on) {
+    if (on) {
+        const ok = await vscode.window.showWarningMessage('Turn on auto-switch?', { modal: true, detail: AUTO_DETAIL }, 'Turn on');
+        if (ok !== 'Turn on') return false;
+    }
+    await vscode.workspace.getConfiguration('claudeUsage').update('autoSwitch', on, vscode.ConfigurationTarget.Global);
+    return true;
 }
 
 // input = what to type at ccswitch's own [y/N] prompts; we always ask in VS Code first.
@@ -295,17 +330,14 @@ function activate(context) {
         if (!r.ok) { vscode.window.showErrorMessage(`Auto-switch to ${to} failed: ` + r.msg); return; }
         poll();
         const next = await vscode.window.showWarningMessage(`Auto-switched Claude Code: ${from} is full, now on ${to} (most headroom). Restart open Claude Code tabs to use it.`, 'Turn auto-switch off');
-        if (next === 'Turn auto-switch off') vscode.workspace.getConfiguration('claudeUsage').update('autoSwitch', false, vscode.ConfigurationTarget.Global);
+        if (next === 'Turn auto-switch off') setAutoSwitch(false);
     };
-    const toggleAuto = () => vscode.workspace.getConfiguration('claudeUsage').update('autoSwitch', !autoOn(), vscode.ConfigurationTarget.Global);
+    const toggleAuto = () => setAutoSwitch(!autoOn());
 
     const poll = () => {
         try { ({ accounts, cap } = readAccounts()); cap.auto = autoOn(); } catch (err) { status.text = '$(warning) Claude usage unreadable'; status.tooltip = String(err); return; }
-        const r = (v) => (v == null ? '–' : Math.round(v) + '%');
-        status.text = (cap.you && !cap.activeFresh ? '$(warning) ' : '$(pulse) ') + (cap.auto ? '$(sync) ' : '') + (cap.you ? `current ${cap.you} · ` : '') + `${cap.free}/${cap.total} free`
-            + (cap.best ? ` · most headroom ${cap.best.label} (${r(cap.best.five)}/${r(cap.best.week)})` : '');
-        status.tooltip = (cap.you && !cap.activeFresh ? `Data for ${cap.you} is over 30 min old\n` : '') + `Auto-switch: ${cap.auto ? 'ON' : 'off'}\n` + 'Accounts (5h / weekly)\n'
-            + accounts.map((a) => `${a.email || a.label}: session ${r(a.five_pct)}, weekly ${r(a.week_pct)}`).join('\n');
+        status.text = statusText(cap, accounts, cap.auto);
+        status.tooltip = statusTooltip(cap, accounts, cap.auto);
         push();
         autoSwitch();
     };
