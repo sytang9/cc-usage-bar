@@ -1,66 +1,63 @@
-// Sidebar panel (layout A). render(data, ui) turns a panelData() result (extension.js) into HTML; it is pure so the
-// tests can call it. Every label, email and reset text goes through esc(), which extension.js inlines before this
-// script. The bootstrap at the end runs only inside a VS Code webview.
+// Sidebar panel, in the style of Claude Code's own "Account & Usage" view. render(data, ui) turns a panelData() result
+// (extension.js) into HTML; it is pure so the tests can call it. Every label, email and reset text goes through esc(),
+// which extension.js inlines before this script. Icons are codicons (vendored font). The bootstrap at the end runs
+// only inside a VS Code webview.
 
-const BAR_CLASS = (p) => (p > 85 ? 'r' : p > 59 ? 'y' : 'g');  // ccswitch's bands: green to 59%, amber to 85%, red above
-const ICON = { active: '●', relogin: '⚠', full: '⛔', switch: '⇄', '': '' };
-const TRASH = '<svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M6 1h4a1 1 0 0 1 1 1v1h3v1.5H2V3h3V2a1 1 0 0 1 1-1zm0 2h4V2.5H6zM3.5 6h9l-.7 8.1A1 1 0 0 1 10.8 15H5.2a1 1 0 0 1-1-.9zm2.6 1.5.3 6h1.2l-.2-6zm2.5 0-.2 6h1.2l.3-6z"/></svg>';
+const ICON = { active: 'circle-filled', relogin: 'warning', full: 'circle-slash', switch: 'arrow-swap' };
+const ACTION = { switch: 'Switch', save: 'Save login', relogin: 'How to re-login', delete: 'Delete' };
+const ACTION_TIP = { save: 'Save your current login under this name (ccswitch save)', delete: 'Delete the saved login (ccswitch delete)' };
 
 const pctText = (p) => (p == null ? '–' : p + '%');
-const track = (p) => '<div class="trk">' + (p == null ? '' : '<i class="' + BAR_CLASS(p) + '" style="width:' + Math.max(0, Math.min(100, p)) + '%"></i>') + '</div>';
+const ci = (name, cls = '', tip = '') => '<span class="codicon codicon-' + name + (cls ? ' ' + cls : '') + '"'
+    + (tip ? ' title="' + esc(tip) + '" role="img" aria-label="' + esc(tip) + '"' : ' aria-hidden="true"') + '></span>';
+const kv = (k, v) => '<div class="kv"><span class="k">' + k + '</span><span class="v">' + v + '</span></div>';
 
-function heroBar(key, p, reset) {
-    return '<div class="brow"><span class="k">' + key + '</span>' + track(p) + '<span class="p">' + pctText(p) + '</span>'
-        + (reset ? '<span class="rst">' + esc(reset) + '</span>' : '') + '</div>';
+// A section header: chevron + title (the toggle), then grey text or a link on the right.
+function section(key, title, open, right = '', extra = '') {
+    return '<div class="sec"><div class="hd" data-a="' + key + '" role="button" tabindex="0" aria-expanded="' + open + '"' + extra + '>'
+        + ci(open ? 'chevron-down' : 'chevron-right') + '<span class="t">' + title + '</span></div>' + right + '</div>';
 }
 
-function hero(a) {
-    if (!a) return '<div class="hero"><div class="dim">Not logged in to Claude Code</div></div>';
-    return '<div class="hero"><div class="name"><span class="ico i-active" title="Active account">●</span>' + esc(a.label) + '</div>'
-        + heroBar('5h', a.five, a.fiveReset) + heroBar('wk', a.week, a.weekReset)
-        + (a.age ? '<div class="age">◷ ' + esc(a.age) + '</div>' : '') + '</div>';
+function usage(name, cls, p, reset) {
+    return '<div class="use"><div class="top"><span>' + name + '</span><span class="p">' + pctText(p) + '</span></div>'
+        + '<div class="bar ' + cls + '">' + (p == null ? '' : '<i style="width:' + Math.max(0, Math.min(100, p)) + '%"></i>') + '</div>'
+        + (reset ? '<div class="rs">Resets ' + esc(reset) + '</div>' : '') + '</div>';
+}
+
+function active(a) {
+    if (!a) return '<div class="kv"><span class="k">Not logged in to Claude Code</span></div>';
+    return '<div class="grp">Account</div>' + kv('Nickname', esc(a.label)) + (a.email ? kv('Email', esc(a.email)) : '')
+        + (a.age ? kv('Last data', esc(a.age)) : '')
+        + '<div class="grp">Usage</div>' + usage('Session (5hr)', 's', a.five, a.fiveReset) + usage('Weekly (7 day)', 'w', a.week, a.weekReset);
 }
 
 function nextLine(d) {
     if (!d.installed) {
-        return '<div class="next"><div class="lbl">Switching needs ccswitch</div>'
+        return '<div class="next"><div class="who">Switching needs ccswitch</div>'
             + '<button class="btn" data-a="install">Install ccswitch</button></div>';
     }
-    if (!d.next) return '<div class="next"><div><div class="lbl">If you run out</div>No account to switch to</div></div>';
+    if (!d.next) return '<div class="next"><div class="who d">No account to switch to</div></div>';
     const n = d.next;
-    return '<div class="next"><span class="ico i-switch">⇄</span><div><div class="lbl">If you run out</div><b>' + esc(n.label)
-        + '</b> <span class="lbl">5h ' + pctText(n.five) + ' · wk ' + pctText(n.week) + '</span></div>'
+    return '<div class="next">' + ci(ICON.switch, 'i-switch') + '<div class="who"><b>' + esc(n.label) + '</b>'
+        + '<div class="d">Session ' + pctText(n.five) + ' · Weekly ' + pctText(n.week) + '</div></div>'
         + '<button class="btn" data-a="switch" data-l="' + esc(n.label) + '">Switch</button></div>';
 }
 
-function countsText(c) {
-    return c.total + (c.relogin ? ' · ' + c.relogin + ' ⚠' : '') + (c.full ? ' · ' + c.full + ' ⛔' : '');
-}
-
-const ACTION = {
-    switch: (l) => '<button class="btn2" data-a="switch" data-l="' + l + '">⇄ Switch</button>',
-    relogin: (l) => '<button class="btn2" data-a="relogin" data-l="' + l + '">⚠ Re-login help</button>',
-    save: (l) => '<button class="btn" data-a="save" data-l="' + l + '" title="Save your current login under this name (ccswitch save)">Save login</button>',
-    delete: (l) => '<button class="btn2 del" data-a="delete" data-l="' + l + '" title="Delete the saved login (ccswitch delete)" aria-label="Delete the saved login">' + TRASH + '</button>',
-};
-
 function row(r, open) {
     const l = esc(r.label);
-    const body = r.icon === 'relogin'
-        ? '<div class="note">re-login' + (r.age ? ' · ' + esc(r.age) : '') + '</div>'
-        : '<div class="mini">' + track(r.five) + track(r.week) + '</div>';
-    let html = '<div class="row' + (open ? ' open' : '') + (r.age ? ' muted' : '') + '" data-a="row" data-l="' + l
+    let html = '<div class="row' + (open ? ' open' : '') + '" data-a="row" data-l="' + l
         + '" role="button" tabindex="0" aria-expanded="' + open + '">'
-        + '<span class="ico i-' + (r.icon || 'none') + '"' + (r.tip ? ' title="' + esc(r.tip) + '"' : '') + '>' + ICON[r.icon] + '</span>'
-        + '<span class="nm">' + l + '</span>' + body + '<span class="chev">' + (open ? '⌄' : '›') + '</span></div>';
+        + (r.icon ? ci(ICON[r.icon], 'i-' + r.icon, r.tip) : '<span class="codicon" aria-hidden="true"></span>')
+        + '<span class="nm">' + l + '</span><span class="d">' + esc(r.summary) + '</span>'
+        + ci(open ? 'chevron-down' : 'chevron-right') + '</div>';
     if (!open) return html;
-    const resets = [r.fiveReset && '5h ' + esc(r.fiveReset), r.weekReset && 'wk ' + esc(r.weekReset)].filter(Boolean).join(' · ');
+    const use = (p, reset) => pctText(p) + (reset ? ' · resets ' + esc(reset) : '');
     html += '<div class="det">'
-        + (r.email ? '<div>✉ <b>' + esc(r.email) + '</b></div>' : '')
-        + '<div>5h ' + pctText(r.five) + ' · wk ' + pctText(r.week) + '</div>'
-        + (resets ? '<div>' + resets + '</div>' : '')
-        + (r.age ? '<div>◷ ' + esc(r.age) + '</div>' : '')
-        + (r.actions.length ? '<div class="acts">' + r.actions.map((a) => ACTION[a](l)).join('') + '</div>' : '')
+        + (r.email ? kv('Email', esc(r.email)) : '')
+        + (r.age ? kv('Last data', esc(r.age))
+            : kv('Session (5hr)', use(r.five, r.fiveReset)) + kv('Weekly (7 day)', use(r.week, r.weekReset)))
+        + (r.actions.length ? '<div class="acts">' + r.actions.map((a) => '<button class="lnk" data-a="' + a + '" data-l="' + l + '"'
+            + (ACTION_TIP[a] ? ' title="' + ACTION_TIP[a] + '"' : '') + '>' + ACTION[a] + '</button>').join('') + '</div>' : '')
         + '</div>';
     return html;
 }
@@ -69,26 +66,28 @@ function row(r, open) {
 // keyboard users can read it (the tooltip is not reachable for them).
 function automation(d, ui) {
     const open = ui.automationOpen === true;
-    return '<div class="sec tog" data-a="automation" role="button" tabindex="0" aria-expanded="' + open + '">'
-        + '<span class="chev">' + (open ? '▾' : '▸') + '</span>⚠ Automation<span class="n">' + (d.auto ? 'on' : 'off') + '</span></div>'
-        + (open ? '<div class="auto"><div class="lbl">Switches at 100%. Asks once, when you turn it on.</div><div class="tgrow"><span>Auto-switch</span>'
-            + '<button class="tg' + (d.auto ? ' on' : '') + '" data-a="auto" role="switch" aria-checked="' + !!d.auto + '" aria-label="Auto-switch"'
-            + ' title="When the active account reaches 100%, switch to the next-best account (fresh data, working login, at most once per 10 min), without asking. Restart open Claude Code tabs to use it."></button></div></div>' : '');
+    return section('automation', 'Automation', open, '<span class="r">' + (d.auto ? 'On' : 'Off') + '</span>')
+        + (open ? '<div class="kv"><span>Auto-switch at 100%</span>'
+            + '<button class="tg' + (d.auto ? ' on' : '') + '" data-a="auto" role="switch" aria-checked="' + !!d.auto + '" aria-label="Auto-switch at 100%"'
+            + ' title="When the active account reaches 100%, switch to the next-best account (fresh data, working login, at most once per 10 min), without asking. Restart open Claude Code tabs to use it."></button></div>'
+            + '<div class="note">Moves every new Claude Code session on this machine to the account in "If you run out". Asks once when you turn it on.</div>' : '');
 }
 
 function render(d, ui) {
-    const open = ui.accountsOpen !== false;
+    const activeOpen = ui.activeOpen !== false, nextOpen = ui.nextOpen !== false, open = ui.accountsOpen !== false;
     const health = d.loginHealth === 'unknown' ? ' title="ccswitch could not check logins, so none is marked re-login"' : '';
-    return '<div class="sec">Active account</div>' + hero(d.active) + nextLine(d)
-        + '<div class="sec tog" data-a="accounts" role="button" tabindex="0" aria-expanded="' + open + '"' + health + '>'
-        + '<span class="chev">' + (open ? '▾' : '▸') + '</span>Accounts<span class="n">' + countsText(d.counts) + '</span></div>'
+    const n = d.installed ? d.counts.saved + ' saved' : d.counts.total + (d.counts.total === 1 ? ' account' : ' accounts');
+    return section('active', 'Active account', activeOpen, '<button class="lnk r" data-a="details" title="Open claude.ai/settings/usage">View details</button>')
+        + (activeOpen ? active(d.active) : '')
+        + section('next', 'If you run out', nextOpen) + (nextOpen ? nextLine(d) : '')
+        + section('accounts', 'Accounts', open, '<span class="r">' + n + '</span>', health)
         + (open ? '<div class="rows">' + d.rows.map((r) => row(r, r.label === ui.openRow)).join('') + '</div>' : '')
         + (d.installed ? automation(d, ui) : '');
 }
 
 if (typeof acquireVsCodeApi === 'function') {
     const vsc = acquireVsCodeApi();
-    const ui = Object.assign({ accountsOpen: true, automationOpen: false, openRow: null }, vsc.getState() || {});
+    const ui = Object.assign({ activeOpen: true, nextOpen: true, accountsOpen: true, automationOpen: false, openRow: null }, vsc.getState() || {});
     const root = document.getElementById('root');
     let data = null;
     const paint = () => {
@@ -100,16 +99,17 @@ if (typeof acquireVsCodeApi === 'function') {
             if (again) again.focus();
         }
     };
+    const SECTIONS = { active: 'activeOpen', next: 'nextOpen', accounts: 'accountsOpen', automation: 'automationOpen' };
     const act = (el) => {
         const a = el.dataset.a, l = el.dataset.l;
-        if (a === 'accounts') ui.accountsOpen = !ui.accountsOpen;
-        else if (a === 'automation') ui.automationOpen = !ui.automationOpen;
+        if (SECTIONS[a]) ui[SECTIONS[a]] = !ui[SECTIONS[a]];
         else if (a === 'row') ui.openRow = ui.openRow === l ? null : l;
         else if (a === 'switch' || a === 'relogin') return vsc.postMessage({ seat: l });  // switchSeat routes re-login to enrol
         else if (a === 'save') return vsc.postMessage({ save: l });
         else if (a === 'delete') return vsc.postMessage({ del: l });
         else if (a === 'auto') return vsc.postMessage({ toggleAuto: 1 });
         else if (a === 'install') return vsc.postMessage({ installCc: 1 });
+        else if (a === 'details') return vsc.postMessage({ openUsage: 1 });
         vsc.setState(ui);
         paint();
     };

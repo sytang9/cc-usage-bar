@@ -299,31 +299,36 @@ minutes old; `$(sync)` in front means auto-switch is on). The tooltip lists ever
 account with its data age and re-login state.
 
 <p>
-<img src="vscode/screenshot-dark.png" width="320" alt="VS Code sidebar in Dark Modern: the Active account card for 002 with 5h and weekly bars and reset times, an If you run out line offering 004 with a Switch button, the Accounts list with counts 4 · 1 ⚠ · 1 ⛔ and the details of 001 open, and the Automation section with the Auto-switch toggle">
-<img src="vscode/screenshot-light.png" width="320" alt="The same sidebar in Light Modern, with the details of the re-login account 003 open">
+<img src="vscode/screenshot-dark.png" width="320" alt="VS Code sidebar in Dark Modern: Active account for 002 with its nickname, email, an orange Session (5hr) bar at 82% and a blue Weekly (7 day) bar at 74% with their reset times; If you run out offering 004 with a Switch button; the Accounts list (4 saved) with the re-login account 003 open; and Automation open with the Auto-switch at 100% toggle">
+<img src="vscode/screenshot-light.png" width="320" alt="The same sidebar in Light Modern, with no account open and Automation collapsed">
 </p>
 
 The screenshots are headless renders of the real panel with demo accounts, with
 the Dark Modern and Light Modern theme colours filled in by hand.
 
-The sidebar follows your VS Code theme (Dark, Light and High Contrast). Top to
+The sidebar follows your VS Code theme (Dark, Light and High Contrast) and the
+look of Claude Code's own Account & Usage view. Every section folds. Top to
 bottom:
 
-- **Active account** — the account you are on, in large type, with its 5h and
-  weekly bars (green to 59%, amber to 85%, red above) and when each resets.
-  Its data age shows only when the data is over 30 minutes old.
+- **Active account** — **Account**: the nickname and email of the account you
+  are on. **Usage**: **Session (5hr)** (orange bar) and **Weekly (7 day)** (the
+  theme's progress blue), each with its percent and when it resets. **Last
+  data** shows only when its data is over 30 minutes old. **View details**
+  opens claude.ai/settings/usage in your browser.
 - **If you run out** — the best account to switch to: the lowest
   `max(5h, weekly)` among saved accounts with a working login, data under 30
   minutes old and both windows below 100%. **Switch** runs `ccswitch <label>`;
   new Claude Code sessions use it; restart open Claude Code tabs to move them
   over (see Caveats). With no such account it says **No account to switch to**.
-- **Accounts** — collapsible; the header counts accounts, re-logins and full
-  ones (`4 · 1 ⚠ · 1 ⛔`). Each row has one status icon, the name and two thin
-  bars (5h over weekly). Click a row for its email, reset times, data age and
-  actions: **Switch**, **Re-login help**, delete (trash icon, `ccswitch
-  delete`), and **Save login** on the active account when it is not saved yet
-  (`ccswitch save` only ever snapshots the active login). Actions confirm first.
-- **Automation** — collapsed by default. **Auto-switch** (off by default): when
+- **Accounts** — the header says how many are saved (`4 saved`). Each row has
+  one status icon, the name and one summary: `82% · 74%` (session · weekly),
+  `Weekly full · resets Thu`, `Re-login needed` or `No recent data`. Click a
+  row for its email, usage and reset times (or its data age) and its actions:
+  **Switch**, **How to re-login**, **Delete** (`ccswitch delete`), and **Save
+  login** on the active account when it is not saved yet (`ccswitch save` only
+  ever snapshots the active login). Actions confirm first.
+- **Automation** — collapsed by default; the header says **On** or **Off**.
+  **Auto-switch at 100%** (off by default): when
   the active account reaches 100% (5h or weekly), switch to the account in **If
   you run out**, without asking. Turning it on from the sidebar or the Toggle
   command opens one confirmation dialog that says so; turning it on in Settings
@@ -333,14 +338,16 @@ bottom:
   restarted. Never when the active account's own data is over 30 minutes old; at
   most once every 10 minutes.
 
-| Icon | Meaning |
+| Icon (codicon) | Meaning |
 |------|---------|
-| ● | active account |
-| ⇄ | you can switch here |
-| ⛔ | a limit is at 100% |
-| ⚠ | needs re-login |
-| ⟳ | resets in |
-| ◷ | data age |
+| `circle-filled` (orange) | active account |
+| `arrow-swap` | you can switch here |
+| `circle-slash` | a limit is at 100% |
+| `warning` | needs re-login |
+
+Each icon has a tooltip. The icons are [Codicons](https://github.com/microsoft/vscode-codicons)
+by Microsoft (font CC BY 4.0, CSS MIT), vendored with their licences in
+`vscode/webview/codicons/`.
 
 Usage comes from `ccswitch`'s own cache
 (`~/.claude/accounts/<label>/.usage-cache`). Every 10 minutes (the cache TTL)

@@ -54,13 +54,18 @@ const vscode = {
     },
     workspace: { getConfiguration: () => ({ get: (k) => cfg[k], update: async (k, v, t) => { updates.push([k, v, t]); } }) },
     ConfigurationTarget: { Global: 1 },
-    commands: {}, env: {},
+    commands: {},
+    env: { openExternal: async (u) => { opened.push(String(u)); return true; } },
+    Uri: { file: (p) => ({ fsPath: p, toString: () => 'file://' + p }), parse: (u) => ({ toString: () => u }) },
 };
+const opened = [];
+// A stand-in for the view's webview: the extension asks it for the CSP source and the resource URI of codicon.css.
+const fakeWebview = { cspSource: 'https://res.test', asWebviewUri: (u) => 'https://res.test' + u.fsPath };
 const orig = Module._load;
 Module._load = function (r, ...a) { return r === 'vscode' ? vscode : orig.call(this, r, ...a); };
 const file = path.join(__dirname, '..', 'vscode', 'extension.js');
 const m = new Module(file); m.filename = file; m.paths = Module._nodeModulePaths(path.dirname(file));
-m._compile(fs.readFileSync(file, 'utf8') + '\n;Object.assign(module.exports, { readSnapshot, isFresh, qualifies, capacity, parseUsageJson, mergeLogins, readAccounts, activeLabel, autoTarget, checkLogins, relogin, switchSeat, saveSeat, esc, webviewHtml, panelData, ageText, setAutoSwitch, changeAutoSwitch, AUTO_DETAIL, statusText, statusTooltip });', file);
+m._compile(fs.readFileSync(file, 'utf8') + '\n;Object.assign(module.exports, { readSnapshot, isFresh, qualifies, capacity, parseUsageJson, mergeLogins, readAccounts, activeLabel, autoTarget, checkLogins, relogin, switchSeat, saveSeat, esc, webviewHtml, panelData, ageText, setAutoSwitch, changeAutoSwitch, AUTO_DETAIL, statusText, statusTooltip, resetText, openUsagePage, USAGE_URL, CODICONS });', file);
 const e = m.exports;
 const calls = () => (fs.existsSync(LOG) ? fs.readFileSync(LOG, 'utf8').trim().split('\n') : []);
 
@@ -103,8 +108,9 @@ const calls = () => (fs.existsSync(LOG) ? fs.readFileSync(LOG, 'utf8').trim().sp
         assert.strictEqual(d.active.five, 23);
         assert.strictEqual(d.active.age, null);
         assert.strictEqual(d.next.label, '004');
-        assert.deepStrictEqual(d.counts, { total: 4, relogin: 1, full: 1 });
+        assert.deepStrictEqual(d.counts, { total: 4, saved: 4, relogin: 1, full: 1 });
         assert.deepStrictEqual(Object.fromEntries(d.rows.map((r) => [r.label, r.icon])), { '001': 'full', '002': 'active', '003': 'relogin', '004': 'switch' });
+        assert.strictEqual(d.active.email, '002@x.example');
         assert.strictEqual(d.rows[2].age, '13d old');
         assert.strictEqual(d.rows[3].age, null);
         assert.strictEqual(d.rows[0].tip, 'A limit is at 100%');
@@ -116,8 +122,9 @@ const calls = () => (fs.existsSync(LOG) ? fs.readFileSync(LOG, 'utf8').trim().sp
     await check('panelData: counts follow the row icons, not the free count (stale and dead are not free)', () => {
         const a = [acct('001', 5, 5, now - 7200), acct('002', 23, 64, now - 60), acct('003', 100, 5, now - 60), acct('004', 5, 5, now - 60)];
         const d = e.panelData(a, capOf(a, '002', ['004']), opts);
-        assert.deepStrictEqual(d.counts, { total: 4, relogin: 1, full: 1 });
+        assert.deepStrictEqual(d.counts, { total: 4, saved: 4, relogin: 1, full: 1 });
         assert.strictEqual(d.rows[0].icon, '', 'a stale account is not a switch target');
+        assert.strictEqual(d.rows[0].summary, 'No recent data');
         assert.strictEqual(d.rows[0].age, '2h old');
     });
 
@@ -307,22 +314,49 @@ const calls = () => (fs.existsSync(LOG) ? fs.readFileSync(LOG, 'utf8').trim().sp
     });
 
     await check('the webview locks itself down with a CSP and carries esc; no iframe', () => {
-        const html = e.webviewHtml();
-        assert.match(html, /<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src data:">/);
+        const html = e.webviewHtml(fakeWebview);
+        const csp = html.match(/<meta http-equiv="Content-Security-Policy" content="([^"]*)">/)[1];
+        assert.strictEqual(csp, "default-src 'none'; style-src 'unsafe-inline' https://res.test; font-src https://res.test; script-src 'unsafe-inline'; img-src data:",
+            'only font-src and style-src gain the webview source');
         assert.ok(html.includes('function esc('), 'the page carries the same esc as the extension');
         assert.ok(html.includes('function render('), 'the page carries the panel script');
         assert.ok(!html.includes('<iframe'));
         assert.strictEqual(html.split('</script>').length, 2, 'one inline script, nothing in it closes it early');
     });
 
+    await check('codicons: the page links the vendored codicon.css through asWebviewUri; font and licence ship with it', () => {
+        const html = e.webviewHtml(fakeWebview);
+        assert.ok(html.includes('<link rel="stylesheet" href="https://res.test' + path.join(e.CODICONS, 'codicon.css') + '">'));
+        for (const f of ['codicon.css', 'codicon.ttf', 'LICENSE']) assert.ok(fs.existsSync(path.join(e.CODICONS, f)), f);
+        assert.match(fs.readFileSync(path.join(e.CODICONS, 'codicon.css'), 'utf8'), /url\("\.\/codicon\.ttf/, 'the font loads from next to the css');
+        const src = fs.readFileSync(file, 'utf8');
+        assert.match(src, /localResourceRoots: \[vscode\.Uri\.file\(CODICONS\)\]/, 'the webview may load the codicons folder and nothing else');
+    });
+
+    await check('resetText: in 48m / Fri 01:00 / now; short drops minutes and clock', () => {
+        const t = Date.now() / 1000;
+        const later = (secs) => new Date((t + secs) * 1000).toDateString() === new Date(t * 1000).toDateString();
+        if (later(48 * 60 + 30)) assert.strictEqual(e.resetText(t + 48 * 60 + 30), 'in 48m');
+        if (later(4 * 3600 + 12 * 60 + 30)) {
+            assert.strictEqual(e.resetText(t + 4 * 3600 + 12 * 60 + 30), 'in 4h 12m');
+            assert.strictEqual(e.resetText(t + 4 * 3600 + 12 * 60 + 30, true), 'in 4h');
+        }
+        assert.match(e.resetText(t + 3 * 86400), /^(Sun|Mon|Tue|Wed|Thu|Fri|Sat) \d\d:\d\d$/);
+        assert.match(e.resetText(t + 3 * 86400, true), /^(Sun|Mon|Tue|Wed|Thu|Fri|Sat)$/);
+        assert.strictEqual(e.resetText(t + 10), 'now');
+        assert.ok(!/⟳/.test(fs.readFileSync(file, 'utf8')), 'no ⟳ symbol: the panel says "Resets"');
+    });
+
     // --- the native panel (vscode/webview/panel.*) ---------------------------------------------------
     const WV = path.join(__dirname, '..', 'vscode', 'webview');
-    const readWv = (f) => fs.readFileSync(path.join(WV, f), 'utf8');
-    const panel = () => { const ctx = { esc: e.esc }; require('vm').runInNewContext(readWv('panel.js'), ctx); return ctx; };
-    const ui = (over = {}) => ({ accountsOpen: true, automationOpen: false, openRow: null, ...over });
+    function readWv(f) { return fs.readFileSync(path.join(WV, f), 'utf8'); }
+    function panel() { const ctx = { esc: e.esc }; require('vm').runInNewContext(readWv('panel.js'), ctx); return ctx; }
+    function ui(over = {}) { return { accountsOpen: true, automationOpen: false, openRow: null, ...over }; }
+    // The markup of one account row (the row line, not its details).
+    const rowOf = (html, label) => (html.match(new RegExp('<div class="row[^"]*" data-a="row" data-l="' + label + '"[\\s\\S]*?</div>')) || [''])[0];
 
     await check('B4 no hard-coded colour in the panel', () => {
-        const src = readWv('panel.css') + readWv('panel.js') + e.webviewHtml();
+        const src = readWv('panel.css') + readWv('panel.js') + e.webviewHtml(fakeWebview);
         assert.ok(!/#[0-9a-fA-F]{3,8}\b/.test(src), 'hex colour: ' + (src.match(/#[0-9a-fA-F]{3,8}\b/) || [])[0]);
         assert.ok(!/\b(rgba?|hsla?)\(/.test(src), 'rgb()/hsl()');
         assert.ok(!/:\s*(white|black)\b/.test(src), 'named colour');
@@ -330,9 +364,35 @@ const calls = () => (fs.existsSync(LOG) ? fs.readFileSync(LOG, 'utf8').trim().sp
         assert.ok(vars.length > 0 && vars.every((v) => v.startsWith('var(--vscode-')), 'only --vscode-* variables');
     });
 
-    await check('B4 the panel uses theme variables', () => {
+    await check('B4 the panel uses theme variables: orange session, theme-blue weekly, no traffic lights', () => {
         const css = readWv('panel.css');
-        for (const v of ['--vscode-charts-red', '--vscode-editorWarning-foreground', '--vscode-contrastBorder']) assert.ok(css.includes(v), v);
+        for (const v of ['--vscode-charts-orange', '--vscode-progressBar-background', '--vscode-textLink-foreground', '--vscode-button-background',
+            '--vscode-editorWarning-foreground', '--vscode-errorForeground', '--vscode-contrastBorder', '--vscode-contrastActiveBorder']) assert.ok(css.includes(v), v);
+        assert.ok(!/charts-(green|yellow|red)/.test(css + readWv('panel.js')), 'no traffic-light bar colours');
+    });
+
+    await check('render: codicons replace the emoji and Unicode symbols', () => {
+        const p = panel();
+        const all = [p.render(pdFour(), ui({ automationOpen: true })), p.render(pdFour(), ui({ openRow: '003' })), readWv('panel.js'), readWv('panel.css')].join('');
+        for (const ch of ['⛔', '⚠', '⇄', '●', '◷', '⟳', '▾', '▸', '›', '⌄', '✉', '<svg']) assert.ok(!all.includes(ch), ch);
+        assert.ok(all.includes('codicon-chevron-down') && all.includes('codicon-chevron-right'));
+    });
+
+    await check('render: Active account has ACCOUNT and USAGE groups, nickname, email, both limits and their resets', () => {
+        const html = panel().render(pdFour(), ui());
+        for (const t of ['Active account', '>Account<', '>Usage<', 'Nickname', '002@x.example', 'Session (5hr)', 'Weekly (7 day)', '>23%<', '>64%<', 'Resets in', 'View details'])
+            assert.ok(html.includes(t), t);
+        assert.match(html, /bar s[^>]*><i style="width:23%"/, 'the session bar is 23% long');
+        assert.match(html, /bar w[^>]*><i style="width:64%"/, 'the weekly bar is 64% long');
+        assert.ok(!html.includes('Last data'), 'fresh data: no data age');
+    });
+
+    await check('render: every section folds; the header keeps its title', () => {
+        const p = panel();
+        const shut = p.render(pdFour(), ui({ activeOpen: false, nextOpen: false }));
+        assert.ok(shut.includes('Active account') && shut.includes('If you run out') && shut.includes('View details'));
+        assert.ok(!shut.includes('Session (5hr)') && !shut.includes('data-a="switch"'));
+        assert.match(shut, /data-a="active"[^>]*aria-expanded="false"/);
     });
 
     await check('render: no account to switch to', () => {
@@ -340,29 +400,53 @@ const calls = () => (fs.existsSync(LOG) ? fs.readFileSync(LOG, 'utf8').trim().sp
         const html = panel().render(e.panelData(a, capOf(a, '002'), opts), ui());
         assert.ok(html.includes('No account to switch to'));
         assert.ok(!html.includes('data-a="switch"'));
-        assert.ok(!html.includes('If you run out</div><b>'), 'no account named in that line');
     });
 
-    await check('render: next-best line has a Switch button; no ccswitch -> Install', () => {
+    await check('render: next-best line names the account, both limits, one Switch button; no ccswitch -> Install', () => {
         const html = panel().render(pdFour(), ui());
-        assert.match(html, /⇄[\s\S]*004[\s\S]*5h 46% · wk 13%[\s\S]*data-a="switch" data-l="004"/);
+        assert.match(html, /codicon-arrow-swap[\s\S]*004[\s\S]*Session 46% · Weekly 13%[\s\S]*data-a="switch" data-l="004"/);
+        assert.strictEqual(html.split('data-a="switch"').length - 1, 1, 'one Switch button while the rows are closed');
         const a = four();
         const bare = panel().render(e.panelData(a, capOf(a, '002', ['003']), { ...opts, installed: false }), ui());
         assert.ok(bare.includes('data-a="install"') && bare.includes('Install ccswitch'));
         assert.ok(!bare.includes('data-a="switch"'));
     });
 
-    await check('render: counts header', () => {
+    await check('render: Accounts header says how many are saved, open or collapsed', () => {
         const p = panel();
-        assert.ok(p.render(pdFour(), ui()).includes('4 · 1 ⚠ · 1 ⛔'));
+        assert.ok(p.render(pdFour(), ui()).includes('4 saved'));
         const closed = p.render(pdFour(), ui({ accountsOpen: false }));
-        assert.ok(closed.includes('4 · 1 ⚠ · 1 ⛔') && !closed.includes('data-a="row"'), 'collapsed: counts, no rows');
+        assert.ok(closed.includes('4 saved') && !closed.includes('data-a="row"'), 'collapsed: count, no rows');
+    });
+
+    await check('render: each row has its status codicon with a tooltip and one grey summary', () => {
+        const html = panel().render(pdFour(), ui());
+        const want = { '001': ['circle-slash', 'A limit is at 100%', /Weekly full · resets \w+/], '002': ['circle-filled', 'Active account', /23% · 64%/],
+            '003': ['warning', 'Needs re-login', /Re-login needed/], '004': ['arrow-swap', 'You can switch here', /46% · 13%/] };
+        for (const [label, [icon, tip, summary]] of Object.entries(want)) {
+            const r = rowOf(html, label);
+            assert.ok(r.includes('codicon-' + icon), label + ' icon ' + icon);
+            assert.ok(r.includes('title="' + tip + '"'), label + ' tooltip');
+            assert.match(r, summary, label + ' summary');
+            assert.ok(!r.includes('class="bar'), label + ': no bars in a row');
+        }
+    });
+
+    await check('panelData: summaries say full / re-login / stale / percentages', () => {
+        const a = [acct('001', 100, 5, now - 60, { five_reset_epoch: now + 3 * 3600 + 120 }), acct('002', 23, null, now - 60),
+            acct('003', 5, 5, now - 7200), acct('004', 50, 100, now - 60, { week_reset_epoch: now - 3600 })];
+        const s = Object.fromEntries(e.panelData(a, capOf(a, '002', []), opts).rows.map((r) => [r.label, r.summary]));
+        assert.match(s['001'], /^Session full · resets (in 3h|tomorrow)$/);
+        assert.strictEqual(s['002'], '23% · –');
+        assert.strictEqual(s['003'], 'No recent data');
+        assert.strictEqual(s['004'], 'Weekly full', 'a past reset is not named');
     });
 
     await check('render: a missing window shows –, not 0% or NaN', () => {
         const a = [acct('002', 23, 64, now - 60), acct('half', null, 30, now - 60, { five_reset_epoch: null })];
         const html = panel().render(e.panelData(a, capOf(a, 'half'), opts), ui());
         assert.ok(html.includes('>–<') && !html.includes('NaN') && !html.includes('null'));
+        assert.ok(rowOf(html, 'half').includes('– · 30%'));
     });
 
     await check('render: escapes every label', () => {
@@ -374,23 +458,39 @@ const calls = () => (fs.existsSync(LOG) ? fs.readFileSync(LOG, 'utf8').trim().sp
             assert.ok(html.includes('&lt;img'));
             assert.ok(!html.includes('<img src=x'));
             assert.ok(!html.includes('onerror="'), 'no raw quote inside an attribute');
-            assert.ok(!html.includes('"><b>'));
+            assert.ok(!html.includes('"><b>x@y') && html.includes('&quot;&gt;&lt;b&gt;x@y'), 'the email is escaped');
         }
     });
 
-    await check('render: the email appears only in the open row\'s details', () => {
+    await check('render: the active email shows in Active account; other emails only in an open row', () => {
         const p = panel();
-        assert.ok(!p.render(pdFour(), ui()).includes('@'));
+        const shut = p.render(pdFour(), ui());
+        assert.strictEqual(shut.split('@').length - 1, 1, 'one email: the active one');
+        assert.ok(shut.includes('002@x.example'));
         const open = p.render(pdFour(), ui({ openRow: '001' }));
         assert.strictEqual(open.split('001@x.example').length - 1, 1);
         assert.ok(open.includes('data-a="delete" data-l="001"'));
+        assert.match(rowOf(open, '001'), /codicon-chevron-down/, 'the open row points down');
+        assert.match(rowOf(open, '004'), /codicon-chevron-right/);
+    });
+
+    await check('render: open row details are key-value rows and text-link actions', () => {
+        const html = panel().render(pdFour(), ui({ openRow: '003' }));
+        const det = html.slice(html.indexOf('<div class="det">'));
+        for (const t of ['Email', '003@x.example', 'Last data', '13d old', 'How to re-login', 'Delete']) assert.ok(det.includes(t), t);
+        assert.match(det, /class="lnk" data-a="relogin" data-l="003"/);
+        assert.ok(!det.includes('Session (5hr)'), 'stale numbers are not shown as current');
+        const fresh = panel().render(pdFour(), ui({ openRow: '004' }));
+        const d4 = fresh.slice(fresh.indexOf('<div class="det">'));
+        assert.ok(d4.includes('Session (5hr)') && d4.includes('46%') && d4.includes('resets ') && d4.includes('>Switch<'));
     });
 
     await check('render: auto-switch toggle says its state', () => {
         const p = panel(), open = ui({ automationOpen: true });
         assert.match(p.render(pdFour(), open), /role="switch"[^>]*aria-checked="false"/);
         assert.match(p.render({ ...pdFour(), auto: true }, open), /role="switch"[^>]*aria-checked="true"/);
-        assert.ok(p.render({ ...pdFour(), auto: true }, ui()).includes('>on<'), 'the collapsed header still shows the state');
+        assert.ok(p.render({ ...pdFour(), auto: true }, ui()).includes('>On<'), 'the collapsed header still shows the state');
+        assert.ok(p.render(pdFour(), ui()).includes('>Off<'));
     });
 
     await check('render: Automation is collapsed by default and holds the toggle and a visible line', () => {
@@ -401,8 +501,18 @@ const calls = () => (fs.existsSync(LOG) ? fs.readFileSync(LOG, 'utf8').trim().sp
         const open = p.render(pdFour(), ui({ automationOpen: true }));
         assert.strictEqual(open.split('role="switch"').length - 1, 1);
         assert.match(open, /role="switch"[^>]*aria-checked="false"/);
-        assert.ok(open.includes('Switches at 100%.'), 'one visible line, not only a tooltip');
+        assert.ok(open.includes('Auto-switch at 100%'));
+        assert.ok(open.includes('Asks once when you turn it on.'), 'one visible line, not only a tooltip');
         assert.ok(!p.render({ ...pdFour(), installed: false }, ui({ automationOpen: true })).includes('role="switch"'), 'no ccswitch, no toggle');
+    });
+
+    await check('View details opens claude.ai/settings/usage in the browser', async () => {
+        opened.length = 0;
+        await e.openUsagePage();
+        assert.deepStrictEqual(opened, ['https://claude.ai/settings/usage']);
+        assert.match(fs.readFileSync(file, 'utf8'), /m\.openUsage\) openUsagePage\(\)/, 'the webview message is handled');
+        assert.match(readWv('panel.js'), /'details'\) return vsc\.postMessage\(\{ openUsage: 1 \}\)/, 'the link posts it');
+        assert.ok(panel().render(pdFour(), ui()).includes('data-a="details"'));
     });
 
     // --- G7: turning auto-switch on asks once ----------------------------------------------------------

@@ -59,15 +59,19 @@ function esc(s) {
 
 const DAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 
-function resetText(epoch) {
+// When a window resets, as the panel says it after "Resets": 'in 48m', 'in 4h 12m', 'tomorrow 01:00', 'Fri 01:00', 'now'.
+// short (the one-line row summary) drops minutes and clock: 'in 4h', 'tomorrow', 'Fri'.
+function resetText(epoch, short = false) {
     const secs = epoch - Date.now() / 1000;
-    if (secs < 60) return '⟳ now';
+    if (secs < 60) return 'now';
     const d = new Date(epoch * 1000), now = new Date();
-    const clock = d.toTimeString().slice(0, 5);
     const dayDiff = Math.round((new Date(d).setHours(0, 0, 0, 0) - new Date(now).setHours(0, 0, 0, 0)) / 864e5);
-    if (dayDiff === 0) { const m = Math.floor(secs / 60); return `⟳ ${m >= 60 ? `${Math.floor(m / 60)}h ${m % 60}m` : `${m}m`} (${clock})`; }
-    if (dayDiff === 1) return `⟳ tomorrow ${clock}`;
-    return `⟳ ${DAYS[d.getDay()]} ${clock}`;
+    if (dayDiff === 0) {
+        const m = Math.floor(secs / 60), h = Math.floor(m / 60);
+        return 'in ' + (!h ? m + 'm' : short ? h + 'h' : `${h}h ${m % 60}m`);
+    }
+    const day = dayDiff === 1 ? 'tomorrow' : DAYS[d.getDay()];
+    return short ? day : `${day} ${d.toTimeString().slice(0, 5)}`;
 }
 
 // Load = max(5h, weekly) (the CtrlA hub's rules); best = lowest load among qualifying accounts.
@@ -129,14 +133,17 @@ function readAccounts() {
     return { accounts, cap };
 }
 
-// What the panel shows (layout A), decided here so the webview only draws it. Every status is one icon with a fixed
-// tooltip, and the Accounts header counts the same icons. An active account with no row (not saved, no data) gets one.
+// What the panel shows, decided here so the webview only draws it. Every status is one icon with a fixed tooltip and
+// one grey summary ('82% · 74%', 'Weekly full · resets Thu', 'Re-login needed', 'No recent data').
+// An active account with no row (not saved, no data) gets one.
 const TIPS = { active: 'Active account', relogin: 'Needs re-login', full: 'A limit is at 100%', switch: 'You can switch here', '': '' };
 function panelData(accounts, cap, { now, installed, auto }) {
     const savedSet = new Set(cap.saved || []), dead = new Set(cap.relogin || []);
     const ctx = { you: cap.you, isSaved: (l) => savedSet.has(l), relogin: dead, now };
     const pct = (v) => (v == null ? null : Math.round(v));
-    const reset = (epoch) => (epoch && epoch > now - 60 ? resetText(epoch) : null);  // a past reset says nothing about now
+    const live = (epoch) => epoch && epoch > now - 60;  // a past reset says nothing about now
+    const reset = (epoch) => (live(epoch) ? resetText(epoch) : null);
+    const full = (name, epoch) => name + ' full' + (live(epoch) ? ' · resets ' + resetText(epoch, true) : '');
     const age = (a) => (isFresh(a, now) ? null : ageText(a.fetched_at, now) || a.state);
     const list = cap.you && !accounts.some((a) => a.label === cap.you)
         ? [...accounts, { label: cap.you, provider: 'claude', state: 'no data yet', fetched_at: null, five_pct: null, week_pct: null, email: null }]
@@ -151,16 +158,20 @@ function panelData(accounts, cap, { now, installed, auto }) {
             ...(dead.has(a.label) ? ['relogin'] : []),
             ...(savedSet.has(a.label) ? ['delete'] : []),
         ];
-        return { label: a.label, provider: a.provider || 'claude', icon, tip: TIPS[icon], five: pct(a.five_pct), week: pct(a.week_pct),
+        const summary = icon === 'relogin' ? 'Re-login needed'
+            : icon === 'full' ? (a.week_pct >= 100 ? full('Weekly', a.week_reset_epoch) : full('Session', a.five_reset_epoch))
+            : age(a) ? 'No recent data' : pctOr(a.five_pct) + ' · ' + pctOr(a.week_pct);
+        return { label: a.label, provider: a.provider || 'claude', icon, tip: TIPS[icon], summary, five: pct(a.five_pct), week: pct(a.week_pct),
             fiveReset: reset(a.five_reset_epoch), weekReset: reset(a.week_reset_epoch), age: age(a), email: a.email || null, actions };
     });
     const mine = list.find((a) => a.label === cap.you);
     return {
         installed, auto, loginHealth: cap.loginHealth || 'unknown',
-        active: mine ? { label: mine.label, five: pct(mine.five_pct), week: pct(mine.week_pct),
+        active: mine ? { label: mine.label, email: mine.email || null, five: pct(mine.five_pct), week: pct(mine.week_pct),
             fiveReset: reset(mine.five_reset_epoch), weekReset: reset(mine.week_reset_epoch), age: age(mine) } : null,
         next: cap.best ? { label: cap.best.label, five: pct(cap.best.five), week: pct(cap.best.week) } : null,
-        counts: { total: rows.length, relogin: rows.filter((r) => r.icon === 'relogin').length, full: rows.filter((r) => r.icon === 'full').length },
+        counts: { total: rows.length, saved: rows.filter((r) => savedSet.has(r.label)).length,
+            relogin: rows.filter((r) => r.icon === 'relogin').length, full: rows.filter((r) => r.icon === 'full').length },
         rows,
     };
 }
@@ -305,6 +316,10 @@ async function deleteSeat(label, onDone) {
     onDone();
 }
 
+// "View details" in the Active account header: Claude's own usage page, in the user's browser.
+const USAGE_URL = 'https://claude.ai/settings/usage';
+const openUsagePage = () => vscode.env.openExternal(vscode.Uri.parse(USAGE_URL));
+
 // Pre-release copies were published as meng-local.claude-usage (+ a Chrome helper); remove them so there is one sidebar.
 function removeOldHelper() {
     for (const id of ['meng-local.claude-usage', 'meng-local.claude-usage-chrome']) {
@@ -355,8 +370,8 @@ function activate(context) {
         vscode.window.registerWebviewViewProvider('claudeUsage.view', {
             resolveWebviewView(v) {
                 view = v;
-                v.webview.options = { enableScripts: true };
-                v.webview.html = webviewHtml();
+                v.webview.options = { enableScripts: true, localResourceRoots: [vscode.Uri.file(CODICONS)] };
+                v.webview.html = webviewHtml(v.webview);
                 v.webview.onDidReceiveMessage((m) => {
                     if (m === 'ready') push();
                     else if (m.seat) switchSeat(m.seat, poll);
@@ -364,6 +379,7 @@ function activate(context) {
                     else if (m.del && /^[\w-]+$/.test(m.del)) deleteSeat(m.del, poll);
                     else if (m.toggleAuto) toggleAuto();
                     else if (m.installCc) installCcswitch();
+                    else if (m.openUsage) openUsagePage();
                 });
                 v.onDidDispose(() => { view = null; });
             },
@@ -382,12 +398,16 @@ function activate(context) {
     context.subscriptions.push({ dispose: () => { clearInterval(timer); fs.unwatchFile(watched); fs.unwatchFile(path.join(HOME, '.claude.json')); } });
 }
 
-// One native panel: panel.css + esc + panel.js inlined. No network, no external files, no frames.
-function webviewHtml() {
+// One native panel: panel.css + esc + panel.js inlined; the vendored codicon font is the only file it loads.
+// No network, no frames.
+const CODICONS = path.join(__dirname, 'webview', 'codicons');
+function webviewHtml(webview) {
     const read = (f) => fs.readFileSync(path.join(__dirname, 'webview', f), 'utf8');
+    const src = webview.cspSource;
     return `<!DOCTYPE html><html><head><meta charset="utf-8">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src data:">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline' ${src}; font-src ${src}; script-src 'unsafe-inline'; img-src data:">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" href="${webview.asWebviewUri(vscode.Uri.file(path.join(CODICONS, 'codicon.css')))}">
 <style>
 ${read('panel.css')}</style></head><body><main id="root"></main><script>
 ${esc.toString()}
