@@ -114,7 +114,7 @@ function panelData(accounts, cap, { now, installed, auto }) {
     const savedSet = new Set(cap.saved || []), dead = new Set(cap.relogin || []);
     const ctx = { you: cap.you, isSaved: (l) => savedSet.has(l), relogin: dead, now };
     const pct = (v) => (v == null ? null : Math.round(v));
-    const reset = (epoch) => (epoch ? resetText(epoch) : null);
+    const reset = (epoch) => (epoch && epoch > now - 60 ? resetText(epoch) : null);  // a past reset says nothing about now
     const age = (a) => (isFresh(a, now) ? null : ageText(a.fetched_at, now) || a.state);
     const list = cap.you && !accounts.some((a) => a.label === cap.you)
         ? [...accounts, { label: cap.you, provider: 'claude', state: 'no data yet', fetched_at: null, five_pct: null, week_pct: null, email: null }]

@@ -118,6 +118,13 @@ const calls = () => (fs.existsSync(LOG) ? fs.readFileSync(LOG, 'utf8').trim().sp
         assert.strictEqual(d.rows[0].age, '2h old');
     });
 
+    await check('panelData: a reset that is already past is not shown as "now"', () => {
+        const a = [acct('002', 23, 64, now - 60), acct('003', 5, 5, now - 13 * 86400, { five_reset_epoch: now - 12 * 86400, week_reset_epoch: now - 600 })];
+        const r = e.panelData(a, capOf(a, '002', ['003']), opts).rows[1];
+        assert.strictEqual(r.fiveReset, null);
+        assert.strictEqual(r.weekReset, null);
+    });
+
     await check('panelData: nothing qualifies -> next is null', () => {
         const a = [acct('001', 5, 5, now - 7200), acct('002', 23, 64, now - 60), acct('003', 5, 5, now - 60)];
         const d = e.panelData(a, capOf(a, '002', ['003']), opts);
