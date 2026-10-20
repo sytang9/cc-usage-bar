@@ -12,10 +12,12 @@ const POLL_MS = 60 * 1000;  // keeps reset times and the per-account data age cu
 const HOME = require('os').homedir();
 const CCSWITCH = path.join(HOME, '.claude', 'ccswitch');
 const ACCOUNTS = path.join(HOME, '.claude', 'accounts');
+// ccswitch's label rule: letters, digits, '_' and '-', never a leading '-' (ccswitch would read it as an option).
+const isLabel = (l) => typeof l === 'string' && /^[A-Za-z0-9_][\w-]*$/.test(l);
 const saved = (label) => fs.existsSync(path.join(ACCOUNTS, label, 'credentials.json'));
 const readJson = (f) => { try { return JSON.parse(fs.readFileSync(f, 'utf8')); } catch { return null; } };
 const emailOf = (label) => (readJson(path.join(ACCOUNTS, label, 'oauthAccount.json')) || {}).emailAddress || null;
-const savedLabels = () => { try { return fs.readdirSync(ACCOUNTS).filter(saved).sort(); } catch { return []; } };
+const savedLabels = () => { try { return fs.readdirSync(ACCOUNTS).filter((l) => isLabel(l) && saved(l)).sort(); } catch { return []; } };
 
 // The saved account the live login belongs to (matched by email, like ccswitch's '*'); else the email's local part.
 function activeLabel() {
@@ -86,10 +88,10 @@ function capacity(u, ctx) {
 }
 
 // Auto-switch target: the best qualifying account, but only when the active account is full (100% on 5h or weekly)
-// and its own data is fresh. Returns a label or null.
+// and its own data is fresh. Returns a label (ccswitch's rule) or null.
 function autoTarget(cap) {
     if (!cap.you || !cap.activeFresh || !(cap.loads[cap.you] >= 100) || !cap.best) return null;
-    return cap.best.label;
+    return isLabel(cap.best.label) ? cap.best.label : null;
 }
 
 // Status bar: `● <you> <5h>%/<wk>% · ⇄ <next-best>`. ◷ marks data that is not fresh; $(sync) marks auto-switch on.
@@ -176,21 +178,34 @@ function panelData(accounts, cap, { now, installed, auto }) {
     };
 }
 
-// Turning auto-switch ON switches accounts with nobody watching, so it asks once, in a modal. OFF needs no dialog.
-// Returns true when the setting changed.
+// Turning auto-switch ON switches accounts with nobody watching, so it asks in a modal and records the yes in
+// globalState (state); auto-switch never acts without it. OFF needs no dialog. Returns true when the setting changed.
 const AUTO_DETAIL = 'Auto-switch changes the Claude Code account for every new Claude Code session on this machine, without asking, '
-    + 'when the active account reaches 100% (5h or weekly). Open Claude Code tabs keep the old account until you restart them.';
-async function setAutoSwitch(on) {
-    if (on) {
-        const ok = await vscode.window.showWarningMessage('Turn on auto-switch?', { modal: true, detail: AUTO_DETAIL }, 'Turn on');
-        if (ok !== 'Turn on') return false;
-    }
+    + 'when the active account reaches 100% (5h or weekly). If it is already at 100%, it switches right away. '
+    + 'Open Claude Code tabs keep the old account until you restart them.';
+const CONSENT = 'claudeUsage.autoSwitchConsent';
+async function askAutoConsent(state) {
+    const ok = await vscode.window.showWarningMessage('Turn on auto-switch?', { modal: true, detail: AUTO_DETAIL }, 'Turn on') === 'Turn on';
+    if (ok) await state.update(CONSENT, true);
+    return ok;
+}
+async function setAutoSwitch(on, state) {
+    if (on && !(await askAutoConsent(state))) return false;
     await vscode.workspace.getConfiguration('claudeUsage').update('autoSwitch', on, vscode.ConfigurationTarget.Global);
     return true;
 }
 // Fire-and-forget callers (toggle, toast): a failed settings write must be shown, not dropped.
-const changeAutoSwitch = (on) => setAutoSwitch(on).catch((err) =>
+const changeAutoSwitch = (on, state) => setAutoSwitch(on, state).catch((err) =>
     vscode.window.showErrorMessage('Could not change auto-switch: ' + (err && err.message || err)));
+// The setting is on, but nobody confirmed the dialog on this machine (settings.json, an older version):
+// ask once (polls share the pending dialog); No turns the setting off.
+let pendingConsent = null;
+function confirmAutoOn(state) {
+    pendingConsent = pendingConsent || askAutoConsent(state)
+        .then((ok) => ok || changeAutoSwitch(false).then(() => false))
+        .finally(() => { pendingConsent = null; });
+    return pendingConsent;
+}
 
 // input = what to type at ccswitch's own [y/N] prompts; we always ask in VS Code first.
 const run = (cmd, args, input = '') => new Promise((res) => {
@@ -215,7 +230,7 @@ async function ccswitch(args, input) {
 // Click a seat: saved -> `ccswitch <label>` (instant). Everything goes through ccswitch; a seat that isn't
 // saved yet (or whose saved login expired) is enrolled once with Claude's own /login, then Save login.
 async function switchSeat(label, onDone) {
-    if (!/^[\w-]+$/.test(label)) return;  // ccswitch's own label charset - never anything else
+    if (!isLabel(label)) return;  // ccswitch's own label rule - never anything else
     if (!fs.existsSync(CCSWITCH)) return installCcswitch();
     if (label === activeLabel()) { vscode.window.showInformationMessage(`You are already on ${label}.`); return; }
     if (relogin.has(label) || !saved(label)) return enroll(label, relogin.has(label), onDone);
@@ -297,6 +312,7 @@ async function checkLogins() {
 
 // Save the CURRENT login under its seat name (ccswitch save always snapshots whichever login is active).
 async function saveSeat(label, onDone) {
+    if (!isLabel(label)) return;
     if (label !== activeLabel()) { vscode.window.showWarningMessage(`You can only save the seat you are on (${activeLabel()}).`); return; }
     if (saved(label)) {
         const ok = await vscode.window.showWarningMessage(`Overwrite the saved login for ${label}?`,
@@ -310,6 +326,7 @@ async function saveSeat(label, onDone) {
 }
 
 async function deleteSeat(label, onDone) {
+    if (!isLabel(label)) return;
     const ok = await vscode.window.showWarningMessage(`Delete the saved login for ${label}?`,
         { modal: true, detail: 'Your current Claude Code login is not affected. To switch to this seat again you will need to log in to it once and choose Save login in its row.' }, 'Delete');
     if (ok !== 'Delete') return;
@@ -317,6 +334,67 @@ async function deleteSeat(label, onDone) {
     if (r.ok && !saved(label)) vscode.window.showInformationMessage(`Deleted the saved login for ${label}.`);
     else vscode.window.showErrorMessage('ccswitch delete failed: ' + r.msg);
     onDone();
+}
+
+// --- Auto-switch. Every VS Code window runs its own copy, so the cooldown is a file and one window at a time
+// decides and switches, under an mkdir lock (atomic). Both sit next to ccswitch's own state files.
+const AUTO_STAMP = path.join(ACCOUNTS, '.autoswitch.json');  // { last_switch: <epoch secs> }
+const AUTO_LOCK = path.join(ACCOUNTS, '.autoswitch.lock');
+const AUTO_COOLDOWN_SECS = 10 * 60;  // a lagging snapshot can't bounce us between accounts
+const AUTO_LOCK_STALE_SECS = 10 * 60;  // longer than ccswitch()'s worst case (5 tries x 90 s): a crashed window left it
+
+// Why auto-switch must not act now, or null when it may. Every gate but the machine-wide cooldown and lock.
+function autoBlock(g) {
+    if (!g.on) return 'off';
+    if (!g.consented) return 'no consent';
+    if (!g.installed) return 'no ccswitch';
+    if (!g.checked) return 'no login check yet';
+    if (g.health !== 'known') return 'login health unknown';
+    return autoTarget(g.cap) ? null : 'no target';
+}
+
+function writeAutoStamp(secs) {
+    const tmp = `${AUTO_STAMP}.${process.pid}.tmp`;
+    fs.writeFileSync(tmp, JSON.stringify({ last_switch: secs }));
+    fs.renameSync(tmp, AUTO_STAMP);
+}
+
+function takeAutoLock(now) {
+    try { fs.mkdirSync(AUTO_LOCK); return true; } catch { /* held by another window, or stale */ }
+    try {
+        if (now - fs.statSync(AUTO_LOCK).mtimeMs / 1000 < AUTO_LOCK_STALE_SECS) return false;
+        fs.rmSync(AUTO_LOCK, { recursive: true, force: true });
+        fs.mkdirSync(AUTO_LOCK);
+        return true;
+    } catch { return false; }
+}
+
+// One attempt: { skip: reason } or { from, to, r } (r = the ccswitch result). The stamp is written before the
+// switch, so a failed switch also waits out the cooldown instead of retrying on every poll.
+async function autoSwitchOnce(cap, state) {
+    const on = !!vscode.workspace.getConfiguration('claudeUsage').get('autoSwitch');
+    if (on && !state.get(CONSENT) && !(await confirmAutoOn(state))) return { skip: 'no consent' };
+    const why = autoBlock({ on, consented: !!state.get(CONSENT), installed: fs.existsSync(CCSWITCH), checked: loginChecked, health: loginHealth, cap });
+    if (why) return { skip: why };
+    const now = Date.now() / 1000;
+    if (!takeAutoLock(now)) return { skip: 'busy' };
+    try {
+        if (now - ((readJson(AUTO_STAMP) || {}).last_switch || 0) < AUTO_COOLDOWN_SECS) return { skip: 'cooldown' };
+        const live = readAccounts().cap, from = cap.you, to = autoTarget(live);  // the poll's cap may be a minute old
+        if (live.you !== from || !to) return { skip: 'moved' };
+        writeAutoStamp(now);
+        return { from, to, r: await ccswitch([to]) };
+    } finally { fs.rmSync(AUTO_LOCK, { recursive: true, force: true }); }
+}
+
+async function autoSwitch(cap, state, onDone) {
+    const res = await autoSwitchOnce(cap, state);
+    if (!res.r) return res;
+    if (!res.r.ok) { vscode.window.showErrorMessage(`Auto-switch to ${res.to} failed: ` + res.r.msg); return res; }
+    onDone();
+    const next = await vscode.window.showWarningMessage(`Auto-switched Claude Code: ${res.from} is full, now on ${res.to} (most headroom). Restart open Claude Code tabs to use it.`, 'Turn auto-switch off');
+    if (next === 'Turn auto-switch off') changeAutoSwitch(false);
+    return res;
 }
 
 // "View details" in the Active account header: Claude's own usage page, in the user's browser.
@@ -341,26 +419,14 @@ function activate(context) {
 
     const push = () => view && cap && view.webview.postMessage(panelData(accounts, cap, { now: Date.now() / 1000, installed: fs.existsSync(CCSWITCH), auto: !!cap.auto }));
     const autoOn = () => vscode.workspace.getConfiguration('claudeUsage').get('autoSwitch');
-    let lastAuto = 0;  // cooldown so a lagging snapshot can't bounce us between seats
-    const autoSwitch = async () => {
-        if (!autoOn() || !fs.existsSync(CCSWITCH) || Date.now() - lastAuto < 10 * 60 * 1000) return;
-        const from = cap.you, to = autoTarget(cap);
-        if (!to) return;
-        lastAuto = Date.now();
-        const r = await ccswitch([to]);
-        if (!r.ok) { vscode.window.showErrorMessage(`Auto-switch to ${to} failed: ` + r.msg); return; }
-        poll();
-        const next = await vscode.window.showWarningMessage(`Auto-switched Claude Code: ${from} is full, now on ${to} (most headroom). Restart open Claude Code tabs to use it.`, 'Turn auto-switch off');
-        if (next === 'Turn auto-switch off') changeAutoSwitch(false);
-    };
-    const toggleAuto = () => changeAutoSwitch(!autoOn());
+    const toggleAuto = () => changeAutoSwitch(!autoOn(), context.globalState);
 
     const poll = () => {
         try { ({ accounts, cap } = readAccounts()); cap.auto = autoOn(); } catch (err) { status.text = '$(warning) Claude usage unreadable'; status.tooltip = String(err); return; }
         status.text = statusText(cap, accounts, cap.auto);
         status.tooltip = statusTooltip(cap, accounts, cap.auto);
         push();
-        autoSwitch();
+        autoSwitch(cap, context.globalState, poll);
     };
 
     context.subscriptions.push(status,
@@ -376,10 +442,11 @@ function activate(context) {
                 v.webview.options = { enableScripts: true, localResourceRoots: [vscode.Uri.file(CODICONS)] };
                 v.webview.html = webviewHtml(v.webview);
                 v.webview.onDidReceiveMessage((m) => {
+                    if (!m) return;
                     if (m === 'ready') push();
                     else if (m.seat) switchSeat(m.seat, poll);
-                    else if (m.save && /^[\w-]+$/.test(m.save)) saveSeat(m.save, poll);
-                    else if (m.del && /^[\w-]+$/.test(m.del)) deleteSeat(m.del, poll);
+                    else if (m.save) saveSeat(m.save, poll);
+                    else if (m.del) deleteSeat(m.del, poll);
                     else if (m.toggleAuto) toggleAuto();
                     else if (m.installCc) installCcswitch();
                     else if (m.openUsage) openUsagePage();
