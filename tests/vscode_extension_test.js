@@ -369,6 +369,7 @@ const calls = () => (fs.existsSync(LOG) ? fs.readFileSync(LOG, 'utf8').trim().sp
         for (const v of ['--vscode-charts-orange', '--vscode-progressBar-background', '--vscode-textLink-foreground', '--vscode-button-background',
             '--vscode-editorWarning-foreground', '--vscode-errorForeground', '--vscode-contrastBorder', '--vscode-contrastActiveBorder']) assert.ok(css.includes(v), v);
         assert.ok(!/charts-(green|yellow|red)/.test(css + readWv('panel.js')), 'no traffic-light bar colours');
+        assert.match(css, /\.grp, \.kv \.k, \.rs[^{]*\{ opacity: \.\d+; \}/, 'secondary text is dimmed in every theme, not only where descriptionForeground is grey');
     });
 
     await check('render: codicons replace the emoji and Unicode symbols', () => {
@@ -512,7 +513,9 @@ const calls = () => (fs.existsSync(LOG) ? fs.readFileSync(LOG, 'utf8').trim().sp
         assert.deepStrictEqual(opened, ['https://claude.ai/settings/usage']);
         assert.match(fs.readFileSync(file, 'utf8'), /m\.openUsage\) openUsagePage\(\)/, 'the webview message is handled');
         assert.match(readWv('panel.js'), /'details'\) return vsc\.postMessage\(\{ openUsage: 1 \}\)/, 'the link posts it');
-        assert.ok(panel().render(pdFour(), ui()).includes('data-a="details"'));
+        const link = panel().render(pdFour(), ui()).match(/<button class="([^"]*)" data-a="details"/);
+        assert.ok(link, 'the link is rendered');
+        assert.deepStrictEqual(link[1].split(' '), ['lnk'], 'link colour at rest: no grey right-hand-text class on it');
     });
 
     // --- G7: turning auto-switch on asks once ----------------------------------------------------------

@@ -352,8 +352,8 @@ by Microsoft (font CC BY 4.0, CSS MIT), vendored with their licences in
 Usage comes from `ccswitch`'s own cache
 (`~/.claude/accounts/<label>/.usage-cache`). Every 10 minutes (the cache TTL)
 the sidebar runs `ccswitch usage --json`, which refreshes it, keeps idle
-accounts' tokens alive and reports each login as `ok` or `re-login`. **Re-login
-help** opens a terminal with `claude` for a one-time `/login`, then you save
+accounts' tokens alive and reports each login as `ok` or `re-login`. **How to
+re-login** opens a terminal with `claude` for a one-time `/login`, then you save
 the login. An older ccswitch without `--json` marks nothing as re-login.
 
 **Team view** — set `claudeUsage.usageFile` to a shared snapshot (the CtrlA

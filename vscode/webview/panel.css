@@ -40,6 +40,8 @@ button { font: inherit; cursor: pointer; }
 .bar.s i { background: var(--vscode-charts-orange); }
 .bar.w i { background: var(--vscode-progressBar-background); }
 .rs, .d, .note { font-size: 12px; color: var(--vscode-descriptionForeground); }
+/* Secondary text is grey in every theme: Light Modern's descriptionForeground equals its foreground, so dim it. */
+.grp, .kv .k, .rs, .d, .note, .sec .r { opacity: .8; }
 
 .next { display: flex; align-items: center; gap: 8px; padding: 6px 16px 8px; }
 .next .who { flex: 1; min-width: 0; }

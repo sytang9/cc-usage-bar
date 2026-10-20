@@ -77,7 +77,7 @@ function render(d, ui) {
     const activeOpen = ui.activeOpen !== false, nextOpen = ui.nextOpen !== false, open = ui.accountsOpen !== false;
     const health = d.loginHealth === 'unknown' ? ' title="ccswitch could not check logins, so none is marked re-login"' : '';
     const n = d.installed ? d.counts.saved + ' saved' : d.counts.total + (d.counts.total === 1 ? ' account' : ' accounts');
-    return section('active', 'Active account', activeOpen, '<button class="lnk r" data-a="details" title="Open claude.ai/settings/usage">View details</button>')
+    return section('active', 'Active account', activeOpen, '<button class="lnk" data-a="details" title="Open claude.ai/settings/usage">View details</button>')
         + (activeOpen ? active(d.active) : '')
         + section('next', 'If you run out', nextOpen) + (nextOpen ? nextLine(d) : '')
         + section('accounts', 'Accounts', open, '<span class="r">' + n + '</span>', health)
