@@ -438,8 +438,9 @@ const calls = () => (fs.existsSync(LOG) ? fs.readFileSync(LOG, 'utf8').trim().sp
 
     await check('render: Active account has ACCOUNT and USAGE groups, nickname, email, both limits and their resets', () => {
         const html = panel().render(pdFour(), ui());
-        for (const t of ['Active account', '>Account<', '>Usage<', 'Nickname', '002@x.example', 'Session (5hr)', 'Weekly (7 day)', '>23%<', '>64%<', 'Resets in', 'View details'])
+        for (const t of ['Active account', '>Account<', '>Usage<', 'Nickname', '002@x.example', 'Session (5hr)', 'Weekly (7 day)', '>23%<', '>64%<', 'View details'])
             assert.ok(html.includes(t), t);
+        assert.match(html, />Resets (in \d+m|in \d+h \d+m|tomorrow \d\d:\d\d)</, 'the session reset (1h away; after 23:00 that is tomorrow)');
         assert.match(html, /bar s[^>]*><i style="width:23%"/, 'the session bar is 23% long');
         assert.match(html, /bar w[^>]*><i style="width:64%"/, 'the weekly bar is 64% long');
         assert.ok(!html.includes('Last data'), 'fresh data: no data age');
