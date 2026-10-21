@@ -1051,6 +1051,10 @@ append_usage_history() {
   line="$(jq -cn --argjson t "$now" --argjson p5 "$3" --argjson p7 "$4" --argjson r5 "$5" --argjson r7 "$6" \
     '{t: $t, p5: $p5, p7: $p7, r5: $r5, r7: $r7}' 2>/dev/null)" || return 0
   [[ -n "$line" ]] || return 0
+  # Never write through a symlink (a dangling one included), and create the
+  # file 600 BEFORE anything is written into it, like the resolve files.
+  [[ -L "$file" ]] && return 0
+  [[ -e "$file" ]] || { (umask 077; : >>"$file") 2>/dev/null || return 0; }
   { printf '%s\n' "$line" >>"$file"; } 2>/dev/null || return 0
   first_t="$(head -n 1 "$file" 2>/dev/null | jq -r '.t // empty' 2>/dev/null)"
   if [[ -z "$first_t" ]] || ! [[ "$first_t" =~ ^[0-9]+$ ]] || (( first_t < now - USAGE_HISTORY_KEEP_SECONDS - 86400 )); then
