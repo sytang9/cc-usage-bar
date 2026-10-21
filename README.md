@@ -327,8 +327,9 @@ look of Claude Code's own Account & Usage view. Every section folds. Top to
 bottom:
 
 - **Active account** — **Account**: the nickname and email of the account you
-  are on. **Usage**: **Session (5hr)** (orange bar) and **Weekly (7 day)** (the
-  theme's progress blue), each with its percent and when it resets. **Last
+  are on. **Usage**: **Session (5hr)** and **Weekly (7 day)**, each bar in the
+  theme's progress blue, or orange from 80% as in Claude Code's own view, with
+  its percent and when it resets. **Last
   data** shows only when its data is over 30 minutes old. **View details**
   opens claude.ai/settings/usage in your browser.
 - **If you run out** — the best account to switch to: the lowest

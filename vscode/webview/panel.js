@@ -18,9 +18,11 @@ function section(key, title, open, right = '', extra = '') {
         + ci(open ? 'chevron-down' : 'chevron-right') + '<span class="t">' + title + '</span></div>' + right + '</div>';
 }
 
-function usage(name, cls, p, reset) {
+// One bar per limit. Like Claude Code's own: the theme's progress blue, Claude orange from 80% (HIGH) up.
+const HIGH = 80;
+function usage(name, p, reset) {
     return '<div class="use"><div class="top"><span>' + name + '</span><span class="p">' + pctText(p) + '</span></div>'
-        + '<div class="bar ' + cls + '">' + (p == null ? '' : '<i style="width:' + Math.max(0, Math.min(100, p)) + '%"></i>') + '</div>'
+        + '<div class="bar' + (p >= HIGH ? ' hi' : '') + '">' + (p == null ? '' : '<i style="width:' + Math.max(0, Math.min(100, p)) + '%"></i>') + '</div>'
         + (reset ? '<div class="rs">Resets ' + esc(reset) + '</div>' : '') + '</div>';
 }
 
@@ -28,7 +30,7 @@ function active(a) {
     if (!a) return '<div class="kv"><span class="k">Not logged in to Claude Code</span></div>';
     return '<div class="grp">Account</div>' + kv('Nickname', esc(a.label)) + (a.email ? kv('Email', esc(a.email)) : '')
         + (a.age ? kv('Last data', esc(a.age)) : '')
-        + '<div class="grp">Usage</div>' + usage('Session (5hr)', 's', a.five, a.fiveReset) + usage('Weekly (7 day)', 'w', a.week, a.weekReset);
+        + '<div class="grp">Usage</div>' + usage('Session (5hr)', a.five, a.fiveReset) + usage('Weekly (7 day)', a.week, a.weekReset);
 }
 
 function nextLine(d) {

@@ -423,7 +423,15 @@ const calls = () => (fs.existsSync(LOG) ? fs.readFileSync(LOG, 'utf8').trim().sp
         assert.ok(vars.length > 0 && vars.every((v) => v.startsWith('var(--vscode-')), 'only --vscode-* variables');
     });
 
-    await check('B4 the panel uses theme variables: orange session, theme-blue weekly, no traffic lights', () => {
+    await check('bar colour follows the level, not the limit: blue under 80%, orange from 80%', () => {
+        const p = panel(), d = pdFour();
+        const bars = (act) => [...p.render({ ...d, active: { ...d.active, ...act } }, ui()).matchAll(/class="(bar[^"]*)"><i style="width:(\d+)%"/g)].map((m) => m[1] + ' ' + m[2]);
+        assert.deepStrictEqual(bars({ five: 22, week: 95 }), ['bar 22', 'bar hi 95'], 'the 95% weekly is orange, the 22% session is blue');
+        assert.deepStrictEqual(bars({ five: 80, week: 79 }), ['bar hi 80', 'bar 79']);
+        assert.deepStrictEqual(bars({ five: 100, week: 0 }), ['bar hi 100', 'bar 0']);
+    });
+
+    await check('B4 the panel uses theme variables: blue bars, orange from 80%, no traffic lights', () => {
         const css = readWv('panel.css');
         for (const v of ['--vscode-charts-orange', '--vscode-progressBar-background', '--vscode-textLink-foreground', '--vscode-button-background',
             '--vscode-editorWarning-foreground', '--vscode-errorForeground', '--vscode-contrastBorder', '--vscode-contrastActiveBorder']) assert.ok(css.includes(v), v);
@@ -443,8 +451,8 @@ const calls = () => (fs.existsSync(LOG) ? fs.readFileSync(LOG, 'utf8').trim().sp
         for (const t of ['Active account', '>Account<', '>Usage<', 'Nickname', '002@x.example', 'Session (5hr)', 'Weekly (7 day)', '>23%<', '>64%<', 'View details'])
             assert.ok(html.includes(t), t);
         assert.match(html, />Resets (in \d+m|in \d+h \d+m|tomorrow \d\d:\d\d)</, 'the session reset (1h away; after 23:00 that is tomorrow)');
-        assert.match(html, /bar s[^>]*><i style="width:23%"/, 'the session bar is 23% long');
-        assert.match(html, /bar w[^>]*><i style="width:64%"/, 'the weekly bar is 64% long');
+        assert.match(html, /class="bar"><i style="width:23%"/, 'the session bar is 23% long, theme blue');
+        assert.match(html, /class="bar"><i style="width:64%"/, 'the weekly bar is 64% long, theme blue');
         assert.ok(!html.includes('Last data'), 'fresh data: no data age');
     });
 
