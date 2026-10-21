@@ -1066,7 +1066,7 @@ case29c_history_trims_old_and_malformed_lines() {
   write_account_credentials "$home" "acct_hist" "REFRESH_HIST" "TOK_HIST" "$(future_ms)"
   set_usage_response "$ctl" "TOK_HIST" 200 "$(usage_body 41 22)"
   {
-    printf '{"t":%s,"p5":1,"p7":1,"r5":null,"r7":null}\n' "$((now - 31 * 86400))"
+    printf '{"t":%s,"p5":1,"p7":1,"r5":null,"r7":null}\n' "$((now - 32 * 86400))"
     printf 'not json\n'
     printf '{"t":%s,"p5":2,"p7":2,"r5":null,"r7":null}\n' "$((now - 29 * 86400))"
     printf '{"p5":3}\n'
@@ -1081,6 +1081,29 @@ case29c_history_trims_old_and_malformed_lines() {
     pass "histc history trim drops lines older than 30 days and malformed lines"
   else
     fail "histc (exit=$EXIT_CODE): $(cat "$hist")"
+  fi
+  rm -rf "$home" "$ctl"
+}
+
+case29e_history_trims_only_a_day_past_the_cutoff() {
+  local home ctl hist now
+  home="$(new_home)"
+  ctl="$(new_ctl)"
+  now="$(date +%s)"
+  hist="$home/.claude/accounts/acct_hist/.usage-history.jsonl"
+  write_claude_json "$home"
+  write_account_credentials "$home" "acct_hist" "REFRESH_HIST" "TOK_HIST" "$(future_ms)"
+  set_usage_response "$ctl" "TOK_HIST" 200 "$(usage_body 41 22)"
+  printf '{"t":%s,"p5":1,"p7":1,"r5":null,"r7":null}\n' "$((now - 30 * 86400 - 43200))" >"$hist"
+
+  run_cc "$home" "$ctl" "" --no-switch
+
+  # 30.5 days old: past the 30-day cutoff but not a day past it, so no rewrite
+  # yet (the rewrite runs about once a day, not on every append).
+  if [[ "$EXIT_CODE" -eq 0 && "$(jq -s -c '[.[].p5]' "$hist")" == "[1,41]" ]]; then
+    pass "histe history rewrite waits until the oldest line is a day past 30 days"
+  else
+    fail "histe (exit=$EXIT_CODE): $(cat "$hist")"
   fi
   rm -rf "$home" "$ctl"
 }
@@ -1724,6 +1747,7 @@ main() {
   case29_history_live_fetch_appends_one_line
   case29b_history_not_written_on_429
   case29c_history_trims_old_and_malformed_lines
+  case29e_history_trims_only_a_day_past_the_cutoff
   case29d_history_write_failure_keeps_output
   case29_json_no_accounts
   case30_json_refresh_paused

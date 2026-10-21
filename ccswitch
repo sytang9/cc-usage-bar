@@ -1040,7 +1040,9 @@ USAGE_HISTORY_KEEP_SECONDS=$((30 * 86400))
 
 # append_usage_history <label> <now> <p5> <p7> <p5reset> <p7reset>: appends one
 # compact JSON line to <label>/.usage-history.jsonl, then drops lines older than
-# 30 days (and malformed lines) when the oldest line has aged out. Best effort:
+# 30 days (and malformed lines) once the oldest line is a day past that (so the
+# rewrite runs about once a day, not on every append, and rarely races another
+# ccswitch's append). Best effort:
 # silent, and always returns 0, so a history problem never fails a fetch.
 append_usage_history() {
   local label="$1" now="$2"
@@ -1051,7 +1053,7 @@ append_usage_history() {
   [[ -n "$line" ]] || return 0
   { printf '%s\n' "$line" >>"$file"; } 2>/dev/null || return 0
   first_t="$(head -n 1 "$file" 2>/dev/null | jq -r '.t // empty' 2>/dev/null)"
-  if [[ -z "$first_t" ]] || ! [[ "$first_t" =~ ^[0-9]+$ ]] || (( first_t < now - USAGE_HISTORY_KEEP_SECONDS )); then
+  if [[ -z "$first_t" ]] || ! [[ "$first_t" =~ ^[0-9]+$ ]] || (( first_t < now - USAGE_HISTORY_KEEP_SECONDS - 86400 )); then
     kept="$(jq -cR --argjson cutoff "$((now - USAGE_HISTORY_KEEP_SECONDS))" \
       'fromjson? | select(type == "object" and (.t | type) == "number" and .t >= $cutoff)' "$file" 2>/dev/null)" || return 0
     # file_write refuses empty content; the line just appended is always kept.
