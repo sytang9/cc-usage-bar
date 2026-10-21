@@ -62,10 +62,8 @@ const vscode = {
     workspace: { getConfiguration: () => ({ get: (k) => cfg[k], update: async (k, v, t) => { updates.push([k, v, t]); } }) },
     ConfigurationTarget: { Global: 1 },
     commands: {},
-    env: { openExternal: async (u) => { opened.push(String(u)); return true; } },
     Uri: { file: (p) => ({ fsPath: p, toString: () => 'file://' + p }), parse: (u) => ({ toString: () => u }) },
 };
-const opened = [];
 // A stand-in for the view's webview: the extension asks it for the CSP source and the resource URI of codicon.css.
 const fakeWebview = { cspSource: 'https://res.test', asWebviewUri: (u) => 'https://res.test' + u.fsPath };
 const orig = Module._load;
@@ -74,7 +72,7 @@ const file = path.join(__dirname, '..', 'vscode', 'extension.js');
 // Each load is one fresh extension instance, as in one VS Code window.
 function load() {
     const m = new Module(file); m.filename = file; m.paths = Module._nodeModulePaths(path.dirname(file));
-    m._compile(fs.readFileSync(file, 'utf8') + '\n;Object.assign(module.exports, { isLabel, autoBlock, autoSwitch, deleteSeat, CONSENT, readSnapshot, isFresh, qualifies, capacity, parseUsageJson, mergeLogins, readAccounts, activeLabel, autoTarget, checkLogins, relogin, switchSeat, saveSeat, esc, webviewHtml, panelData, ageText, setAutoSwitch, changeAutoSwitch, AUTO_DETAIL, statusText, statusTooltip, resetText, openUsagePage, USAGE_URL, CODICONS });', file);
+    m._compile(fs.readFileSync(file, 'utf8') + '\n;Object.assign(module.exports, { isLabel, autoBlock, autoSwitch, deleteSeat, CONSENT, readSnapshot, isFresh, qualifies, capacity, parseUsageJson, mergeLogins, readAccounts, activeLabel, autoTarget, checkLogins, relogin, switchSeat, saveSeat, esc, webviewHtml, panelData, ageText, setAutoSwitch, changeAutoSwitch, AUTO_DETAIL, statusText, statusTooltip, resetText, CODICONS });', file);
     return m.exports;
 }
 const e = load();
@@ -448,7 +446,7 @@ const calls = () => (fs.existsSync(LOG) ? fs.readFileSync(LOG, 'utf8').trim().sp
 
     await check('render: Active account has ACCOUNT and USAGE groups, nickname, email, both limits and their resets', () => {
         const html = panel().render(pdFour(), ui());
-        for (const t of ['Active account', '>Account<', '>Usage<', 'Nickname', '002@x.example', 'Session (5hr)', 'Weekly (7 day)', '>23%<', '>64%<', 'View details'])
+        for (const t of ['Active account', '>Account<', '>Usage<', 'Nickname', '002@x.example', 'Session (5hr)', 'Weekly (7 day)', '>23%<', '>64%<'])
             assert.ok(html.includes(t), t);
         assert.match(html, />Resets (in \d+m|in \d+h \d+m|tomorrow \d\d:\d\d)</, 'the session reset (1h away; after 23:00 that is tomorrow)');
         assert.match(html, /class="bar"><i style="width:23%"/, 'the session bar is 23% long, theme blue');
@@ -459,7 +457,7 @@ const calls = () => (fs.existsSync(LOG) ? fs.readFileSync(LOG, 'utf8').trim().sp
     await check('render: every section folds; the header keeps its title', () => {
         const p = panel();
         const shut = p.render(pdFour(), ui({ activeOpen: false, nextOpen: false }));
-        assert.ok(shut.includes('Active account') && shut.includes('If you run out') && shut.includes('View details'));
+        assert.ok(shut.includes('Active account') && shut.includes('If you run out'));
         assert.ok(!shut.includes('Session (5hr)') && !shut.includes('data-a="switch"'));
         assert.match(shut, /data-a="active"[^>]*aria-expanded="false"/);
     });
@@ -694,15 +692,9 @@ const calls = () => (fs.existsSync(LOG) ? fs.readFileSync(LOG, 'utf8').trim().sp
         assert.ok(!p.render({ ...pdFour(), installed: false }, ui({ automationOpen: true })).includes('role="switch"'), 'no ccswitch, no toggle');
     });
 
-    await check('View details opens claude.ai/settings/usage in the browser', async () => {
-        opened.length = 0;
-        await e.openUsagePage();
-        assert.deepStrictEqual(opened, ['https://claude.ai/settings/usage']);
-        assert.match(fs.readFileSync(file, 'utf8'), /m\.openUsage\) openUsagePage\(\)/, 'the webview message is handled');
-        assert.match(readWv('panel.js'), /'details'\) return vsc\.postMessage\(\{ openUsage: 1 \}\)/, 'the link posts it');
-        const link = panel().render(pdFour(), ui()).match(/<button class="([^"]*)" data-a="details"/);
-        assert.ok(link, 'the link is rendered');
-        assert.deepStrictEqual(link[1].split(' '), ['lnk'], 'link colour at rest: no grey right-hand-text class on it');
+    await check('no View details link: Claude Code\'s own Account & Usage section has the full dialog', () => {
+        const all = panel().render(pdFour(), ui()) + readWv('panel.js') + fs.readFileSync(file, 'utf8');
+        assert.ok(!all.includes('View details') && !all.includes('openUsage') && !all.includes('claude.ai/settings'));
     });
 
     // --- G7: turning auto-switch on asks once ----------------------------------------------------------

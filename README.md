@@ -329,9 +329,9 @@ bottom:
 - **Active account** — **Account**: the nickname and email of the account you
   are on. **Usage**: **Session (5hr)** and **Weekly (7 day)**, each bar in the
   theme's progress blue, or orange from 80% as in Claude Code's own view, with
-  its percent and when it resets. **Last
-  data** shows only when its data is over 30 minutes old. **View details**
-  opens claude.ai/settings/usage in your browser.
+  its percent and when it resets. **Last data** shows only when its data is
+  over 30 minutes old. For the full breakdown (per-model limits, what used
+  them), use **View details** in Claude Code's own Account & Usage section.
 - **If you run out** — the best account to switch to: the lowest
   `max(5h, weekly)` among saved accounts with a working login, data under 15
   minutes old and both windows below 100%. **Switch** runs `ccswitch <label>`;

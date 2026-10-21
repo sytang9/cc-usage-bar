@@ -431,9 +431,6 @@ async function autoSwitch(cap, state, onDone) {
     return res;
 }
 
-// "View details" in the Active account header: Claude's own usage page, in the user's browser.
-const USAGE_URL = 'https://claude.ai/settings/usage';
-const openUsagePage = () => vscode.env.openExternal(vscode.Uri.parse(USAGE_URL));
 
 // Pre-release copies were published as meng-local.claude-usage (+ a Chrome helper); remove them so there is one sidebar.
 function removeOldHelper() {
@@ -483,7 +480,6 @@ function activate(context) {
                     else if (m.del) deleteSeat(m.del, poll);
                     else if (m.toggleAuto) toggleAuto();
                     else if (m.installCc) installCcswitch();
-                    else if (m.openUsage) openUsagePage();
                 });
                 v.onDidDispose(() => { view = null; });
             },
