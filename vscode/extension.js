@@ -529,16 +529,18 @@ async function autoSwitch(cap, state, onDone) {
 
 // Stats view: built from this machine's Claude Code transcripts (stats.js) only while the view is shown, at most every
 // 10 min, one build at a time, with an incremental cache in the extension's global storage. send gets each message.
+// A failed build is tried again after STATS_RETRY_MS, keeping the last good stats on screen meanwhile.
 const STATS_EVERY_MS = 10 * 60 * 1000;
+const STATS_RETRY_MS = 60 * 1000;
 function statsFeed(cachePath, send, build = buildStats) {
-    let last = null, at = 0, busy = false;
+    let last = null, at = 0, wait = 0, busy = false;
     return () => {
         if (busy) return;
-        if (last && Date.now() - at < STATS_EVERY_MS) { send(last); return; }
+        if (last && Date.now() - at < wait) { send(last); return; }
         busy = true;
         send({ kind: 'stats', building: true, stats: last && last.stats });
-        return build({ cachePath }).then((stats) => { last = { kind: 'stats', stats }; },
-            (err) => { last = { kind: 'stats', error: String((err && err.message) || err), stats: last && last.stats }; })
+        return build({ cachePath }).then((stats) => { last = { kind: 'stats', stats }; wait = STATS_EVERY_MS; },
+            (err) => { last = { kind: 'stats', error: String((err && err.message) || err), stats: last && last.stats }; wait = STATS_RETRY_MS; })
             .then(() => { at = Date.now(); busy = false; send(last); });
     };
 }

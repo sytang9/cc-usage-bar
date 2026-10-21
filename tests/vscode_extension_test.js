@@ -72,7 +72,7 @@ const file = path.join(__dirname, '..', 'vscode', 'extension.js');
 // Each load is one fresh extension instance, as in one VS Code window.
 function load() {
     const m = new Module(file); m.filename = file; m.paths = Module._nodeModulePaths(path.dirname(file));
-    m._compile(fs.readFileSync(file, 'utf8') + '\n;Object.assign(module.exports, { isLabel, autoBlock, autoSwitch, deleteSeat, CONSENT, readSnapshot, isFresh, qualifies, capacity, parseUsageJson, mergeLogins, readAccounts, activeLabel, autoTarget, checkLogins, relogin, switchSeat, saveSeat, esc, webviewHtml, panelData, ageText, setAutoSwitch, changeAutoSwitch, AUTO_DETAIL, statusText, statusTooltip, resetText, CODICONS, rolled, readHistory, forecast, statsFeed, STATS_EVERY_MS, withHistory, HISTORY_READ_BYTES });', file);
+    m._compile(fs.readFileSync(file, 'utf8') + '\n;Object.assign(module.exports, { isLabel, autoBlock, autoSwitch, deleteSeat, CONSENT, readSnapshot, isFresh, qualifies, capacity, parseUsageJson, mergeLogins, readAccounts, activeLabel, autoTarget, checkLogins, relogin, switchSeat, saveSeat, esc, webviewHtml, panelData, ageText, setAutoSwitch, changeAutoSwitch, AUTO_DETAIL, statusText, statusTooltip, resetText, CODICONS, rolled, readHistory, forecast, statsFeed, STATS_EVERY_MS, STATS_RETRY_MS, withHistory, HISTORY_READ_BYTES });', file);
     return m.exports;
 }
 const e = load();
@@ -975,6 +975,33 @@ const calls = () => (fs.existsSync(LOG) ? fs.readFileSync(LOG, 'utf8').trim().sp
         assert.match(src, /statsFeed\(path\.join\(context\.globalStorageUri\.fsPath, 'stats-cache\.json'\)/, 'the cache lives in global storage');
         assert.match(src, /m\.wantStats\) \{ if \(v\.visible\) wantStats\(\); \}/, 'a hidden, retained Stats tab never rebuilds (review finding)');
         assert.match(src, /v\.onDidChangeVisibility\(\(\) => \{ if \(v\.visible\) push\(\); \}\)/, 'shown again: the panel gets data and can ask');
+    });
+
+    await check('statsFeed: a failed build is retried after about a minute, not kept for 10 min (review finding)', async () => {
+        const sent = [];
+        let fail = true, builds = 0;
+        const feed = e.statsFeed('/tmp/c.json', (m) => sent.push(m), async () => { builds++; if (fail) throw new Error('boom'); return { n: builds }; });
+        const real = Date.now, t0 = real();
+        try {
+            Date.now = () => t0;
+            await feed();
+            assert.strictEqual(sent[sent.length - 1].error, 'boom');
+            feed();
+            assert.strictEqual(builds, 1, 'right after a failure: the error is sent again, no rebuild loop');
+            assert.ok(e.STATS_RETRY_MS <= 2 * 60 * 1000 && e.STATS_RETRY_MS < e.STATS_EVERY_MS);
+            Date.now = () => t0 + e.STATS_RETRY_MS + 1000;
+            fail = false;
+            await feed();
+            assert.strictEqual(builds, 2, 'a minute later: built again');
+            assert.deepStrictEqual(sent[sent.length - 1].stats, { n: 2 });
+            fail = true;
+            Date.now = () => t0 + e.STATS_RETRY_MS + 1000 + e.STATS_EVERY_MS + 1000;
+            await feed();
+            Date.now = () => t0 + 2 * e.STATS_RETRY_MS + 3000 + e.STATS_EVERY_MS;
+            await feed();
+            assert.strictEqual(builds, 4, 'a failure after a good build is retried a minute later too');
+            assert.deepStrictEqual(sent[sent.length - 1].stats, { n: 2 }, 'the last good stats stay on screen');
+        } finally { Date.now = real; }
     });
 
     await check('render: Stats tab; building, error, and the overview like the CLI /stats', () => {

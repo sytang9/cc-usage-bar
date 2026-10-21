@@ -10,6 +10,9 @@ const os = require('os');
 const readline = require('readline');
 
 const CACHE_VERSION = 1;
+// Bump DEFS_VERSION whenever a counting rule changes (what counts as a message, a token kind, a session): a cache from
+// other definitions is dropped, so every transcript is counted again under one rule.
+const DEFS_VERSION = 1;
 const MAX_READ = 104857600; // the CLI reads only the last 100 MB of a bigger transcript
 const MESSAGE_TYPES = new Set(['user', 'assistant', 'attachment', 'system']);
 const SYNTHETIC_MODEL = '<synthetic>';
@@ -102,16 +105,35 @@ async function parseFile(file, size) {
 function readCache(cachePath) {
     try {
         const c = JSON.parse(fs.readFileSync(cachePath, 'utf8'));
-        if (c && c.version === CACHE_VERSION && isObject(c.files)) return c.files;
+        if (c && c.version === CACHE_VERSION && c.defs === DEFS_VERSION && isObject(c.files)) return c.files;
     } catch { /* missing or corrupt: start empty */ }
     return {};
 }
 
+// The cache names transcript paths (project folder names), so it is private: file 600, a new directory 700.
 function writeCache(cachePath, files) {
-    fs.mkdirSync(path.dirname(cachePath), { recursive: true });
+    fs.mkdirSync(path.dirname(cachePath), { recursive: true, mode: 0o700 });
     const tmp = `${cachePath}.${process.pid}.tmp`;
-    fs.writeFileSync(tmp, JSON.stringify({ version: CACHE_VERSION, files }));
+    fs.rmSync(tmp, { force: true });  // a tmp left by a crash keeps its old mode
+    fs.writeFileSync(tmp, JSON.stringify({ version: CACHE_VERSION, defs: DEFS_VERSION, files }), { mode: 0o600 });
     fs.renameSync(tmp, cachePath);
+}
+
+// A cache entry is reused only when every value is what parseFile writes: numbers (finite, valid as a date where
+// they are one), day keys, model names parseFile would keep, and four-number token arrays. Anything else (a hand
+// edit, schema drift) is parsed again, so it can neither break a build nor reach the panel.
+const fin = Number.isFinite;
+const isDay = (d) => /^\d{4}-\d{2}-\d{2}$/.test(d);
+const isMs = (v) => fin(v) && !Number.isNaN(new Date(v).getTime());
+const isModel = (m) => !(m in Object.prototype) && m !== SYNTHETIC_MODEL;
+function isEntry(e) {
+    if (!isObject(e) || !fin(e.size) || !fin(e.mtimeMs)) return false;
+    const a = e.agg;
+    if (!isObject(a) || typeof a.sub !== 'boolean' || !isObject(a.msgs) || !isObject(a.tok)) return false;
+    if (a.session !== null && !(isObject(a.session) && isMs(a.session.start) && isMs(a.session.end))) return false;
+    return Object.entries(a.msgs).every(([d, n]) => isDay(d) && fin(n))
+        && Object.entries(a.tok).every(([d, byModel]) => isDay(d) && isObject(byModel)
+            && Object.entries(byModel).every(([m, v]) => isModel(m) && Array.isArray(v) && v.length === 4 && v.every(fin)));
 }
 
 // --- aggregates -> one range ------------------------------------------------------------------------
@@ -134,7 +156,7 @@ function streaks(days, today) {
 
 function rangeStats(aggs, range, fromDay, toDay, today) {
     const inRange = (d) => (!fromDay || d >= fromDay) && (!toDay || d <= toDay);
-    const daily = {}, usage = {}, perDay = {}, hours = {};
+    const daily = Object.create(null), usage = Object.create(null), perDay = Object.create(null), hours = {};  // keys are input: no prototype
     let totalMessages = 0, sessions = 0, longest = null, first = null, last = null;
     for (const a of aggs) {
         if (a.session && toDay && utcDay(a.session.start) > toDay) continue; // Bo: file starts after toDate
@@ -158,7 +180,7 @@ function rangeStats(aggs, range, fromDay, toDay, today) {
                 const m = usage[model] || (usage[model] = { inputTokens: 0, outputTokens: 0, cacheReadInputTokens: 0, cacheCreationInputTokens: 0 });
                 m.inputTokens += v[0]; m.outputTokens += v[1]; m.cacheReadInputTokens += v[2]; m.cacheCreationInputTokens += v[3];
                 const t = v[0] + v[1] + v[2] + v[3];
-                if (t > 0) { const pd = perDay[d] || (perDay[d] = {}); pd[model] = (pd[model] || 0) + t; }
+                if (t > 0) { const pd = perDay[d] || (perDay[d] = Object.create(null)); pd[model] = (pd[model] || 0) + t; }
             }
         }
     }
@@ -269,8 +291,7 @@ async function buildStats({ projectsDir, cachePath, now, log } = {}) {
             try { st = await fs.promises.stat(f); } catch { failed++; continue; }
             const hit = old[f];
             // Reuse only a well-formed entry: a bad one (hand edit, schema drift) is parsed again, not kept for good.
-            const good = hit && isObject(hit.agg) && isObject(hit.agg.msgs) && isObject(hit.agg.tok);
-            if (good && hit.size === st.size && hit.mtimeMs === st.mtimeMs) { fresh[f] = hit; reused++; continue; }
+            if (isEntry(hit) && hit.size === st.size && hit.mtimeMs === st.mtimeMs) { fresh[f] = hit; reused++; continue; }
             try {
                 fresh[f] = { size: st.size, mtimeMs: st.mtimeMs, agg: await parseFile(f, st.size) };
                 parsed++;

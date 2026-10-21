@@ -395,8 +395,9 @@ tokens per model, and one of the CLI's fun facts ("Your input and output are
 ~3x the tokens in The Hobbit"), a new one each day. The numbers follow the
 CLI's own definitions (2.1.305), including its days in UTC. The first build
 reads every transcript (about 11 s for 1.7 GB); after that only changed files
-are read again, at most every 10 minutes while Stats is open. Its cache is in
-VS Code's storage for this extension.
+are read again, at most every 10 minutes while Stats is open (a failed build is
+tried again after a minute). Its cache (mode `600`; counts only, no transcript
+text) is in VS Code's storage for this extension.
 
 | Icon (codicon) | Meaning |
 |------|---------|
