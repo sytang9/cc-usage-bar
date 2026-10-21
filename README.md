@@ -380,6 +380,10 @@ at this pace** (a straight line through the points since that window started,
 needing 20 minutes of points) or **Lasts until reset**. When the active account
 would be full before its reset, Accounts shows the same line under that bar.
 History starts empty: nothing recorded limit percentages before this version.
+The sidebar reads these files only while it is visible (every account while
+History is open, else only the active account), and only their last week. With a
+team file (`claudeUsage.usageFile`) History shows a note instead: the history is
+this machine's, not the team's.
 
 **Stats** is the sidebar's version of Claude Code's `/stats`, built from this
 machine's Claude Code transcripts (`~/.claude/projects`), so it covers every

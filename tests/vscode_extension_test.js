@@ -72,7 +72,7 @@ const file = path.join(__dirname, '..', 'vscode', 'extension.js');
 // Each load is one fresh extension instance, as in one VS Code window.
 function load() {
     const m = new Module(file); m.filename = file; m.paths = Module._nodeModulePaths(path.dirname(file));
-    m._compile(fs.readFileSync(file, 'utf8') + '\n;Object.assign(module.exports, { isLabel, autoBlock, autoSwitch, deleteSeat, CONSENT, readSnapshot, isFresh, qualifies, capacity, parseUsageJson, mergeLogins, readAccounts, activeLabel, autoTarget, checkLogins, relogin, switchSeat, saveSeat, esc, webviewHtml, panelData, ageText, setAutoSwitch, changeAutoSwitch, AUTO_DETAIL, statusText, statusTooltip, resetText, CODICONS, rolled, readHistory, forecast, statsFeed, STATS_EVERY_MS });', file);
+    m._compile(fs.readFileSync(file, 'utf8') + '\n;Object.assign(module.exports, { isLabel, autoBlock, autoSwitch, deleteSeat, CONSENT, readSnapshot, isFresh, qualifies, capacity, parseUsageJson, mergeLogins, readAccounts, activeLabel, autoTarget, checkLogins, relogin, switchSeat, saveSeat, esc, webviewHtml, panelData, ageText, setAutoSwitch, changeAutoSwitch, AUTO_DETAIL, statusText, statusTooltip, resetText, CODICONS, rolled, readHistory, forecast, statsFeed, STATS_EVERY_MS, withHistory, HISTORY_READ_BYTES });', file);
     return m.exports;
 }
 const e = load();
@@ -583,7 +583,7 @@ const calls = () => (fs.existsSync(LOG) ? fs.readFileSync(LOG, 'utf8').trim().sp
         const { accounts, cap } = e.readAccounts();
         const row = accounts.filter((a) => a.provider === 'codex');
         assert.deepStrictEqual(row, [{ label: 'codex', provider: 'codex', state: 'ok', fetched_at: now - 60, five_pct: 0, week_pct: 1,
-            five_reset_epoch: now + 600, week_reset_epoch: now + 86400, email: null, history: [] }]);
+            five_reset_epoch: now + 600, week_reset_epoch: now + 86400, email: null }]);
         assert.strictEqual(accounts[accounts.length - 1].provider, 'codex', 'after the Claude accounts');
         assert.notStrictEqual(cap.best && cap.best.label, 'codex', 'the emptiest seat, but never a target');
         assert.ok(!('codex' in cap.loads) && !cap.saved.includes('codex'));
@@ -747,9 +747,83 @@ const calls = () => (fs.existsSync(LOG) ? fs.readFileSync(LOG, 'utf8').trim().sp
                 JSON.stringify({ t: now + 3600, p5: 1 }), JSON.stringify(pt(1200, 2, 4)), JSON.stringify({ p5: 3 })].join('\n'));
             assert.deepStrictEqual(e.readHistory('personal', now).map((x) => x.p5), [2, 5]);
             assert.deepStrictEqual(e.readHistory('spare', now), []);
-            const p = e.readAccounts().accounts.find((a) => a.label === 'personal');
-            assert.strictEqual(p.history.length, 2, 'readAccounts carries it');
+            const accounts = e.readAccounts().accounts;
+            assert.ok(accounts.every((a) => !('history' in a)), 'a poll reads no history (review finding: cost on every poll)');
+            const p = e.withHistory(accounts, () => true, now).find((a) => a.label === 'personal');
+            assert.strictEqual(p.history.length, 2, 'withHistory carries it');
         } finally { fs.rmSync(f, { force: true }); }
+    });
+
+    await check('readHistory reuses the parsed points while size and mtime are unchanged; a change re-reads (review finding)', () => {
+        const f = path.join(ACC, 'personal', '.usage-history.jsonl'), T = now - 100;
+        const put = (pts) => { fs.writeFileSync(f, pts.map((x) => JSON.stringify(x)).join('\n') + '\n'); fs.utimesSync(f, T, T); };
+        try {
+            put([pt(60, 11, 1)]);
+            assert.deepStrictEqual(e.readHistory('personal', now).map((x) => x.p5), [11]);
+            put([pt(60, 22, 1)]);  // same length, same mtime: the cached points are used
+            assert.deepStrictEqual(e.readHistory('personal', now).map((x) => x.p5), [11]);
+            put([pt(60, 22, 1), pt(30, 33, 1)]);
+            assert.deepStrictEqual(e.readHistory('personal', now).map((x) => x.p5), [22, 33]);
+            fs.rmSync(f);
+            assert.deepStrictEqual(e.readHistory('personal', now), [], 'a deleted file drops out');
+        } finally { fs.rmSync(f, { force: true }); }
+    });
+
+    await check('readHistory reads only the file\'s tail (the last 7 days), not the whole 30-day file (review finding)', () => {
+        const f = path.join(ACC, 'personal', '.usage-history.jsonl');
+        try {
+            const pad = (JSON.stringify(pt(3 * 86400, 5, 5)) + '\n').repeat(Math.ceil(e.HISTORY_READ_BYTES / 60));
+            fs.writeFileSync(f, JSON.stringify(pt(6 * 86400, 1, 1)) + '\n' + pad + JSON.stringify(pt(60, 9, 9)) + '\n');
+            assert.ok(fs.statSync(f).size > e.HISTORY_READ_BYTES);
+            const h = e.readHistory('personal', now);
+            assert.ok(!h.some((x) => x.p5 === 1), 'the line before the tail is not read');
+            assert.strictEqual(h[h.length - 1].p5, 9);
+            assert.ok(h.every((x) => x.p5 === 5 || x.p5 === 9), 'a line cut by the tail start is skipped');
+        } finally { fs.rmSync(f, { force: true }); }
+    });
+
+    await check('history is read only for a visible sidebar: History tab -> every account, else the active one; team file -> none', async () => {
+        const fw = path.join(ACC, 'work', '.usage-history.jsonl'), fp = path.join(ACC, 'personal', '.usage-history.jsonl');
+        fs.writeFileSync(fw, JSON.stringify(pt(60, 50, 40)) + '\n');
+        fs.writeFileSync(fp, JSON.stringify(pt(60, 10, 5)) + '\n');
+        const cmds = {}, posted = [], seen = [], ctx = { subscriptions: [], globalStorageUri: { fsPath: path.join(HOME, 'gs') }, globalState: memento(false) };
+        let provider, onMsg, onVis;
+        const keep = { win: { ...vscode.window }, commands: vscode.commands, ws: vscode.workspace.onDidChangeConfiguration, stat: fs.statSync };
+        Object.assign(vscode.window, { createStatusBarItem: () => ({ show() {}, dispose() {} }), registerWebviewViewProvider: (id, p) => { provider = p; return { dispose() {} }; } });
+        vscode.StatusBarAlignment = { Right: 2 };
+        vscode.commands = { registerCommand: (id, f) => { cmds[id] = f; return { dispose() {} }; }, executeCommand: async () => {} };
+        vscode.extensions = { getExtension: () => undefined };
+        vscode.workspace.onDidChangeConfiguration = () => ({ dispose() {} });
+        fs.statSync = function (p, ...a) { if (String(p).endsWith('.usage-history.jsonl')) seen.push(path.basename(path.dirname(p))); return keep.stat.call(this, p, ...a); };
+        const tf = path.join(HOME, 'team.json');
+        try {
+            load().activate(ctx);
+            const v = { visible: false, onDidChangeVisibility: (f) => { onVis = f; }, onDidDispose: () => {},
+                webview: { ...fakeWebview, postMessage: async (m) => { posted.push(m); }, onDidReceiveMessage: (f) => { onMsg = f; } } };
+            provider.resolveWebviewView(v);
+            const last = () => posted.filter((m) => m.kind !== 'stats').pop();
+            const step = (f) => { seen.length = 0; f(); return [...new Set(seen)].sort(); };
+            assert.deepStrictEqual(step(() => onMsg('ready')), [], 'hidden sidebar: no history read');
+            assert.deepStrictEqual(last().history, []);
+            v.visible = true;
+            assert.deepStrictEqual(step(() => onVis()), ['work'], 'Accounts tab: the active account only (its pace line)');
+            assert.deepStrictEqual(last().history.map((h) => h.label), ['work']);
+            assert.deepStrictEqual(step(() => onMsg({ wantHistory: true })), ['dead', 'half', 'personal', 'spare', 'work'], 'History tab: every saved account');
+            assert.deepStrictEqual(last().history.map((h) => h.label), ['work', 'personal']);
+            assert.deepStrictEqual(step(() => onMsg({ wantHistory: false })), ['work']);
+            fs.writeFileSync(tf, JSON.stringify({ generated_at: now, accounts: [{ label: 'personal', provider: 'claude', state: 'ok', five_pct: 1, week_pct: 1 }] }));
+            cfg.usageFile = tf;
+            assert.deepStrictEqual(step(() => { onMsg({ wantHistory: true }); cmds['claudeUsage.refresh'](); }), [], 'team file: local history is never read');
+            assert.deepStrictEqual([last().history, last().team], [[], true]);
+        } finally {
+            delete cfg.usageFile;
+            fs.statSync = keep.stat;
+            for (const d of ctx.subscriptions) if (d && d.dispose) d.dispose();
+            Object.assign(vscode.window, keep.win);
+            vscode.commands = keep.commands;
+            vscode.workspace.onDidChangeConfiguration = keep.ws;
+            for (const f of [fw, fp, tf]) fs.rmSync(f, { force: true });
+        }
     });
 
     await check('forecast: straight line since the window started; full before reset, lasts, or nothing to judge', () => {
@@ -851,6 +925,11 @@ const calls = () => (fs.existsSync(LOG) ? fs.readFileSync(LOG, 'utf8').trim().sp
     await check('render: History empty state, escaping, an 80%+ chart is orange', () => {
         const p = panel();
         assert.ok(p.render(withHist([]), ui({ view: 'history' })).includes('No history yet'));
+        const team = p.render({ ...withHist(rising), team: true }, ui({ view: 'history' }));
+        assert.ok(team.includes('not shown for a team usage file') && !team.includes('<svg'), 'team file: a short note, no local charts');
+        const src = readWv('panel.js');
+        assert.match(src, /vsc\.postMessage\(\{ wantHistory: l === 'history' \}\)/, 'switching views tells the host whether History is shown');
+        assert.match(src, /vsc\.postMessage\(\{ wantHistory: viewOf\(ui\) === 'history' \}\);\s*vsc\.postMessage\('ready'\)/, 'and so does a reload on the History tab');
         const bad = '<img src=x onerror="a()">';
         const d = { ...withHist(rising), history: [{ label: bad, icon: 'switch', tip: 't', five: 85, week: 10,
             fiveSeries: [[now, 85, null]], weekSeries: [], fivePace: '<b>', weekPace: null }] };

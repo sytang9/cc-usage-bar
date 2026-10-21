@@ -102,6 +102,7 @@ function chart(title, pts, from, to, ago, pace, now) {
 // History: one row per account with recorded points (active first, open by default); an open row shows both charts.
 const histOpenLabel = (d, ui) => (ui.histOpen === undefined ? (d.history[0] || {}).label : ui.histOpen);
 function historyView(d, ui) {
+    if (d.team) return '<div class="note empty">History is not shown for a team usage file: ccswitch records it on each machine.</div>';
     if (!d.history || !d.history.length) {
         return '<div class="note empty">No history yet: ccswitch records a point each time it fetches (every 10-20 min while VS Code is open).</div>';
     }
@@ -218,7 +219,7 @@ if (typeof acquireVsCodeApi === 'function') {
         const a = el.dataset.a, l = el.dataset.l;
         if (SECTIONS[a]) ui[SECTIONS[a]] = !ui[SECTIONS[a]];
         else if (a === 'row') ui.openRow = ui.openRow === l ? null : l;
-        else if (a === 'view') { ui.view = l; if (l === 'stats') vsc.postMessage({ wantStats: 1 }); }
+        else if (a === 'view') { ui.view = l; vsc.postMessage({ wantHistory: l === 'history' }); if (l === 'stats') vsc.postMessage({ wantStats: 1 }); }
         else if (a === 'srange') ui.statsRange = l;
         else if (a === 'hrow') ui.histOpen = histOpenLabel(data, ui) === l ? null : l;
         else if (a === 'switch' || a === 'relogin') return vsc.postMessage({ seat: l });  // switchSeat routes re-login to enrol
@@ -238,5 +239,6 @@ if (typeof acquireVsCodeApi === 'function') {
         else { data = ev.data; if (viewOf(ui) === 'stats') vsc.postMessage({ wantStats: 1 }); }  // the host rebuilds at most every 10 min
         paint();
     });
+    vsc.postMessage({ wantHistory: viewOf(ui) === 'history' });
     vsc.postMessage('ready');
 }

@@ -63,21 +63,47 @@ function codexRows() {
 }
 
 // History: ccswitch appends one line per live fetch to <label>/.usage-history.jsonl ({t, p5, p7, r5, r7}). The panel
-// reads the last 7 days (the weekly chart's span); a bad line is skipped.
+// reads the last 7 days (the weekly chart's span); a bad line is skipped. Only the file's last HISTORY_READ_BYTES are
+// read, and the parsed points are reused while the file's size and mtime are unchanged.
 const HISTORY_SECS = 7 * 86400;
+// minimize: a fixed tail, not a scan back to the 7-day cutoff. A line is about 70 bytes and ccswitch adds one per
+// live fetch (about every 10 min), so 128 KB holds about 13 days. If fetches get much more frequent, scan back instead.
+const HISTORY_READ_BYTES = 128 * 1024;
 const fin = Number.isFinite;
 // A usable line: a finite t, and each percent and reset a finite number or null (ccswitch writes null for no data).
 const isPoint = (o) => !!o && fin(o.t) && ['p5', 'p7', 'r5', 'r7'].every((k) => o[k] === null || fin(o[k]));
+const historyCache = new Map();  // label -> { size, mtimeMs, points }
+function readTail(f, size) {
+    const n = Math.min(size, HISTORY_READ_BYTES), buf = Buffer.alloc(n), fd = fs.openSync(f, 'r');
+    try { fs.readSync(fd, buf, 0, n, size - n); } finally { fs.closeSync(fd); }
+    const text = buf.toString('utf8');
+    return n < size ? text.slice(text.indexOf('\n') + 1) : text;  // the first line of a tail is cut: drop it
+}
 function readHistory(label, now) {
-    let text;
-    try { text = fs.readFileSync(path.join(ACCOUNTS, label, '.usage-history.jsonl'), 'utf8'); } catch { return []; }
-    const out = [];
-    for (const line of text.split('\n')) {
-        let o;
-        try { o = JSON.parse(line); } catch { continue; }
-        if (isPoint(o) && o.t >= now - HISTORY_SECS && o.t <= now + CLOCK_SLACK_SECS) out.push(o);
-    }
-    return out.sort((a, b) => a.t - b.t);
+    const f = path.join(ACCOUNTS, label, '.usage-history.jsonl');
+    let hit = historyCache.get(label);
+    try {
+        const st = fs.statSync(f);
+        if (!hit || hit.size !== st.size || hit.mtimeMs !== st.mtimeMs) {
+            const points = [];
+            for (const line of readTail(f, st.size).split('\n')) {
+                let o;
+                try { o = JSON.parse(line); } catch { continue; }
+                if (isPoint(o)) points.push(o);
+            }
+            hit = { size: st.size, mtimeMs: st.mtimeMs, points: points.sort((a, b) => a.t - b.t) };
+            historyCache.set(label, hit);
+        }
+    } catch { historyCache.delete(label); return []; }
+    return hit.points.filter((o) => o.t >= now - HISTORY_SECS && o.t <= now + CLOCK_SLACK_SECS);
+}
+
+// History costs a file read per account, so push() asks for it only while the sidebar is visible: every saved account
+// while the History tab is shown, else the active one (its pace line); want(label) says which. Never with a team
+// file: those rows are not this machine's ccswitch accounts, so a matching local label must not lend its history.
+function withHistory(accounts, want, now) {
+    if (usageFile()) return accounts;
+    return accounts.map((a) => (isClaude(a) && want(a.label) && saved(a.label) ? { ...a, history: readHistory(a.label, now) } : a));
 }
 
 // "At this pace": the rise of one limit since its window started (the points that share the latest reset time),
@@ -205,8 +231,7 @@ function readAccounts() {
     const u = readSnapshot();
     u.accounts = u.accounts.map((a) => rolled(a, now));
     const cap = capacity(u, { you: activeLabel(), isSaved: saved, relogin, now });
-    const accounts = u.accounts.map((a) => ({ ...a, email: isClaude(a) ? emailOf(a.label) : null,
-        history: isClaude(a) && saved(a.label) ? readHistory(a.label, now) : [] }));
+    const accounts = u.accounts.map((a) => ({ ...a, email: isClaude(a) ? emailOf(a.label) : null }));
     cap.loginHealth = loginHealth;
     cap.saved = fs.existsSync(CCSWITCH) ? accounts.map((a) => a.label).filter(saved) : null;  // null = no ccswitch
     cap.relogin = [...relogin];
@@ -218,7 +243,7 @@ function readAccounts() {
 // An active account with no row (not saved, no data) gets one. A Codex row is read-only: a lock (or 'full'), no actions.
 const TIPS = { active: 'Active account', relogin: 'Needs re-login', full: 'A limit is at 100%', switch: 'You can switch here',
     readonly: 'Codex (read-only)', '': '' };
-function panelData(accounts, cap, { now, installed, auto }) {
+function panelData(accounts, cap, { now, installed, auto, team = false }) {
     const savedSet = new Set(cap.saved || []), dead = new Set(cap.relogin || []);
     const ctx = { you: cap.you, isSaved: (l) => savedSet.has(l), relogin: dead, now };
     const pct = (v) => (v == null ? null : Math.round(v));
@@ -261,7 +286,7 @@ function panelData(accounts, cap, { now, installed, auto }) {
                 fivePace: pace(a.history, 'p5', 'r5'), weekPace: pace(a.history, 'p7', 'r7') };
         });
     return {
-        installed, auto, loginHealth: cap.loginHealth || 'unknown',
+        installed, auto, team, loginHealth: cap.loginHealth || 'unknown',
         active: mine ? { label: mine.label, email: mine.email || null, five: pct(mine.five_pct), week: pct(mine.week_pct),
             fiveReset: reset(mine.five_reset_epoch), weekReset: reset(mine.week_reset_epoch), age: age(mine),
             fivePace: activePace('p5', 'r5'), weekPace: activePace('p7', 'r7') } : null,
@@ -535,7 +560,13 @@ function activate(context) {
     status.show();
 
     const wantStats = statsFeed(path.join(context.globalStorageUri.fsPath, 'stats-cache.json'), (m) => view && view.webview.postMessage(m));
-    const push = () => view && cap && view.webview.postMessage(panelData(accounts, cap, { now: Date.now() / 1000, installed: fs.existsSync(CCSWITCH), auto: !!cap.auto }));
+    let historyOn = false;  // the webview shows its History tab (it says so on every view change)
+    const push = () => {
+        if (!view || !cap) return;
+        const now = Date.now() / 1000, want = (l) => historyOn || l === cap.you;
+        view.webview.postMessage(panelData(view.visible ? withHistory(accounts, want, now) : accounts, cap,
+            { now, installed: fs.existsSync(CCSWITCH), auto: !!cap.auto, team: !!usageFile() }));
+    };
     const autoOn = () => vscode.workspace.getConfiguration('claudeUsage').get('autoSwitch');
     const toggleAuto = () => changeAutoSwitch(!autoOn(), context.globalState);
 
@@ -568,6 +599,7 @@ function activate(context) {
                     else if (m.toggleAuto) toggleAuto();
                     else if (m.installCc) installCcswitch();
                     else if (m.wantStats) { if (v.visible) wantStats(); }  // a hidden, retained Stats tab never rebuilds
+                    else if (m.wantHistory !== undefined) { historyOn = m.wantHistory === true; push(); }
                 });
                 v.onDidChangeVisibility(() => { if (v.visible) push(); });  // shown again: Stats asks for a rebuild if it is due
                 v.onDidDispose(() => { view = null; });
