@@ -1036,6 +1036,30 @@ write_usage_cache() {
   file_write "$(usage_cache_file "$label")" "$json"
 }
 
+USAGE_HISTORY_KEEP_SECONDS=$((30 * 86400))
+
+# append_usage_history <label> <now> <p5> <p7> <p5reset> <p7reset>: appends one
+# compact JSON line to <label>/.usage-history.jsonl, then drops lines older than
+# 30 days (and malformed lines) when the oldest line has aged out. Best effort:
+# silent, and always returns 0, so a history problem never fails a fetch.
+append_usage_history() {
+  local label="$1" now="$2"
+  local file line first_t kept
+  file="$ACCOUNTS_DIR/$label/.usage-history.jsonl"
+  line="$(jq -cn --argjson t "$now" --argjson p5 "$3" --argjson p7 "$4" --argjson r5 "$5" --argjson r7 "$6" \
+    '{t: $t, p5: $p5, p7: $p7, r5: $r5, r7: $r7}' 2>/dev/null)" || return 0
+  [[ -n "$line" ]] || return 0
+  { printf '%s\n' "$line" >>"$file"; } 2>/dev/null || return 0
+  first_t="$(head -n 1 "$file" 2>/dev/null | jq -r '.t // empty' 2>/dev/null)"
+  if [[ -z "$first_t" ]] || ! [[ "$first_t" =~ ^[0-9]+$ ]] || (( first_t < now - USAGE_HISTORY_KEEP_SECONDS )); then
+    kept="$(jq -cR --argjson cutoff "$((now - USAGE_HISTORY_KEEP_SECONDS))" \
+      'fromjson? | select(type == "object" and (.t | type) == "number" and .t >= $cutoff)' "$file" 2>/dev/null)" || return 0
+    # file_write refuses empty content; the line just appended is always kept.
+    file_write "$file" "$kept"$'\n' 2>/dev/null || true
+  fi
+  return 0
+}
+
 # fetch_and_cache_usage <label> <access_token> <bypass_cache: 0|1> -> echoes
 # "five_hour_pct|seven_day_pct|five_hour_reset_epoch|seven_day_reset_epoch"
 # (all empty on failure). Cache TTL and the 429 backoff are both handled here
@@ -1105,6 +1129,7 @@ fetch_and_cache_usage() {
   new_cache="$(jq -n --argjson fa "$now" --argjson p5 "$p5" --argjson p7 "$p7" --argjson pr5 "$p5reset" --argjson pr7 "$p7reset" \
     '{fetched_at: $fa, five_hour_pct: $p5, seven_day_pct: $p7, five_hour_reset_epoch: $pr5, seven_day_reset_epoch: $pr7, rate_limited_until: null}')"
   write_usage_cache "$label" "$new_cache"
+  append_usage_history "$label" "$now" "$p5" "$p7" "$p5reset" "$p7reset"
 
   echo "${p5}|${p7}|${p5reset}|${p7reset}|${HTTP_STATUS}"
 }

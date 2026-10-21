@@ -386,6 +386,10 @@ accounts' tokens alive and reports each login as `ok` or `re-login`. **How to
 re-login** opens a terminal with `claude` for a one-time `/login`, then you save
 the login. A failed check (timeout, an error) keeps the last known re-login
 marks. An older ccswitch without `--json` marks nothing as re-login.
+Each live fetch (never a cache hit, a 429 or an error) also appends one line,
+`{"t":<epoch>,"p5":..,"p7":..,"r5":..,"r7":..}` (the two percentages and the two
+reset epochs), to `~/.claude/accounts/<label>/.usage-history.jsonl`. Lines older
+than 30 days are dropped. A failed history write never affects usage output.
 The Codex row reads `${CODEX_HOME:-~/.codex}/.usage-cache`, which the same
 `ccswitch usage --json` run refreshes; the sidebar only checks that
 `auth.json` exists and never reads it.
