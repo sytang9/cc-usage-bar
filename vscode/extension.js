@@ -97,10 +97,15 @@ function forecast(points, p, r, now) {
 
 // A window whose reset time passed after the numbers were fetched has started again: its old percent is gone. Until
 // ccswitch fetches again, show it as 0% with no reset time (a 32% session that reset 4 min ago is not 32% used).
+// Only for data inside the display window (FRESH_SECS): an older row gets a dash, since its old percent is over and
+// 0% would be a guess. A missing percent stays missing.
 function rolled(a, now) {
     const out = { ...a }, from = a.fetched_at;
     for (const [p, r] of [['five_pct', 'five_reset_epoch'], ['week_pct', 'week_reset_epoch']]) {
-        if (from != null && out[r] != null && out[r] <= now && from < out[r]) { out[p] = 0; out[r] = null; }
+        if (from != null && out[p] != null && out[r] != null && out[r] <= now && from < out[r]) {
+            out[p] = now - from < FRESH_SECS ? 0 : null;
+            out[r] = null;
+        }
     }
     return out;
 }

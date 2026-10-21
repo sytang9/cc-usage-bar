@@ -417,6 +417,23 @@ const calls = () => (fs.existsSync(LOG) ? fs.readFileSync(LOG, 'utf8').trim().sp
         assert.deepStrictEqual(e.rolled({ ...a, fetched_at: null }, now).five_pct, 32, 'no fetch time: nothing to judge');
     });
 
+    await check('reset roll: only fresh data rolls to 0%; an older row shows a dash; a null percent stays null (review finding)', () => {
+        const a = { label: 'x', provider: 'claude', state: 'ok', fetched_at: now - 13 * 86400, five_pct: 32, week_pct: 100,
+            five_reset_epoch: now - 3600, week_reset_epoch: now - 86400 };
+        const old = e.rolled(a, now);
+        assert.deepStrictEqual([old.five_pct, old.five_reset_epoch, old.week_pct, old.week_reset_epoch], [null, null, null, null],
+            'a 13-day-old row: the old percent is over and 0% would be a guess');
+        const pd = e.panelData([{ ...old, email: null }], { you: null, best: null, loads: {}, fresh: {}, saved: ['x'], relogin: [] }, { now, installed: true, auto: false });
+        assert.notStrictEqual(pd.rows[0].icon, 'full', 'no full icon for a window that has reset');
+        assert.strictEqual(pd.rows[0].summary, 'No recent data');
+        const edge = e.rolled({ ...a, fetched_at: now - 1799, five_reset_epoch: now - 60 }, now);
+        assert.strictEqual(edge.five_pct, 0, 'inside the 30-min display window: rolled to 0%');
+        const none = e.rolled({ ...a, fetched_at: now - 240, five_pct: null, week_pct: null, five_reset_epoch: now - 60, week_reset_epoch: now - 60 }, now);
+        assert.deepStrictEqual([none.five_pct, none.week_pct], [null, null], 'a missing percent never becomes a real 0%');
+        assert.strictEqual(e.qualifies(none, { you: 'other', isSaved: () => true, relogin: new Set(), now }), false);
+        assert.strictEqual(e.capacity({ accounts: [none] }, { you: 'other', isSaved: () => true, relogin: new Set(), now }).best, null);
+    });
+
     await check('readAccounts applies the reset: the panel and the switch choice see 0%', () => {
         const f = path.join(ACC, 'personal', '.usage-cache'), keep = fs.readFileSync(f, 'utf8');
         try {
