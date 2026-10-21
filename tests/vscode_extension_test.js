@@ -72,7 +72,7 @@ const file = path.join(__dirname, '..', 'vscode', 'extension.js');
 // Each load is one fresh extension instance, as in one VS Code window.
 function load() {
     const m = new Module(file); m.filename = file; m.paths = Module._nodeModulePaths(path.dirname(file));
-    m._compile(fs.readFileSync(file, 'utf8') + '\n;Object.assign(module.exports, { isLabel, autoBlock, autoSwitch, deleteSeat, CONSENT, readSnapshot, isFresh, qualifies, capacity, parseUsageJson, mergeLogins, readAccounts, activeLabel, autoTarget, checkLogins, relogin, switchSeat, saveSeat, esc, webviewHtml, panelData, ageText, setAutoSwitch, changeAutoSwitch, AUTO_DETAIL, statusText, statusTooltip, resetText, CODICONS });', file);
+    m._compile(fs.readFileSync(file, 'utf8') + '\n;Object.assign(module.exports, { isLabel, autoBlock, autoSwitch, deleteSeat, CONSENT, readSnapshot, isFresh, qualifies, capacity, parseUsageJson, mergeLogins, readAccounts, activeLabel, autoTarget, checkLogins, relogin, switchSeat, saveSeat, esc, webviewHtml, panelData, ageText, setAutoSwitch, changeAutoSwitch, AUTO_DETAIL, statusText, statusTooltip, resetText, CODICONS, rolled });', file);
     return m.exports;
 }
 const e = load();
@@ -402,6 +402,28 @@ const calls = () => (fs.existsSync(LOG) ? fs.readFileSync(LOG, 'utf8').trim().sp
         assert.match(e.resetText(t + 3 * 86400, true), /^(Sun|Mon|Tue|Wed|Thu|Fri|Sat)$/);
         assert.strictEqual(e.resetText(t + 10), 'now');
         assert.ok(!/⟳/.test(fs.readFileSync(file, 'utf8')), 'no ⟳ symbol: the panel says "Resets"');
+    });
+
+    await check('a window whose reset passed after the fetch shows 0%, not the old window\'s percent', () => {
+        const a = { label: 'x', provider: 'claude', state: 'ok', fetched_at: now - 240, five_pct: 32, week_pct: 96,
+            five_reset_epoch: now - 240 + 1, week_reset_epoch: now + 86400 };
+        const r = e.rolled(a, now);
+        assert.deepStrictEqual([r.five_pct, r.five_reset_epoch, r.week_pct, r.week_reset_epoch], [0, null, 96, now + 86400]);
+        assert.strictEqual(a.five_pct, 32, 'the input is not changed');
+        const full = e.rolled({ ...a, five_pct: 10, week_pct: 100, week_reset_epoch: now - 60 }, now);
+        assert.strictEqual(full.week_pct, 0, 'a full week that has reset is free again');
+        const after = e.rolled({ ...a, fetched_at: now - 30, five_reset_epoch: now - 60 }, now);
+        assert.strictEqual(after.five_pct, 32, 'numbers fetched after the reset time are already the new window');
+        assert.deepStrictEqual(e.rolled({ ...a, fetched_at: null }, now).five_pct, 32, 'no fetch time: nothing to judge');
+    });
+
+    await check('readAccounts applies the reset: the panel and the switch choice see 0%', () => {
+        const f = path.join(ACC, 'personal', '.usage-cache'), keep = fs.readFileSync(f, 'utf8');
+        try {
+            fs.writeFileSync(f, JSON.stringify({ fetched_at: now - 300, five_hour_pct: 100, seven_day_pct: 5, five_hour_reset_epoch: now - 120, seven_day_reset_epoch: now + 86400 }));
+            const p = e.readAccounts().accounts.find((a) => a.label === 'personal');
+            assert.deepStrictEqual([p.five_pct, p.five_reset_epoch], [0, null]);
+        } finally { fs.writeFileSync(f, keep); }
     });
 
     // --- the native panel (vscode/webview/panel.*) ---------------------------------------------------

@@ -61,6 +61,16 @@ function codexRows() {
         five_reset_epoch: c.five_hour_reset_epoch ?? null, week_reset_epoch: c.seven_day_reset_epoch ?? null }];
 }
 
+// A window whose reset time passed after the numbers were fetched has started again: its old percent is gone. Until
+// ccswitch fetches again, show it as 0% with no reset time (a 32% session that reset 4 min ago is not 32% used).
+function rolled(a, now) {
+    const out = { ...a }, from = a.fetched_at;
+    for (const [p, r] of [['five_pct', 'five_reset_epoch'], ['week_pct', 'week_reset_epoch']]) {
+        if (from != null && out[r] != null && out[r] <= now && from < out[r]) { out[p] = 0; out[r] = null; }
+    }
+    return out;
+}
+
 const isFresh = (a, now, secs = FRESH_SECS) => a.state === 'ok' && a.fetched_at != null
     && now - a.fetched_at < secs && a.fetched_at - now <= CLOCK_SLACK_SECS;
 const loadOf = (a) => Math.max(...[a.five_pct, a.week_pct].filter((v) => v != null));  // a missing window is not full
@@ -147,8 +157,9 @@ function ageText(fetchedAt, now) {
 }
 
 function readAccounts() {
-    const u = readSnapshot();
     const now = Date.now() / 1000;
+    const u = readSnapshot();
+    u.accounts = u.accounts.map((a) => rolled(a, now));
     const cap = capacity(u, { you: activeLabel(), isSaved: saved, relogin, now });
     const accounts = u.accounts.map((a) => ({ ...a, email: isClaude(a) ? emailOf(a.label) : null }));
     cap.loginHealth = loginHealth;
