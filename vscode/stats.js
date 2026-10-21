@@ -268,7 +268,9 @@ async function buildStats({ projectsDir, cachePath, now, log } = {}) {
             let st;
             try { st = await fs.promises.stat(f); } catch { failed++; continue; }
             const hit = old[f];
-            if (hit && hit.size === st.size && hit.mtimeMs === st.mtimeMs) { fresh[f] = hit; reused++; continue; }
+            // Reuse only a well-formed entry: a bad one (hand edit, schema drift) is parsed again, not kept for good.
+            const good = hit && isObject(hit.agg) && isObject(hit.agg.msgs) && isObject(hit.agg.tok);
+            if (good && hit.size === st.size && hit.mtimeMs === st.mtimeMs) { fresh[f] = hit; reused++; continue; }
             try {
                 fresh[f] = { size: st.size, mtimeMs: st.mtimeMs, agg: await parseFile(f, st.size) };
                 parsed++;

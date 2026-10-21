@@ -557,8 +557,9 @@ function activate(context) {
                     else if (m.del) deleteSeat(m.del, poll);
                     else if (m.toggleAuto) toggleAuto();
                     else if (m.installCc) installCcswitch();
-                    else if (m.wantStats) wantStats();
+                    else if (m.wantStats) { if (v.visible) wantStats(); }  // a hidden, retained Stats tab never rebuilds
                 });
+                v.onDidChangeVisibility(() => { if (v.visible) push(); });  // shown again: Stats asks for a rebuild if it is due
                 v.onDidDispose(() => { view = null; });
             },
         }, { webviewOptions: { retainContextWhenHidden: true } }));

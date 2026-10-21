@@ -856,7 +856,8 @@ const calls = () => (fs.existsSync(LOG) ? fs.readFileSync(LOG, 'utf8').trim().sp
         assert.deepStrictEqual(builds, ['/tmp/c.json', '/tmp/c.json']);
         const src = fs.readFileSync(file, 'utf8');
         assert.match(src, /statsFeed\(path\.join\(context\.globalStorageUri\.fsPath, 'stats-cache\.json'\)/, 'the cache lives in global storage');
-        assert.match(src, /m\.wantStats\) wantStats\(\)/);
+        assert.match(src, /m\.wantStats\) \{ if \(v\.visible\) wantStats\(\); \}/, 'a hidden, retained Stats tab never rebuilds (review finding)');
+        assert.match(src, /v\.onDidChangeVisibility\(\(\) => \{ if \(v\.visible\) push\(\); \}\)/, 'shown again: the panel gets data and can ask');
     });
 
     await check('render: Stats tab; building, error, and the overview like the CLI /stats', () => {

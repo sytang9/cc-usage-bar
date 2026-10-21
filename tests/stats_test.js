@@ -225,6 +225,19 @@ const run = (dir, cachePath) => buildStats({ projectsDir: dir, cachePath, now: N
         assert.strictEqual(JSON.parse(fs.readFileSync(cache, 'utf8')).version, 1);
     });
 
+    await check('cache: a malformed entry with the right size and mtime is parsed again, not kept (review finding)', async () => {
+        const dir = newTree(), cache = path.join(dir, '..', 'cache-' + treeN + '.json');
+        const f = path.join(dir, 'p', 'a.jsonl');
+        write(f, [user('2026-10-21T01:00:00Z')]);
+        await run(dir, cache);
+        const c = JSON.parse(fs.readFileSync(cache, 'utf8'));
+        c.files[f].agg = null;
+        fs.writeFileSync(cache, JSON.stringify(c));
+        const s = await run(dir, cache);
+        assert.deepStrictEqual([s.meta.parsed, s.meta.reused, s.all.sessions], [1, 0, 1]);
+        assert.ok(JSON.parse(fs.readFileSync(cache, 'utf8')).files[f].agg, 'the entry is repaired');
+    });
+
     await check('an empty or missing projects dir gives zeros and no fun fact', async () => {
         const s = await run(path.join(ROOT, 'missing'));
         assert.deepStrictEqual([s.all.sessions, s.all.totalTokens, s.all.peakHour, s.all.favoriteModel, s.all.longestSession, s.all.funFact],
