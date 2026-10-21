@@ -36,9 +36,8 @@ button { font: inherit; cursor: pointer; }
 .use .top { display: flex; justify-content: space-between; }
 .use .p { font-variant-numeric: tabular-nums; }
 .bar { height: 5px; border-radius: 3px; overflow: hidden; margin: 5px 0 3px; background: var(--vscode-scrollbarSlider-background); }
-.bar i { display: block; height: 100%; border-radius: 3px; }
-.bar.s i { background: var(--vscode-charts-orange); }
-.bar.w i { background: var(--vscode-progressBar-background); }
+.bar i { display: block; height: 100%; border-radius: 3px; background: var(--vscode-progressBar-background); }
+.bar.hi i { background: var(--vscode-charts-orange); }  /* 80% and up, as in Claude Code's own view */
 .rs, .d, .note { font-size: 12px; color: var(--vscode-descriptionForeground); }
 /* Secondary text is grey in every theme: Light Modern's descriptionForeground equals its foreground, so dim it. */
 .grp, .kv .k, .rs, .d, .note, .sec .r { opacity: .8; }
@@ -73,7 +72,7 @@ button { font: inherit; cursor: pointer; }
 
 .det { padding: 0 0 6px; background: var(--vscode-list-inactiveSelectionBackground); font-size: 12px; }
 .det .kv { padding: 3px 16px 3px 38px; }
-.acts { display: flex; flex-wrap: wrap; gap: 14px; padding: 4px 16px 2px 38px; }
+.acts { display: flex; flex-wrap: wrap; align-items: center; gap: 14px; padding: 4px 16px 2px 38px; }
 
 .tg {
     flex: none; position: relative; width: 30px; height: 16px; padding: 0; border-radius: 8px;
@@ -87,3 +86,38 @@ button { font: inherit; cursor: pointer; }
 .tg.on { background: var(--vscode-button-background); }
 .tg.on::after { left: 15px; background: var(--vscode-button-foreground); }
 .note { padding: 2px 16px 6px; }
+
+/* View switcher (Accounts | History), like Claude Code's own Day / Week toggle. */
+.seg { display: flex; margin: 8px 16px 6px; border: 1px solid var(--vscode-widget-border, var(--vscode-panel-border)); border-radius: 4px; overflow: hidden; }
+.sg { flex: 1; padding: 2px 0; border: 0; font-size: 12px; color: var(--vscode-descriptionForeground); background: none; }
+.sg.on { color: var(--vscode-foreground); background: var(--vscode-list-inactiveSelectionBackground); outline: 1px solid var(--vscode-contrastActiveBorder, transparent); outline-offset: -1px; }
+.sg:hover { color: var(--vscode-foreground); }
+
+/* History charts: one line per window, a dashed 80% guide, faint ticks where a window starts. */
+.ch { padding: 6px 16px 4px 38px; }
+.ch .top { display: flex; justify-content: space-between; }
+.ch .p { font-variant-numeric: tabular-nums; }
+.ch svg { display: block; width: 100%; height: 56px; margin: 4px 0 2px; overflow: visible; }
+.ch .ln { fill: none; stroke: var(--vscode-progressBar-background); stroke-width: 1.5; vector-effect: non-scaling-stroke; }
+.ch.hi .ln { stroke: var(--vscode-charts-orange); }
+.ch .g80, .ch .rz, .ch .base { stroke: var(--vscode-descriptionForeground); vector-effect: non-scaling-stroke; }
+.ch .g80 { stroke-dasharray: 3 3; opacity: .45; }
+.ch .rz { opacity: .3; }
+.ch .base { opacity: .25; }
+.ax { display: flex; justify-content: space-between; font-size: 11px; color: var(--vscode-descriptionForeground); opacity: .8; }
+.empty { padding: 8px 16px; }
+
+/* Stats: heatmap levels, token lines per model, the fun-fact line. */
+.hmw { padding: 4px 16px 2px; }
+.hm { display: block; width: 100%; height: auto; }
+.lv0 { fill: var(--vscode-scrollbarSlider-background); background: var(--vscode-scrollbarSlider-background); }
+.lv1, .lv2, .lv3, .lv4 { fill: var(--vscode-progressBar-background); background: var(--vscode-progressBar-background); }
+.lv1 { opacity: .3; } .lv2 { opacity: .55; } .lv3 { opacity: .8; }
+.lg { display: inline-block; width: 8px; height: 8px; border-radius: 2px; vertical-align: middle; }
+.ch.tk { padding-left: 16px; }
+.ch .ln.m0, .sw.m0 { stroke: var(--vscode-charts-blue); background: var(--vscode-charts-blue); }
+.ch .ln.m1, .sw.m1 { stroke: var(--vscode-charts-orange); background: var(--vscode-charts-orange); }
+.ch .ln.m2, .sw.m2 { stroke: var(--vscode-charts-purple); background: var(--vscode-charts-purple); }
+.lgd { display: flex; flex-wrap: wrap; gap: 4px 12px; font-size: 11px; margin-top: 2px; }
+.sw { display: inline-block; width: 10px; height: 3px; margin-right: 4px; vertical-align: middle; }
+.fun { margin: 6px 16px 2px; padding: 6px 8px; border-left: 2px solid var(--vscode-charts-orange); font-style: italic; }

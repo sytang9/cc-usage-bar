@@ -323,14 +323,16 @@ account with its data age and re-login state.
 Both screenshots are real VS Code captures with live accounts (emails blurred).
 
 The sidebar follows your VS Code theme (Dark, Light and High Contrast) and the
-look of Claude Code's own Account & Usage view. Every section folds. Top to
+look of Claude Code's own Account & Usage view. A switcher at the top picks the
+view: **Accounts** (below), **History** or **Stats**. In Accounts, every section folds. Top to
 bottom:
 
 - **Active account** — **Account**: the nickname and email of the account you
-  are on. **Usage**: **Session (5hr)** (orange bar) and **Weekly (7 day)** (the
-  theme's progress blue), each with its percent and when it resets. **Last
-  data** shows only when its data is over 30 minutes old. **View details**
-  opens claude.ai/settings/usage in your browser.
+  are on. **Usage**: **Session (5hr)** and **Weekly (7 day)**, each bar in the
+  theme's progress blue, or orange from 80% as in Claude Code's own view, with
+  its percent and when it resets. **Last data** shows only when its data is
+  over 30 minutes old. For the full breakdown (per-model limits, what used
+  them), use **View details** in Claude Code's own Account & Usage section.
 - **If you run out** — the best account to switch to: the lowest
   `max(5h, weekly)` among saved accounts with a working login, data under 15
   minutes old and both windows below 100%. **Switch** runs `ccswitch <label>`;
@@ -339,8 +341,8 @@ bottom:
 - **Accounts** — the header says how many are saved (`4 saved`). Each row has
   one status icon, the name and one summary: `82% · 74%` (session · weekly),
   `Weekly full · resets Thu`, `Re-login needed` or `No recent data`. Click a
-  row for its email, usage and reset times (or its data age) and its actions:
-  **Switch**, **How to re-login**, **Delete** (`ccswitch delete`), and **Save
+  row for its email, usage and reset times (or its data age) and its actions: a
+  **Switch** button, and the links **How to re-login**, **Delete** (`ccswitch delete`) and **Save
   login** on the active account when it is not saved yet (`ccswitch save` only
   ever snapshots the active login). Actions confirm first.
   If Codex CLI is set up, a last row, `codex`, shows its usage read-only
@@ -366,6 +368,32 @@ bottom:
   the last switch time is in `~/.claude/accounts/.autoswitch.json`, and a lock
   (`.autoswitch.lock`) lets one window at a time decide and switch.
 
+**History** draws each account's usage over time from
+`~/.claude/accounts/<label>/.usage-history.jsonl`, which ccswitch appends to on
+every live fetch (30 days kept; the sidebar asks ccswitch every 10 minutes, and
+ccswitch reuses numbers under 10 minutes old, so a point every 10-20 minutes
+while VS Code is open). The
+active account is open first; click a row to open another. Each has two lines:
+**Session (5hr) · last 24h** and **Weekly (7 day) · last 7d**, with a dashed
+80% guide and a new line where a window resets. Under each: **Full in 2h 10m
+at this pace** (a straight line through the points since that window started,
+needing 20 minutes of points) or **Lasts until reset**. When the active account
+would be full before its reset, Accounts shows the same line under that bar.
+History starts empty: nothing recorded limit percentages before this version.
+
+**Stats** is the sidebar's version of Claude Code's `/stats`, built from this
+machine's Claude Code transcripts (`~/.claude/projects`), so it covers every
+account used here, not one account. Ranges **Last 7 days**, **Last 30 days**,
+**All time**. It shows a 26-week activity heatmap (messages per day), favorite
+model, total tokens, sessions, longest session, current and longest streak,
+active days, peak hour, tokens per day for the top 3 models, input and output
+tokens per model, and one of the CLI's fun facts ("Your input and output are
+~3x the tokens in The Hobbit"), a new one each day. The numbers follow the
+CLI's own definitions (2.1.305), including its days in UTC. The first build
+reads every transcript (about 11 s for 1.7 GB); after that only changed files
+are read again, at most every 10 minutes while Stats is open. Its cache is in
+VS Code's storage for this extension.
+
 | Icon (codicon) | Meaning |
 |------|---------|
 | `circle-filled` (orange) | active account |
@@ -385,6 +413,10 @@ accounts' tokens alive and reports each login as `ok` or `re-login`. **How to
 re-login** opens a terminal with `claude` for a one-time `/login`, then you save
 the login. A failed check (timeout, an error) keeps the last known re-login
 marks. An older ccswitch without `--json` marks nothing as re-login.
+Each live fetch (never a cache hit, a 429 or an error) also appends one line,
+`{"t":<epoch>,"p5":..,"p7":..,"r5":..,"r7":..}` (the two percentages and the two
+reset epochs), to `~/.claude/accounts/<label>/.usage-history.jsonl`. Lines older
+than 30 days are dropped. A failed history write never affects usage output.
 The Codex row reads `${CODEX_HOME:-~/.codex}/.usage-cache`, which the same
 `ccswitch usage --json` run refreshes; the sidebar only checks that
 `auth.json` exists and never reads it.

@@ -1011,6 +1011,132 @@ case32_json_lock_busy() {
   rm -rf "$home" "$ctl"
 }
 
+# History file (.usage-history.jsonl): one line per live fetch only.
+case29_history_live_fetch_appends_one_line() {
+  local home ctl hist
+  home="$(new_home)"
+  ctl="$(new_ctl)"
+  hist="$home/.claude/accounts/acct_hist/.usage-history.jsonl"
+  write_claude_json "$home"
+  write_account_credentials "$home" "acct_hist" "REFRESH_HIST" "TOK_HIST" "$(future_ms)"
+  set_usage_response "$ctl" "TOK_HIST" 200 "$(usage_body 41 22)"
+
+  run_cc "$home" "$ctl" "" --no-switch
+  local after_live
+  after_live="$(wc -l <"$hist" 2>/dev/null || echo -1)"
+  run_cc "$home" "$ctl" "" --no-switch   # cache hit
+  local after_hit
+  after_hit="$(wc -l <"$hist" 2>/dev/null || echo -1)"
+
+  if [[ "$EXIT_CODE" -eq 0 && "$after_live" -eq 1 && "$after_hit" -eq 1 ]] \
+    && jq -e --argjson c "$(jq .fetched_at "$home/.claude/accounts/acct_hist/.usage-cache")" \
+      '.t == $c and .p5 == 41 and .p7 == 22 and (.r5 | type) == "number" and (.r7 | type) == "number"' "$hist" >/dev/null 2>&1; then
+    pass "hist live fetch appends exactly one history line; a cache hit appends none"
+  else
+    fail "case29 (live=$after_live hit=$after_hit): $(cat "$hist" 2>&1)"
+  fi
+  rm -rf "$home" "$ctl"
+}
+
+case29b_history_not_written_on_429() {
+  local home ctl
+  home="$(new_home)"
+  ctl="$(new_ctl)"
+  write_claude_json "$home"
+  write_account_credentials "$home" "acct_hist" "REFRESH_HIST" "TOK_HIST" "$(future_ms)"
+  set_usage_response "$ctl" "TOK_HIST" 429 '{"error":"rate limited"}'
+
+  run_cc "$home" "$ctl" "" --no-switch
+
+  if [[ "$EXIT_CODE" -eq 0 && ! -e "$home/.claude/accounts/acct_hist/.usage-history.jsonl" ]]; then
+    pass "histb a 429 appends no history line"
+  else
+    fail "histb (exit=$EXIT_CODE): $OUT"
+  fi
+  rm -rf "$home" "$ctl"
+}
+
+case29c_history_trims_old_and_malformed_lines() {
+  local home ctl hist now
+  home="$(new_home)"
+  ctl="$(new_ctl)"
+  now="$(date +%s)"
+  hist="$home/.claude/accounts/acct_hist/.usage-history.jsonl"
+  write_claude_json "$home"
+  write_account_credentials "$home" "acct_hist" "REFRESH_HIST" "TOK_HIST" "$(future_ms)"
+  set_usage_response "$ctl" "TOK_HIST" 200 "$(usage_body 41 22)"
+  {
+    printf '{"t":%s,"p5":1,"p7":1,"r5":null,"r7":null}\n' "$((now - 32 * 86400))"
+    printf 'not json\n'
+    printf '{"t":%s,"p5":2,"p7":2,"r5":null,"r7":null}\n' "$((now - 29 * 86400))"
+    printf '{"p5":3}\n'
+  } >"$hist"
+
+  run_cc "$home" "$ctl" "" --no-switch
+
+  # Kept: the 29-day-old line and the new live line; the old, the garbage and
+  # the t-less lines are gone.
+  if [[ "$EXIT_CODE" -eq 0 && "$(wc -l <"$hist")" -eq 2 ]] \
+    && [[ "$(jq -s -c '[.[].p5]' "$hist")" == "[2,41]" ]]; then
+    pass "histc history trim drops lines older than 30 days and malformed lines"
+  else
+    fail "histc (exit=$EXIT_CODE): $(cat "$hist")"
+  fi
+  rm -rf "$home" "$ctl"
+}
+
+case29e_history_trims_only_a_day_past_the_cutoff() {
+  local home ctl hist now
+  home="$(new_home)"
+  ctl="$(new_ctl)"
+  now="$(date +%s)"
+  hist="$home/.claude/accounts/acct_hist/.usage-history.jsonl"
+  write_claude_json "$home"
+  write_account_credentials "$home" "acct_hist" "REFRESH_HIST" "TOK_HIST" "$(future_ms)"
+  set_usage_response "$ctl" "TOK_HIST" 200 "$(usage_body 41 22)"
+  printf '{"t":%s,"p5":1,"p7":1,"r5":null,"r7":null}\n' "$((now - 30 * 86400 - 43200))" >"$hist"
+
+  run_cc "$home" "$ctl" "" --no-switch
+
+  # 30.5 days old: past the 30-day cutoff but not a day past it, so no rewrite
+  # yet (the rewrite runs about once a day, not on every append).
+  if [[ "$EXIT_CODE" -eq 0 && "$(jq -s -c '[.[].p5]' "$hist")" == "[1,41]" ]]; then
+    pass "histe history rewrite waits until the oldest line is a day past 30 days"
+  else
+    fail "histe (exit=$EXIT_CODE): $(cat "$hist")"
+  fi
+  rm -rf "$home" "$ctl"
+}
+
+case29d_history_write_failure_keeps_output() {
+  local home ctl okhome okctl
+  home="$(new_home)"
+  ctl="$(new_ctl)"
+  okhome="$(new_home)"
+  okctl="$(new_ctl)"
+  for h in "$home" "$okhome"; do
+    write_claude_json "$h"
+    write_account_credentials "$h" "acct_hist" "REFRESH_HIST" "TOK_HIST" "$(future_ms)"
+  done
+  set_usage_response "$ctl" "TOK_HIST" 200 "$(usage_body 41 22)"
+  set_usage_response "$okctl" "TOK_HIST" 200 "$(usage_body 41 22)"
+  # A directory where the history file belongs makes every write fail.
+  mkdir "$home/.claude/accounts/acct_hist/.usage-history.jsonl"
+
+  run_cc_json "$home" "$ctl"
+  local bad_out="$OUT" bad_err="$ERR" bad_exit=$EXIT_CODE
+  run_cc_json "$okhome" "$okctl"
+
+  if [[ "$bad_exit" -eq 0 && -z "$bad_err" ]] \
+    && [[ "$(jq -c '.accounts[0] | [.five_hour_pct, .seven_day_pct]' <<<"$bad_out")" == "$(jq -c '.accounts[0] | [.five_hour_pct, .seven_day_pct]' <<<"$OUT")" ]] \
+    && jq -e '.accounts[0].five_hour_pct == 41' <<<"$bad_out" >/dev/null 2>&1; then
+    pass "histd an unwritable history file leaves fetch output and stderr unchanged"
+  else
+    fail "histd (exit=$bad_exit): $bad_out / $bad_err"
+  fi
+  rm -rf "$home" "$ctl" "$okhome" "$okctl"
+}
+
 main() {
   if [[ ! -x "$TARGET" ]]; then
     echo "FAIL: target script not found or not executable: $TARGET"
@@ -1618,6 +1744,11 @@ main() {
   case27_json_two_accounts
   case28_json_relogin_keeps_last_numbers
   case28b_json_non_object_cache_keeps_account
+  case29_history_live_fetch_appends_one_line
+  case29b_history_not_written_on_429
+  case29c_history_trims_old_and_malformed_lines
+  case29e_history_trims_only_a_day_past_the_cutoff
+  case29d_history_write_failure_keeps_output
   case29_json_no_accounts
   case30_json_refresh_paused
   case31_json_old_node

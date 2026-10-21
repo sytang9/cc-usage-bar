@@ -6,6 +6,7 @@ const vscode = require('vscode');
 const fs = require('fs');
 const path = require('path');
 const { execFile } = require('child_process');
+const { buildStats } = require('./stats');
 
 const usageFile = () => vscode.workspace.getConfiguration('claudeUsage').get('usageFile') || '';  // '' = ccswitch's cache
 const POLL_MS = 60 * 1000;  // keeps reset times and the per-account data age current
@@ -59,6 +60,49 @@ function codexRows() {
     return [{ label: 'codex', provider: 'codex', state: c.fetched_at ? 'ok' : 'no data yet', fetched_at: c.fetched_at || null,  // 0 = never fetched
         five_pct: c.five_hour_pct ?? null, week_pct: c.seven_day_pct ?? null,
         five_reset_epoch: c.five_hour_reset_epoch ?? null, week_reset_epoch: c.seven_day_reset_epoch ?? null }];
+}
+
+// History: ccswitch appends one line per live fetch to <label>/.usage-history.jsonl ({t, p5, p7, r5, r7}). The panel
+// reads the last 7 days (the weekly chart's span); a bad line is skipped.
+const HISTORY_SECS = 7 * 86400;
+function readHistory(label, now) {
+    let text;
+    try { text = fs.readFileSync(path.join(ACCOUNTS, label, '.usage-history.jsonl'), 'utf8'); } catch { return []; }
+    const out = [];
+    for (const line of text.split('\n')) {
+        let o;
+        try { o = JSON.parse(line); } catch { continue; }
+        if (o && typeof o.t === 'number' && o.t >= now - HISTORY_SECS && o.t <= now + CLOCK_SLACK_SECS) out.push(o);
+    }
+    return out.sort((a, b) => a.t - b.t);
+}
+
+// "At this pace": the rise of one limit since its window started (the points that share the latest reset time),
+// extended in a straight line. Needs 20 min of points, a rise, and a last point under 30 min old. Returns { full: epoch }
+// when the limit would reach 100% before it resets, { lasts: true } when it would not, null when there is nothing to judge.
+// Reset times within a minute are one window (the API's reset time can move across a second boundary).
+const PACE_MIN_SECS = 1200;
+const sameWindow = (a, b) => a != null && b != null && Math.abs(a - b) <= 60;
+function forecast(points, p, r, now) {
+    const last = points[points.length - 1];
+    if (!last || last[p] == null || last[r] == null || last[r] <= now || now - last.t > FRESH_SECS) return null;
+    if (last[p] >= 100) return null;  // already full: the bar says so
+    const first = points.find((x) => sameWindow(x[r], last[r]) && x[p] != null);
+    const span = last.t - first.t, rise = last[p] - first[p];
+    if (span < PACE_MIN_SECS || rise <= 0) return null;
+    const full = last.t + (100 - last[p]) * span / rise;
+    if (full <= now) return null;  // the line says it is full already, but no fetch saw it
+    return full < last[r] ? { full } : { lasts: true };
+}
+
+// A window whose reset time passed after the numbers were fetched has started again: its old percent is gone. Until
+// ccswitch fetches again, show it as 0% with no reset time (a 32% session that reset 4 min ago is not 32% used).
+function rolled(a, now) {
+    const out = { ...a }, from = a.fetched_at;
+    for (const [p, r] of [['five_pct', 'five_reset_epoch'], ['week_pct', 'week_reset_epoch']]) {
+        if (from != null && out[r] != null && out[r] <= now && from < out[r]) { out[p] = 0; out[r] = null; }
+    }
+    return out;
 }
 
 const isFresh = (a, now, secs = FRESH_SECS) => a.state === 'ok' && a.fetched_at != null
@@ -147,10 +191,12 @@ function ageText(fetchedAt, now) {
 }
 
 function readAccounts() {
-    const u = readSnapshot();
     const now = Date.now() / 1000;
+    const u = readSnapshot();
+    u.accounts = u.accounts.map((a) => rolled(a, now));
     const cap = capacity(u, { you: activeLabel(), isSaved: saved, relogin, now });
-    const accounts = u.accounts.map((a) => ({ ...a, email: isClaude(a) ? emailOf(a.label) : null }));
+    const accounts = u.accounts.map((a) => ({ ...a, email: isClaude(a) ? emailOf(a.label) : null,
+        history: isClaude(a) && saved(a.label) ? readHistory(a.label, now) : [] }));
     cap.loginHealth = loginHealth;
     cap.saved = fs.existsSync(CCSWITCH) ? accounts.map((a) => a.label).filter(saved) : null;  // null = no ccswitch
     cap.relogin = [...relogin];
@@ -191,14 +237,28 @@ function panelData(accounts, cap, { now, installed, auto }) {
             fiveReset: reset(a.five_reset_epoch), weekReset: reset(a.week_reset_epoch), age: age(a), email: a.email || null, actions };
     });
     const mine = list.find((a) => isClaude(a) && a.label === cap.you);
+    // History view: one block per Claude account with points, the active account first. Each chart is [t, %, reset].
+    const fullAt = (f) => 'Full ' + resetText(f.full) + ' at this pace';
+    const pace = (h, p, r) => { const f = forecast(h, p, r, now); return !f ? null : f.lasts ? 'Lasts until reset' : fullAt(f); };
+    const activePace = (p, r) => { const f = mine && forecast(mine.history || [], p, r, now); return f && f.full ? fullAt(f) : null; };
+    const series = (h, p, r, secs) => h.filter((x) => x.t >= now - secs && x[p] != null).map((x) => [x.t, Math.round(x[p] * 10) / 10, x[r] ?? null]);
+    const history = list.filter((a) => isClaude(a) && a.history && a.history.length)
+        .sort((a, b) => (b.label === cap.you) - (a.label === cap.you))
+        .map((a) => {
+            const r = rows.find((x) => x.provider === 'claude' && x.label === a.label);
+            return { label: a.label, icon: r.icon, tip: r.tip, five: pct(a.five_pct), week: pct(a.week_pct),
+                fiveSeries: series(a.history, 'p5', 'r5', 86400), weekSeries: series(a.history, 'p7', 'r7', HISTORY_SECS),
+                fivePace: pace(a.history, 'p5', 'r5'), weekPace: pace(a.history, 'p7', 'r7') };
+        });
     return {
         installed, auto, loginHealth: cap.loginHealth || 'unknown',
         active: mine ? { label: mine.label, email: mine.email || null, five: pct(mine.five_pct), week: pct(mine.week_pct),
-            fiveReset: reset(mine.five_reset_epoch), weekReset: reset(mine.week_reset_epoch), age: age(mine) } : null,
+            fiveReset: reset(mine.five_reset_epoch), weekReset: reset(mine.week_reset_epoch), age: age(mine),
+            fivePace: activePace('p5', 'r5'), weekPace: activePace('p7', 'r7') } : null,
         next: cap.best ? { label: cap.best.label, five: pct(cap.best.five), week: pct(cap.best.week) } : null,
         counts: { total: rows.length, saved: rows.filter((r) => r.provider === 'claude' && savedSet.has(r.label)).length,
             relogin: rows.filter((r) => r.icon === 'relogin').length, full: rows.filter((r) => r.icon === 'full').length },
-        rows,
+        rows, history, now,
     };
 }
 
@@ -431,9 +491,22 @@ async function autoSwitch(cap, state, onDone) {
     return res;
 }
 
-// "View details" in the Active account header: Claude's own usage page, in the user's browser.
-const USAGE_URL = 'https://claude.ai/settings/usage';
-const openUsagePage = () => vscode.env.openExternal(vscode.Uri.parse(USAGE_URL));
+
+// Stats view: built from this machine's Claude Code transcripts (stats.js) only while the view is shown, at most every
+// 10 min, one build at a time, with an incremental cache in the extension's global storage. send gets each message.
+const STATS_EVERY_MS = 10 * 60 * 1000;
+function statsFeed(cachePath, send, build = buildStats) {
+    let last = null, at = 0, busy = false;
+    return () => {
+        if (busy) return;
+        if (last && Date.now() - at < STATS_EVERY_MS) { send(last); return; }
+        busy = true;
+        send({ kind: 'stats', building: true, stats: last && last.stats });
+        return build({ cachePath }).then((stats) => { last = { kind: 'stats', stats }; },
+            (err) => { last = { kind: 'stats', error: String((err && err.message) || err), stats: last && last.stats }; })
+            .then(() => { at = Date.now(); busy = false; send(last); });
+    };
+}
 
 // Pre-release copies were published as meng-local.claude-usage (+ a Chrome helper); remove them so there is one sidebar.
 function removeOldHelper() {
@@ -451,6 +524,7 @@ function activate(context) {
     status.text = '$(pulse) Claude …';
     status.show();
 
+    const wantStats = statsFeed(path.join(context.globalStorageUri.fsPath, 'stats-cache.json'), (m) => view && view.webview.postMessage(m));
     const push = () => view && cap && view.webview.postMessage(panelData(accounts, cap, { now: Date.now() / 1000, installed: fs.existsSync(CCSWITCH), auto: !!cap.auto }));
     const autoOn = () => vscode.workspace.getConfiguration('claudeUsage').get('autoSwitch');
     const toggleAuto = () => changeAutoSwitch(!autoOn(), context.globalState);
@@ -483,8 +557,9 @@ function activate(context) {
                     else if (m.del) deleteSeat(m.del, poll);
                     else if (m.toggleAuto) toggleAuto();
                     else if (m.installCc) installCcswitch();
-                    else if (m.openUsage) openUsagePage();
+                    else if (m.wantStats) { if (v.visible) wantStats(); }  // a hidden, retained Stats tab never rebuilds
                 });
+                v.onDidChangeVisibility(() => { if (v.visible) push(); });  // shown again: Stats asks for a rebuild if it is due
                 v.onDidDispose(() => { view = null; });
             },
         }, { webviewOptions: { retainContextWhenHidden: true } }));
