@@ -1146,7 +1146,8 @@ case29g_history_never_follows_a_symlink() {
   ln -s "$target" "$hist"
 
   run_cc "$home" "$ctl" "" --no-switch
-  local kept_target="$(cat "$target")" still_link=0
+  local kept_target still_link=0
+  kept_target="$(cat "$target")"
   [[ -L "$hist" ]] && still_link=1
   rm -f "$hist"
   ln -s "$dangling" "$hist"
