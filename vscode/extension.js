@@ -77,17 +77,20 @@ function readHistory(label, now) {
 }
 
 // "At this pace": the rise of one limit since its window started (the points that share the latest reset time),
-// extended in a straight line. Needs 20 min of points and a rise. Returns { full: epoch } when the limit would reach
-// 100% before it resets, { lasts: true } when it would not, null when there is nothing to judge.
+// extended in a straight line. Needs 20 min of points, a rise, and a last point under 30 min old. Returns { full: epoch }
+// when the limit would reach 100% before it resets, { lasts: true } when it would not, null when there is nothing to judge.
+// Reset times within a minute are one window (the API's reset time can move across a second boundary).
 const PACE_MIN_SECS = 1200;
+const sameWindow = (a, b) => a != null && b != null && Math.abs(a - b) <= 60;
 function forecast(points, p, r, now) {
     const last = points[points.length - 1];
-    if (!last || last[p] == null || last[r] == null || last[r] <= now) return null;
+    if (!last || last[p] == null || last[r] == null || last[r] <= now || now - last.t > FRESH_SECS) return null;
     if (last[p] >= 100) return null;  // already full: the bar says so
-    const first = points.find((x) => x[r] === last[r] && x[p] != null);
+    const first = points.find((x) => sameWindow(x[r], last[r]) && x[p] != null);
     const span = last.t - first.t, rise = last[p] - first[p];
     if (span < PACE_MIN_SECS || rise <= 0) return null;
     const full = last.t + (100 - last[p]) * span / rise;
+    if (full <= now) return null;  // the line says it is full already, but no fetch saw it
     return full < last[r] ? { full } : { lasts: true };
 }
 

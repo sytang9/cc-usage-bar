@@ -83,10 +83,11 @@ function chart(title, pts, from, to, ago, pace, now) {
     const x = (t) => ((t - from) / (to - from) * CW).toFixed(1);
     const y = (p) => (CH - Math.max(0, Math.min(100, p)) / 100 * CH).toFixed(1);
     const runs = [];
-    pts.forEach((q, i) => { const b = pts[i - 1]; if (!b || q[2] !== b[2] || q[1] < b[1]) runs.push([]); runs[runs.length - 1].push(q); });
+    const newWindow = (a, b) => a !== b && !(a != null && b != null && Math.abs(a - b) <= 60);  // reset times a second apart: one window
+    pts.forEach((q, i) => { const b = pts[i - 1]; if (!b || newWindow(q[2], b[2]) || q[1] < b[1]) runs.push([]); runs[runs.length - 1].push(q); });
     const svg = runs.map((run, i) => {
         const xy = run.map((q) => x(q[0]) + ',' + y(q[1]));
-        if (xy.length === 1) xy.push((+x(run[0][0]) + 2).toFixed(1) + ',' + y(run[0][1]));  // a lone point: a short dash
+        if (xy.length === 1) xy.unshift(Math.max(0, x(run[0][0]) - 3).toFixed(1) + ',' + y(run[0][1]));  // a lone point: a short dash, inside the chart
         return (i ? '<line class="rz" x1="' + x(run[0][0]) + '" x2="' + x(run[0][0]) + '" y1="0" y2="' + CH + '"/>' : '')
             + '<polyline class="ln" points="' + xy.join(' ') + '"/>';
     }).join('');

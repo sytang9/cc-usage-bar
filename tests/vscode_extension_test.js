@@ -749,6 +749,10 @@ const calls = () => (fs.existsSync(LOG) ? fs.readFileSync(LOG, 'utf8').trim().sp
         assert.strictEqual(e.forecast([pt(3600, 50, 5), pt(0, 100, 5)], 'p5', 'r5', now), null, 'already full');
         assert.strictEqual(e.forecast([pt(3600, 5, 5, now - 60), pt(1800, 9, 5, now - 60)], 'p5', 'r5', now), null, 'that window has reset');
         assert.strictEqual(e.forecast([], 'p5', 'r5', now), null);
+        // Found in review: a stale last point, and reset times that differ by a second.
+        assert.strictEqual(e.forecast([pt(4 * 3600, 10, 5, now + 3600), pt(3 * 3600, 60, 5, now + 3600)], 'p5', 'r5', now), null, 'last point 3 h old');
+        const jitter = [pt(2400, 10, 50, now + 4 * 3600), pt(1200, 20, 50, now + 4 * 3600 + 1), pt(0, 30, 50, now + 4 * 3600)];
+        assert.strictEqual(Math.round(e.forecast(jitter, 'p5', 'r5', now).full - now), 140 * 60, 'a 1 s reset jitter is the same window');
     });
 
     const withHist = (h002, more = {}) => {
@@ -801,6 +805,9 @@ const calls = () => (fs.existsSync(LOG) ? fs.readFileSync(LOG, 'utf8').trim().sp
         assert.match(other, /data-l="004" role="button" tabindex="0" aria-expanded="true"/);
         assert.match(other, /data-l="002" role="button" tabindex="0" aria-expanded="false"/);
         assert.ok(!p.render(d, ui({ view: 'history', histOpen: null })).includes('<svg'), 'all closed');
+        const jit = withHist([pt(2400, 10, 50, now + 4 * 3600), pt(1200, 20, 50, now + 4 * 3600 + 1), pt(0, 30, 50, now + 4 * 3600 - 1)]);
+        const js = p.render(jit, ui({ view: 'history' }));
+        assert.strictEqual(js.slice(0, js.indexOf('Weekly (7 day)')).split('<polyline').length - 1, 1, 'reset times a second apart: one line');
     });
 
     await check('render: History empty state, escaping, an 80%+ chart is orange', () => {
@@ -812,7 +819,7 @@ const calls = () => (fs.existsSync(LOG) ? fs.readFileSync(LOG, 'utf8').trim().sp
         const html = p.render(d, ui({ view: 'history' }));
         assert.ok(!html.includes('<img src=x') && !html.includes('<b>') && html.includes('&lt;b&gt;'));
         assert.match(html, /<div class="ch hi"><div class="top"><span>Session/, '85% now: orange line');
-        assert.match(html, /<polyline class="ln" points="300\.0,8\.4 302\.0,8\.4"\/>/, 'a lone point is a short dash');
+        assert.match(html, /<polyline class="ln" points="297\.0,8\.4 300\.0,8\.4"\/>/, 'a lone point is a short dash that ends at "now", inside the chart');
     });
 
     // --- G7: turning auto-switch on asks once ----------------------------------------------------------
