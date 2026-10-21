@@ -1036,6 +1036,24 @@ const calls = () => (fs.existsSync(LOG) ? fs.readFileSync(LOG, 'utf8').trim().sp
         assert.match(src, /l === 'stats'\) vsc\.postMessage\(\{ wantStats: 1 \}\)/, 'opening the tab asks for stats');
     });
 
+    await check('render: a non-number where Stats or History expects a number never reaches the HTML (review finding)', () => {
+        const p = panel(), x = '<img src=x onerror=a()>';
+        const st = statsMsg();
+        st.stats.all = rangeOf({ totalTokens: x, sessions: x, activeDays: x, totalDays: x, longestStreak: x, peakHour: x, currentStreak: x,
+            longestSession: { ms: x, date: '2026-08-26' }, dailyActivity: [{ date: '2026-10-20', messageCount: x }, { date: '2026-10-21', messageCount: 3 }],
+            models: [{ model: 'm', inputTokens: x, outputTokens: { toString: () => x } }],
+            tokensPerDay: { models: ['m'], days: [{ date: '2026-10-20', tokensByModel: { m: x } }, { date: '2026-10-21', tokensByModel: { m: 5 } }] } });
+        st.stats.all.currentStreak = x;
+        const html = p.render(pdFour(), ui({ view: 'stats' }), st);
+        assert.ok(!html.includes('<img'), 'stats: ' + html.slice(html.indexOf('<img') - 80, html.indexOf('<img') + 20));
+        assert.ok(html.includes('Sessions</span><span class="v">–<'), 'a bad number shows a dash');
+        const h = { ...withHist(rising), history: [{ label: 'a', icon: 'switch', tip: 't', five: x, week: '9" onmouseover="a()',
+            fiveSeries: [[x, x, x], [now, 5, null]], weekSeries: [[now, { toString: () => x }, null]], fivePace: null, weekPace: null }] };
+        const hist = p.render(h, ui({ view: 'history' }));
+        assert.ok(!hist.includes('<img') && !hist.includes('onmouseover'), 'history: ' + hist.slice(0, 400));
+        assert.ok(!p.render({ ...pdFour(), active: { ...pdFour().active, five: x } }, ui()).includes('<img'), 'the Usage bars too');
+    });
+
     // --- G7: turning auto-switch on asks once ----------------------------------------------------------
     await check('G7 turning auto-switch on asks once, in a modal', async () => {
         said.length = saidOpts.length = updates.length = 0;
