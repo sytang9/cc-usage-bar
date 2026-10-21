@@ -16,6 +16,7 @@ SUITES=(
   ccswitch_codex_usage_test.sh
   install_test.sh
   vscode_extension_test.sh
+  stats_test.sh
 )
 
 FAILED_SUITES=()
