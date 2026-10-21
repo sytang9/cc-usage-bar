@@ -340,8 +340,8 @@ bottom:
 - **Accounts** — the header says how many are saved (`4 saved`). Each row has
   one status icon, the name and one summary: `82% · 74%` (session · weekly),
   `Weekly full · resets Thu`, `Re-login needed` or `No recent data`. Click a
-  row for its email, usage and reset times (or its data age) and its actions:
-  **Switch**, **How to re-login**, **Delete** (`ccswitch delete`), and **Save
+  row for its email, usage and reset times (or its data age) and its actions: a
+  **Switch** button, and the links **How to re-login**, **Delete** (`ccswitch delete`) and **Save
   login** on the active account when it is not saved yet (`ccswitch save` only
   ever snapshots the active login). Actions confirm first.
   If Codex CLI is set up, a last row, `codex`, shows its usage read-only

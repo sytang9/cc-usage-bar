@@ -72,7 +72,7 @@ button { font: inherit; cursor: pointer; }
 
 .det { padding: 0 0 6px; background: var(--vscode-list-inactiveSelectionBackground); font-size: 12px; }
 .det .kv { padding: 3px 16px 3px 38px; }
-.acts { display: flex; flex-wrap: wrap; gap: 14px; padding: 4px 16px 2px 38px; }
+.acts { display: flex; flex-wrap: wrap; align-items: center; gap: 14px; padding: 4px 16px 2px 38px; }
 
 .tg {
     flex: none; position: relative; width: 30px; height: 16px; padding: 0; border-radius: 8px;

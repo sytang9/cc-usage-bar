@@ -59,7 +59,7 @@ function row(r, open) {
         + (r.provider && r.provider !== 'claude' ? kv('Read-only', 'Codex usage, never a switch target') : '')
         + (r.age ? kv('Last data', esc(r.age))
             : kv('Session (5hr)', use(r.five, r.fiveReset)) + kv('Weekly (7 day)', use(r.week, r.weekReset)))
-        + (r.actions.length ? '<div class="acts">' + r.actions.map((a) => '<button class="lnk" data-a="' + a + '" data-l="' + l + '"'
+        + (r.actions.length ? '<div class="acts">' + r.actions.map((a) => '<button class="' + (a === 'switch' ? 'btn' : 'lnk') + '" data-a="' + a + '" data-l="' + l + '"'
             + (ACTION_TIP[a] ? ' title="' + ACTION_TIP[a] + '"' : '') + '>' + ACTION[a] + '</button>').join('') + '</div>' : '')
         + '</div>';
     return html;

@@ -660,7 +660,7 @@ const calls = () => (fs.existsSync(LOG) ? fs.readFileSync(LOG, 'utf8').trim().sp
         assert.match(rowOf(open, '004'), /codicon-chevron-right/);
     });
 
-    await check('render: open row details are key-value rows and text-link actions', () => {
+    await check('render: open row details are key-value rows; Switch is a button, the rest text links', () => {
         const html = panel().render(pdFour(), ui({ openRow: '003' }));
         const det = html.slice(html.indexOf('<div class="det">'));
         for (const t of ['Email', '003@x.example', 'Last data', '13d old', 'How to re-login', 'Delete']) assert.ok(det.includes(t), t);
@@ -669,6 +669,8 @@ const calls = () => (fs.existsSync(LOG) ? fs.readFileSync(LOG, 'utf8').trim().sp
         const fresh = panel().render(pdFour(), ui({ openRow: '004' }));
         const d4 = fresh.slice(fresh.indexOf('<div class="det">'));
         assert.ok(d4.includes('Session (5hr)') && d4.includes('46%') && d4.includes('resets ') && d4.includes('>Switch<'));
+        assert.match(d4, /<button class="btn" data-a="switch" data-l="004">Switch</, 'Switch is a filled button, like the one in If you run out');
+        assert.match(d4, /<button class="lnk" data-a="delete" data-l="004"/, 'Delete stays a text link');
     });
 
     await check('render: auto-switch toggle says its state', () => {
