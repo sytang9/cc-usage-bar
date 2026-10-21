@@ -65,6 +65,9 @@ function codexRows() {
 // History: ccswitch appends one line per live fetch to <label>/.usage-history.jsonl ({t, p5, p7, r5, r7}). The panel
 // reads the last 7 days (the weekly chart's span); a bad line is skipped.
 const HISTORY_SECS = 7 * 86400;
+const fin = Number.isFinite;
+// A usable line: a finite t, and each percent and reset a finite number or null (ccswitch writes null for no data).
+const isPoint = (o) => !!o && fin(o.t) && ['p5', 'p7', 'r5', 'r7'].every((k) => o[k] === null || fin(o[k]));
 function readHistory(label, now) {
     let text;
     try { text = fs.readFileSync(path.join(ACCOUNTS, label, '.usage-history.jsonl'), 'utf8'); } catch { return []; }
@@ -72,7 +75,7 @@ function readHistory(label, now) {
     for (const line of text.split('\n')) {
         let o;
         try { o = JSON.parse(line); } catch { continue; }
-        if (o && typeof o.t === 'number' && o.t >= now - HISTORY_SECS && o.t <= now + CLOCK_SLACK_SECS) out.push(o);
+        if (isPoint(o) && o.t >= now - HISTORY_SECS && o.t <= now + CLOCK_SLACK_SECS) out.push(o);
     }
     return out.sort((a, b) => a.t - b.t);
 }
@@ -83,15 +86,17 @@ function readHistory(label, now) {
 // Reset times within a minute are one window (the API's reset time can move across a second boundary).
 const PACE_MIN_SECS = 1200;
 const sameWindow = (a, b) => a != null && b != null && Math.abs(a - b) <= 60;
+// Points that are not finite numbers (a hand-edited file) give null; it never throws.
+const usable = (x, p, r) => !!x && fin(x.t) && fin(x[p]) && fin(x[r]);
 function forecast(points, p, r, now) {
     const last = points[points.length - 1];
-    if (!last || last[p] == null || last[r] == null || last[r] <= now || now - last.t > FRESH_SECS) return null;
+    if (!usable(last, p, r) || last[r] <= now || now - last.t > FRESH_SECS) return null;
     if (last[p] >= 100) return null;  // already full: the bar says so
-    const first = points.find((x) => sameWindow(x[r], last[r]) && x[p] != null);
+    const first = points.find((x) => usable(x, p, r) && sameWindow(x[r], last[r]));
     const span = last.t - first.t, rise = last[p] - first[p];
     if (span < PACE_MIN_SECS || rise <= 0) return null;
     const full = last.t + (100 - last[p]) * span / rise;
-    if (full <= now) return null;  // the line says it is full already, but no fetch saw it
+    if (!fin(full) || full <= now) return null;  // the line says it is full already, but no fetch saw it
     return full < last[r] ? { full } : { lasts: true };
 }
 

@@ -772,6 +772,27 @@ const calls = () => (fs.existsSync(LOG) ? fs.readFileSync(LOG, 'utf8').trim().sp
         assert.strictEqual(Math.round(e.forecast(jitter, 'p5', 'r5', now).full - now), 140 * 60, 'a 1 s reset jitter is the same window');
     });
 
+    await check('readHistory skips a line with a missing or non-numeric t, percent or reset (review finding)', () => {
+        const f = path.join(ACC, 'personal', '.usage-history.jsonl');
+        try {
+            fs.writeFileSync(f, [pt(600, 1, 1), { ...pt(500, 2, 2), p5: 'x' }, { ...pt(400, 3, 3), r5: 'soon' }, { ...pt(300, 4, 4), t: '1' },
+                { t: now - 200, p7: 5, r5: null, r7: null }, { ...pt(150, 6, 6), p7: {} }, { ...pt(100, null, 7), r5: null }]
+                .map((x) => JSON.stringify(x)).join('\n') + '\n');
+            assert.deepStrictEqual(e.readHistory('personal', now).map((x) => x.p7), [1, 7], 'null is kept: ccswitch writes null for a missing window');
+        } finally { fs.rmSync(f, { force: true }); }
+    });
+
+    await check('forecast never throws: garbage points give null, not a pace from NaN (review finding)', () => {
+        const ok = [pt(2400, 10, 50, now + 4 * 3600), pt(0, 30, 50, now + 4 * 3600)];
+        const cases = [
+            [{ ...ok[0], p5: 'x' }, ok[1]], [ok[0], { ...ok[1], p5: 'x' }], [ok[0], { ...ok[1], r5: 'x' }], [ok[0], { ...ok[1], r5: {} }],
+            [null, ok[1]], [{}, ok[1]], [{ ...ok[0], t: 'x' }, ok[1]], [ok[0], { ...ok[1], t: NaN }], [ok[0], { ...ok[1], p5: Infinity }],
+            [{ ...ok[0], p5: -Infinity }, ok[1]], [{ ...ok[0], r5: NaN }, ok[1]],
+        ];
+        for (const pts of cases) assert.strictEqual(e.forecast(pts, 'p5', 'r5', now), null, JSON.stringify(pts));
+        assert.ok(e.forecast(ok, 'p5', 'r5', now).full, 'a good pair still forecasts');
+    });
+
     const withHist = (h002, more = {}) => {
         const a = four().map((x) => ({ ...x, history: x.label === '002' ? h002 : (more[x.label] || []) }));
         return e.panelData(a, capOf(a, '002', ['003']), opts);
