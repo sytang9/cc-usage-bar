@@ -72,7 +72,7 @@ const file = path.join(__dirname, '..', 'vscode', 'extension.js');
 // Each load is one fresh extension instance, as in one VS Code window.
 function load() {
     const m = new Module(file); m.filename = file; m.paths = Module._nodeModulePaths(path.dirname(file));
-    m._compile(fs.readFileSync(file, 'utf8') + '\n;Object.assign(module.exports, { isLabel, autoBlock, autoSwitch, deleteSeat, CONSENT, readSnapshot, isFresh, qualifies, capacity, parseUsageJson, mergeLogins, readAccounts, activeLabel, autoTarget, checkLogins, relogin, switchSeat, saveSeat, esc, webviewHtml, panelData, ageText, setAutoSwitch, changeAutoSwitch, AUTO_DETAIL, statusText, statusTooltip, resetText, CODICONS, rolled, readHistory, forecast });', file);
+    m._compile(fs.readFileSync(file, 'utf8') + '\n;Object.assign(module.exports, { isLabel, autoBlock, autoSwitch, deleteSeat, CONSENT, readSnapshot, isFresh, qualifies, capacity, parseUsageJson, mergeLogins, readAccounts, activeLabel, autoTarget, checkLogins, relogin, switchSeat, saveSeat, esc, webviewHtml, panelData, ageText, setAutoSwitch, changeAutoSwitch, AUTO_DETAIL, statusText, statusTooltip, resetText, CODICONS, rolled, readHistory, forecast, statsFeed, STATS_EVERY_MS });', file);
     return m.exports;
 }
 const e = load();
@@ -463,7 +463,7 @@ const calls = () => (fs.existsSync(LOG) ? fs.readFileSync(LOG, 'utf8').trim().sp
         const p = panel();
         const all = [p.render(pdFour(), ui({ automationOpen: true })), p.render(pdFour(), ui({ openRow: '003' })), readWv('panel.js'), readWv('panel.css')].join('');
         for (const ch of ['⛔', '⚠', '⇄', '●', '◷', '⟳', '▾', '▸', '›', '⌄', '✉']) assert.ok(!all.includes(ch), ch);
-        assert.ok(!all.replace(/'<svg viewBox=/, '').includes('<svg'), 'no SVG icons: the only SVG is the History chart');
+        assert.ok(!all.replace(/<svg (viewBox=|class="hm")/g, '').includes('<svg'), 'no SVG icons: the only SVGs are the charts and the heatmap');
         assert.ok(all.includes('codicon-chevron-down') && all.includes('codicon-chevron-right'));
     });
 
@@ -779,7 +779,7 @@ const calls = () => (fs.existsSync(LOG) ? fs.readFileSync(LOG, 'utf8').trim().sp
     await check('render: Accounts | History switcher; Accounts by default; the choice is a tab', () => {
         const p = panel(), d = withHist(rising);
         const acc = p.render(d, ui());
-        assert.match(acc, /^<div class="seg" role="tablist"><button class="sg on" role="tab" aria-selected="true" data-a="view" data-l="accounts">Accounts<\/button><button class="sg" role="tab" aria-selected="false" data-a="view" data-l="history">History<\/button><\/div>/);
+        assert.match(acc, /^<div class="seg" role="tablist"><button class="sg on" role="tab" aria-selected="true" data-a="view" data-l="accounts">Accounts<\/button><button class="sg" role="tab" aria-selected="false" data-a="view" data-l="history">History<\/button><button class="sg" role="tab" aria-selected="false" data-a="view" data-l="stats">Stats<\/button><\/div>/);
         assert.ok(acc.includes('Active account') && !acc.includes('last 24h'));
         assert.match(acc, /Resets [^<]+<\/div><div class="rs">Full in 2h (19|20)m at this pace</, 'the pace line under the session bar');
         const hist = p.render(d, ui({ view: 'history' }));
@@ -820,6 +820,75 @@ const calls = () => (fs.existsSync(LOG) ? fs.readFileSync(LOG, 'utf8').trim().sp
         assert.ok(!html.includes('<img src=x') && !html.includes('<b>') && html.includes('&lt;b&gt;'));
         assert.match(html, /<div class="ch hi"><div class="top"><span>Session/, '85% now: orange line');
         assert.match(html, /<polyline class="ln" points="297\.0,8\.4 300\.0,8\.4"\/>/, 'a lone point is a short dash that ends at "now", inside the chart');
+    });
+
+    // --- Stats view (stats.js output, drawn by the panel) ---------------------------------------------
+    const rangeOf = (over = {}) => ({ label: 'x', fromDate: '2026-10-01', favoriteModel: 'claude-opus-5-5', totalTokens: 23245249596, sessions: 57, totalMessages: 900,
+        longestSession: { ms: (41 * 24 + 21) * 3600000, date: '2026-08-26' }, currentStreak: 3, longestStreak: 6, activeDays: 35, totalDays: 56, peakHour: 9,
+        dailyActivity: [{ date: '2026-10-20', messageCount: 40 }, { date: '2026-10-21', messageCount: 10 }, { date: '2026-10-19', messageCount: 5 }, { date: '2026-10-18', messageCount: 80 }],
+        models: [{ model: 'claude-opus-5-5', inputTokens: 1500, outputTokens: 2500000 }],
+        tokensPerDay: { models: ['claude-opus-5-5', 'claude-sonnet-5-5'], days: [{ date: '2026-10-20', tokensByModel: { 'claude-opus-5-5': 10, 'claude-sonnet-5-5': 4 } }, { date: '2026-10-21', tokensByModel: { 'claude-opus-5-5': 20 } }] },
+        funFact: 'Your input and output are ~3x the tokens in The Hobbit', ...over });
+    const statsMsg = (over = {}) => ({ kind: 'stats', stats: { '7d': rangeOf({ sessions: 7, funFact: 'seven' }), '30d': rangeOf({ sessions: 30 }), all: rangeOf(), meta: { today: '2026-10-21' } }, ...over });
+
+    await check('statsFeed: builds once, then reuses for 10 min; one build at a time; an error keeps the last stats', async () => {
+        const sent = [], builds = [];
+        let fail = false;
+        const build = async (o) => { builds.push(o.cachePath); if (fail) throw new Error('boom'); return { n: builds.length }; };
+        const feed = e.statsFeed('/tmp/c.json', (m) => sent.push(m), build);
+        const first = feed();
+        assert.strictEqual(feed(), undefined, 'a second request while building does nothing');
+        await first;
+        assert.deepStrictEqual(sent.map((m) => [m.building || false, m.stats ? m.stats.n : null]), [[true, null], [false, 1]]);
+        feed();
+        assert.strictEqual(builds.length, 1, 'within 10 min: the last result is sent again, no rebuild');
+        assert.deepStrictEqual(sent[2].stats, { n: 1 });
+        const real = Date.now;
+        try {
+            Date.now = () => real() + e.STATS_EVERY_MS + 1000;
+            fail = true;
+            await feed();
+            assert.strictEqual(builds.length, 2);
+            const last = sent[sent.length - 1];
+            assert.strictEqual(last.error, 'boom');
+            assert.deepStrictEqual(last.stats, { n: 1 }, 'the last good stats stay on screen');
+        } finally { Date.now = real; }
+        assert.deepStrictEqual(builds, ['/tmp/c.json', '/tmp/c.json']);
+        const src = fs.readFileSync(file, 'utf8');
+        assert.match(src, /statsFeed\(path\.join\(context\.globalStorageUri\.fsPath, 'stats-cache\.json'\)/, 'the cache lives in global storage');
+        assert.match(src, /m\.wantStats\) wantStats\(\)/);
+    });
+
+    await check('render: Stats tab; building, error, and the overview like the CLI /stats', () => {
+        const p = panel();
+        assert.ok(p.render(pdFour(), ui({ view: 'stats' }), null).includes('Building stats'));
+        assert.ok(p.render(pdFour(), ui({ view: 'stats' }), { kind: 'stats', error: '<x>' }).includes('Stats failed: &lt;x&gt;'));
+        const html = p.render(pdFour(), ui({ view: 'stats' }), statsMsg());
+        assert.ok(html.includes('aria-selected="true" data-a="view" data-l="stats"'));
+        assert.ok(html.includes('This machine · all accounts') && !html.includes('updating'));
+        let at = 0;
+        for (const t of ['data-l="all">All time', 'Activity', 'Overview', 'Favorite model', 'claude-opus-5-5', 'Total tokens', '23.2B', 'Sessions', '>57<',
+            'Longest session', '41d 21h', '2026-08-26', 'Current streak', '3 days', 'Longest streak', '6 days', 'Active days', '35/56', 'Peak hour', '09:00-10:00',
+            'The Hobbit', 'Tokens per day', 'Models', 'In 1.5k · Out 2.5M']) { const k = html.indexOf(t, at); assert.ok(k >= 0, 'in order: ' + t); at = k; }
+        assert.strictEqual(html.split('<rect ').length - 1, 25 * 7 + 4, '26 weeks of days: 25 full weeks, then Sunday to today (a Wednesday)');
+        assert.match(html, /class="lv4"[^>]*><title>2026-10-18: 80 messages/);
+        assert.match(html, /class="lv0"[^>]*><title>2026-10-17: 0 messages/);
+        assert.strictEqual(html.split('<polyline class="ln m').length - 1, 2, 'one line per top model');
+        assert.ok(p.render(pdFour(), ui({ view: 'stats' }), statsMsg({ building: true })).includes('updating…'), 'a rebuild keeps the old stats on screen');
+    });
+
+    await check('render: Stats ranges switch the numbers; the current streak is always all-time; text is escaped', () => {
+        const p = panel();
+        const week = p.render(pdFour(), ui({ view: 'stats', statsRange: '7d' }), statsMsg());
+        assert.ok(week.includes('aria-selected="true" data-a="srange" data-l="7d"') && week.includes('>7<') && week.includes('seven'));
+        const bad = statsMsg();
+        bad.stats.all = rangeOf({ favoriteModel: '<img src=x>', funFact: '<b>f</b>', models: [{ model: '<m>', inputTokens: 1, outputTokens: 1 }],
+            tokensPerDay: { models: ['<q>'], days: [{ date: '<d>', tokensByModel: {} }] } });
+        const html = p.render(pdFour(), ui({ view: 'stats' }), bad);
+        assert.ok(!/<img src=x|<b>f|<m>|<q>|<d>/.test(html), 'escaped');
+        const src = readWv('panel.js');
+        assert.match(src, /ev\.data\.kind === 'stats'\) stats = ev\.data/, 'stats messages do not replace the account data');
+        assert.match(src, /l === 'stats'\) vsc\.postMessage\(\{ wantStats: 1 \}\)/, 'opening the tab asks for stats');
     });
 
     // --- G7: turning auto-switch on asks once ----------------------------------------------------------

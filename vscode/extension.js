@@ -6,6 +6,7 @@ const vscode = require('vscode');
 const fs = require('fs');
 const path = require('path');
 const { execFile } = require('child_process');
+const { buildStats } = require('./stats');
 
 const usageFile = () => vscode.workspace.getConfiguration('claudeUsage').get('usageFile') || '';  // '' = ccswitch's cache
 const POLL_MS = 60 * 1000;  // keeps reset times and the per-account data age current
@@ -491,6 +492,22 @@ async function autoSwitch(cap, state, onDone) {
 }
 
 
+// Stats view: built from this machine's Claude Code transcripts (stats.js) only while the view is shown, at most every
+// 10 min, one build at a time, with an incremental cache in the extension's global storage. send gets each message.
+const STATS_EVERY_MS = 10 * 60 * 1000;
+function statsFeed(cachePath, send, build = buildStats) {
+    let last = null, at = 0, busy = false;
+    return () => {
+        if (busy) return;
+        if (last && Date.now() - at < STATS_EVERY_MS) { send(last); return; }
+        busy = true;
+        send({ kind: 'stats', building: true, stats: last && last.stats });
+        return build({ cachePath }).then((stats) => { last = { kind: 'stats', stats }; },
+            (err) => { last = { kind: 'stats', error: String((err && err.message) || err), stats: last && last.stats }; })
+            .then(() => { at = Date.now(); busy = false; send(last); });
+    };
+}
+
 // Pre-release copies were published as meng-local.claude-usage (+ a Chrome helper); remove them so there is one sidebar.
 function removeOldHelper() {
     for (const id of ['meng-local.claude-usage', 'meng-local.claude-usage-chrome']) {
@@ -507,6 +524,7 @@ function activate(context) {
     status.text = '$(pulse) Claude …';
     status.show();
 
+    const wantStats = statsFeed(path.join(context.globalStorageUri.fsPath, 'stats-cache.json'), (m) => view && view.webview.postMessage(m));
     const push = () => view && cap && view.webview.postMessage(panelData(accounts, cap, { now: Date.now() / 1000, installed: fs.existsSync(CCSWITCH), auto: !!cap.auto }));
     const autoOn = () => vscode.workspace.getConfiguration('claudeUsage').get('autoSwitch');
     const toggleAuto = () => changeAutoSwitch(!autoOn(), context.globalState);
@@ -539,6 +557,7 @@ function activate(context) {
                     else if (m.del) deleteSeat(m.del, poll);
                     else if (m.toggleAuto) toggleAuto();
                     else if (m.installCc) installCcswitch();
+                    else if (m.wantStats) wantStats();
                 });
                 v.onDidDispose(() => { view = null; });
             },

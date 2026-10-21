@@ -324,7 +324,7 @@ Both screenshots are real VS Code captures with live accounts (emails blurred).
 
 The sidebar follows your VS Code theme (Dark, Light and High Contrast) and the
 look of Claude Code's own Account & Usage view. A switcher at the top picks the
-view: **Accounts** (below) or **History**. In Accounts, every section folds. Top to
+view: **Accounts** (below), **History** or **Stats**. In Accounts, every section folds. Top to
 bottom:
 
 - **Active account** — **Account**: the nickname and email of the account you
@@ -380,6 +380,19 @@ at this pace** (a straight line through the points since that window started,
 needing 20 minutes of points) or **Lasts until reset**. When the active account
 would be full before its reset, Accounts shows the same line under that bar.
 History starts empty: nothing recorded limit percentages before this version.
+
+**Stats** is the sidebar's version of Claude Code's `/stats`, built from this
+machine's Claude Code transcripts (`~/.claude/projects`), so it covers every
+account used here, not one account. Ranges **Last 7 days**, **Last 30 days**,
+**All time**. It shows a 26-week activity heatmap (messages per day), favorite
+model, total tokens, sessions, longest session, current and longest streak,
+active days, peak hour, tokens per day for the top 3 models, input and output
+tokens per model, and one of the CLI's fun facts ("Your input and output are
+~3x the tokens in The Hobbit"), a new one each day. The numbers follow the
+CLI's own definitions (2.1.305), including its days in UTC. The first build
+reads every transcript (about 11 s for 1.7 GB); after that only changed files
+are read again, at most every 10 minutes while Stats is open. Its cache is in
+VS Code's storage for this extension.
 
 | Icon (codicon) | Meaning |
 |------|---------|

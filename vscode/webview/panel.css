@@ -106,3 +106,18 @@ button { font: inherit; cursor: pointer; }
 .ch .base { opacity: .25; }
 .ax { display: flex; justify-content: space-between; font-size: 11px; color: var(--vscode-descriptionForeground); opacity: .8; }
 .empty { padding: 8px 16px; }
+
+/* Stats: heatmap levels, token lines per model, the fun-fact line. */
+.hmw { padding: 4px 16px 2px; }
+.hm { display: block; width: 100%; height: auto; }
+.lv0 { fill: var(--vscode-scrollbarSlider-background); background: var(--vscode-scrollbarSlider-background); }
+.lv1, .lv2, .lv3, .lv4 { fill: var(--vscode-progressBar-background); background: var(--vscode-progressBar-background); }
+.lv1 { opacity: .3; } .lv2 { opacity: .55; } .lv3 { opacity: .8; }
+.lg { display: inline-block; width: 8px; height: 8px; border-radius: 2px; vertical-align: middle; }
+.ch.tk { padding-left: 16px; }
+.ch .ln.m0, .sw.m0 { stroke: var(--vscode-charts-blue); background: var(--vscode-charts-blue); }
+.ch .ln.m1, .sw.m1 { stroke: var(--vscode-charts-orange); background: var(--vscode-charts-orange); }
+.ch .ln.m2, .sw.m2 { stroke: var(--vscode-charts-purple); background: var(--vscode-charts-purple); }
+.lgd { display: flex; flex-wrap: wrap; gap: 4px 12px; font-size: 11px; margin-top: 2px; }
+.sw { display: inline-block; width: 10px; height: 3px; margin-right: 4px; vertical-align: middle; }
+.fun { margin: 6px 16px 2px; padding: 6px 8px; border-left: 2px solid var(--vscode-charts-orange); font-style: italic; }
