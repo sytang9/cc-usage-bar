@@ -72,7 +72,7 @@ const file = path.join(__dirname, '..', 'vscode', 'extension.js');
 // Each load is one fresh extension instance, as in one VS Code window.
 function load() {
     const m = new Module(file); m.filename = file; m.paths = Module._nodeModulePaths(path.dirname(file));
-    m._compile(fs.readFileSync(file, 'utf8') + '\n;Object.assign(module.exports, { isLabel, autoBlock, autoSwitch, deleteSeat, CONSENT, readSnapshot, isFresh, qualifies, capacity, parseUsageJson, mergeLogins, readAccounts, activeLabel, autoTarget, checkLogins, relogin, switchSeat, saveSeat, esc, webviewHtml, panelData, ageText, setAutoSwitch, changeAutoSwitch, AUTO_DETAIL, statusText, statusTooltip, resetText, CODICONS, rolled, readHistory, forecast, statsFeed, STATS_EVERY_MS });', file);
+    m._compile(fs.readFileSync(file, 'utf8') + '\n;Object.assign(module.exports, { isLabel, autoBlock, autoSwitch, deleteSeat, CONSENT, readSnapshot, isFresh, qualifies, capacity, parseUsageJson, mergeLogins, readAccounts, activeLabel, autoTarget, checkLogins, relogin, switchSeat, saveSeat, esc, webviewHtml, panelData, ageText, setAutoSwitch, changeAutoSwitch, AUTO_DETAIL, statusText, statusTooltip, resetText, CODICONS, rolled, readHistory, forecast, statsFeed, STATS_EVERY_MS, STATS_RETRY_MS, withHistory, HISTORY_READ_BYTES });', file);
     return m.exports;
 }
 const e = load();
@@ -417,6 +417,23 @@ const calls = () => (fs.existsSync(LOG) ? fs.readFileSync(LOG, 'utf8').trim().sp
         assert.deepStrictEqual(e.rolled({ ...a, fetched_at: null }, now).five_pct, 32, 'no fetch time: nothing to judge');
     });
 
+    await check('reset roll: only fresh data rolls to 0%; an older row shows a dash; a null percent stays null (review finding)', () => {
+        const a = { label: 'x', provider: 'claude', state: 'ok', fetched_at: now - 13 * 86400, five_pct: 32, week_pct: 100,
+            five_reset_epoch: now - 3600, week_reset_epoch: now - 86400 };
+        const old = e.rolled(a, now);
+        assert.deepStrictEqual([old.five_pct, old.five_reset_epoch, old.week_pct, old.week_reset_epoch], [null, null, null, null],
+            'a 13-day-old row: the old percent is over and 0% would be a guess');
+        const pd = e.panelData([{ ...old, email: null }], { you: null, best: null, loads: {}, fresh: {}, saved: ['x'], relogin: [] }, { now, installed: true, auto: false });
+        assert.notStrictEqual(pd.rows[0].icon, 'full', 'no full icon for a window that has reset');
+        assert.strictEqual(pd.rows[0].summary, 'No recent data');
+        const edge = e.rolled({ ...a, fetched_at: now - 1799, five_reset_epoch: now - 60 }, now);
+        assert.strictEqual(edge.five_pct, 0, 'inside the 30-min display window: rolled to 0%');
+        const none = e.rolled({ ...a, fetched_at: now - 240, five_pct: null, week_pct: null, five_reset_epoch: now - 60, week_reset_epoch: now - 60 }, now);
+        assert.deepStrictEqual([none.five_pct, none.week_pct], [null, null], 'a missing percent never becomes a real 0%');
+        assert.strictEqual(e.qualifies(none, { you: 'other', isSaved: () => true, relogin: new Set(), now }), false);
+        assert.strictEqual(e.capacity({ accounts: [none] }, { you: 'other', isSaved: () => true, relogin: new Set(), now }).best, null);
+    });
+
     await check('readAccounts applies the reset: the panel and the switch choice see 0%', () => {
         const f = path.join(ACC, 'personal', '.usage-cache'), keep = fs.readFileSync(f, 'utf8');
         try {
@@ -566,7 +583,7 @@ const calls = () => (fs.existsSync(LOG) ? fs.readFileSync(LOG, 'utf8').trim().sp
         const { accounts, cap } = e.readAccounts();
         const row = accounts.filter((a) => a.provider === 'codex');
         assert.deepStrictEqual(row, [{ label: 'codex', provider: 'codex', state: 'ok', fetched_at: now - 60, five_pct: 0, week_pct: 1,
-            five_reset_epoch: now + 600, week_reset_epoch: now + 86400, email: null, history: [] }]);
+            five_reset_epoch: now + 600, week_reset_epoch: now + 86400, email: null }]);
         assert.strictEqual(accounts[accounts.length - 1].provider, 'codex', 'after the Claude accounts');
         assert.notStrictEqual(cap.best && cap.best.label, 'codex', 'the emptiest seat, but never a target');
         assert.ok(!('codex' in cap.loads) && !cap.saved.includes('codex'));
@@ -730,9 +747,83 @@ const calls = () => (fs.existsSync(LOG) ? fs.readFileSync(LOG, 'utf8').trim().sp
                 JSON.stringify({ t: now + 3600, p5: 1 }), JSON.stringify(pt(1200, 2, 4)), JSON.stringify({ p5: 3 })].join('\n'));
             assert.deepStrictEqual(e.readHistory('personal', now).map((x) => x.p5), [2, 5]);
             assert.deepStrictEqual(e.readHistory('spare', now), []);
-            const p = e.readAccounts().accounts.find((a) => a.label === 'personal');
-            assert.strictEqual(p.history.length, 2, 'readAccounts carries it');
+            const accounts = e.readAccounts().accounts;
+            assert.ok(accounts.every((a) => !('history' in a)), 'a poll reads no history (review finding: cost on every poll)');
+            const p = e.withHistory(accounts, () => true, now).find((a) => a.label === 'personal');
+            assert.strictEqual(p.history.length, 2, 'withHistory carries it');
         } finally { fs.rmSync(f, { force: true }); }
+    });
+
+    await check('readHistory reuses the parsed points while size and mtime are unchanged; a change re-reads (review finding)', () => {
+        const f = path.join(ACC, 'personal', '.usage-history.jsonl'), T = now - 100;
+        const put = (pts) => { fs.writeFileSync(f, pts.map((x) => JSON.stringify(x)).join('\n') + '\n'); fs.utimesSync(f, T, T); };
+        try {
+            put([pt(60, 11, 1)]);
+            assert.deepStrictEqual(e.readHistory('personal', now).map((x) => x.p5), [11]);
+            put([pt(60, 22, 1)]);  // same length, same mtime: the cached points are used
+            assert.deepStrictEqual(e.readHistory('personal', now).map((x) => x.p5), [11]);
+            put([pt(60, 22, 1), pt(30, 33, 1)]);
+            assert.deepStrictEqual(e.readHistory('personal', now).map((x) => x.p5), [22, 33]);
+            fs.rmSync(f);
+            assert.deepStrictEqual(e.readHistory('personal', now), [], 'a deleted file drops out');
+        } finally { fs.rmSync(f, { force: true }); }
+    });
+
+    await check('readHistory reads only the file\'s tail (the last 7 days), not the whole 30-day file (review finding)', () => {
+        const f = path.join(ACC, 'personal', '.usage-history.jsonl');
+        try {
+            const pad = (JSON.stringify(pt(3 * 86400, 5, 5)) + '\n').repeat(Math.ceil(e.HISTORY_READ_BYTES / 60));
+            fs.writeFileSync(f, JSON.stringify(pt(6 * 86400, 1, 1)) + '\n' + pad + JSON.stringify(pt(60, 9, 9)) + '\n');
+            assert.ok(fs.statSync(f).size > e.HISTORY_READ_BYTES);
+            const h = e.readHistory('personal', now);
+            assert.ok(!h.some((x) => x.p5 === 1), 'the line before the tail is not read');
+            assert.strictEqual(h[h.length - 1].p5, 9);
+            assert.ok(h.every((x) => x.p5 === 5 || x.p5 === 9), 'a line cut by the tail start is skipped');
+        } finally { fs.rmSync(f, { force: true }); }
+    });
+
+    await check('history is read only for a visible sidebar: History tab -> every account, else the active one; team file -> none', async () => {
+        const fw = path.join(ACC, 'work', '.usage-history.jsonl'), fp = path.join(ACC, 'personal', '.usage-history.jsonl');
+        fs.writeFileSync(fw, JSON.stringify(pt(60, 50, 40)) + '\n');
+        fs.writeFileSync(fp, JSON.stringify(pt(60, 10, 5)) + '\n');
+        const cmds = {}, posted = [], seen = [], ctx = { subscriptions: [], globalStorageUri: { fsPath: path.join(HOME, 'gs') }, globalState: memento(false) };
+        let provider, onMsg, onVis;
+        const keep = { win: { ...vscode.window }, commands: vscode.commands, ws: vscode.workspace.onDidChangeConfiguration, stat: fs.statSync };
+        Object.assign(vscode.window, { createStatusBarItem: () => ({ show() {}, dispose() {} }), registerWebviewViewProvider: (id, p) => { provider = p; return { dispose() {} }; } });
+        vscode.StatusBarAlignment = { Right: 2 };
+        vscode.commands = { registerCommand: (id, f) => { cmds[id] = f; return { dispose() {} }; }, executeCommand: async () => {} };
+        vscode.extensions = { getExtension: () => undefined };
+        vscode.workspace.onDidChangeConfiguration = () => ({ dispose() {} });
+        fs.statSync = function (p, ...a) { if (String(p).endsWith('.usage-history.jsonl')) seen.push(path.basename(path.dirname(p))); return keep.stat.call(this, p, ...a); };
+        const tf = path.join(HOME, 'team.json');
+        try {
+            load().activate(ctx);
+            const v = { visible: false, onDidChangeVisibility: (f) => { onVis = f; }, onDidDispose: () => {},
+                webview: { ...fakeWebview, postMessage: async (m) => { posted.push(m); }, onDidReceiveMessage: (f) => { onMsg = f; } } };
+            provider.resolveWebviewView(v);
+            const last = () => posted.filter((m) => m.kind !== 'stats').pop();
+            const step = (f) => { seen.length = 0; f(); return [...new Set(seen)].sort(); };
+            assert.deepStrictEqual(step(() => onMsg('ready')), [], 'hidden sidebar: no history read');
+            assert.deepStrictEqual(last().history, []);
+            v.visible = true;
+            assert.deepStrictEqual(step(() => onVis()), ['work'], 'Accounts tab: the active account only (its pace line)');
+            assert.deepStrictEqual(last().history.map((h) => h.label), ['work']);
+            assert.deepStrictEqual(step(() => onMsg({ wantHistory: true })), ['dead', 'half', 'personal', 'spare', 'work'], 'History tab: every saved account');
+            assert.deepStrictEqual(last().history.map((h) => h.label), ['work', 'personal']);
+            assert.deepStrictEqual(step(() => onMsg({ wantHistory: false })), ['work']);
+            fs.writeFileSync(tf, JSON.stringify({ generated_at: now, accounts: [{ label: 'personal', provider: 'claude', state: 'ok', five_pct: 1, week_pct: 1 }] }));
+            cfg.usageFile = tf;
+            assert.deepStrictEqual(step(() => { onMsg({ wantHistory: true }); cmds['claudeUsage.refresh'](); }), [], 'team file: local history is never read');
+            assert.deepStrictEqual([last().history, last().team], [[], true]);
+        } finally {
+            delete cfg.usageFile;
+            fs.statSync = keep.stat;
+            for (const d of ctx.subscriptions) if (d && d.dispose) d.dispose();
+            Object.assign(vscode.window, keep.win);
+            vscode.commands = keep.commands;
+            vscode.workspace.onDidChangeConfiguration = keep.ws;
+            for (const f of [fw, fp, tf]) fs.rmSync(f, { force: true });
+        }
     });
 
     await check('forecast: straight line since the window started; full before reset, lasts, or nothing to judge', () => {
@@ -753,6 +844,27 @@ const calls = () => (fs.existsSync(LOG) ? fs.readFileSync(LOG, 'utf8').trim().sp
         assert.strictEqual(e.forecast([pt(4 * 3600, 10, 5, now + 3600), pt(3 * 3600, 60, 5, now + 3600)], 'p5', 'r5', now), null, 'last point 3 h old');
         const jitter = [pt(2400, 10, 50, now + 4 * 3600), pt(1200, 20, 50, now + 4 * 3600 + 1), pt(0, 30, 50, now + 4 * 3600)];
         assert.strictEqual(Math.round(e.forecast(jitter, 'p5', 'r5', now).full - now), 140 * 60, 'a 1 s reset jitter is the same window');
+    });
+
+    await check('readHistory skips a line with a missing or non-numeric t, percent or reset (review finding)', () => {
+        const f = path.join(ACC, 'personal', '.usage-history.jsonl');
+        try {
+            fs.writeFileSync(f, [pt(600, 1, 1), { ...pt(500, 2, 2), p5: 'x' }, { ...pt(400, 3, 3), r5: 'soon' }, { ...pt(300, 4, 4), t: '1' },
+                { t: now - 200, p7: 5, r5: null, r7: null }, { ...pt(150, 6, 6), p7: {} }, { ...pt(100, null, 7), r5: null }]
+                .map((x) => JSON.stringify(x)).join('\n') + '\n');
+            assert.deepStrictEqual(e.readHistory('personal', now).map((x) => x.p7), [1, 7], 'null is kept: ccswitch writes null for a missing window');
+        } finally { fs.rmSync(f, { force: true }); }
+    });
+
+    await check('forecast never throws: garbage points give null, not a pace from NaN (review finding)', () => {
+        const ok = [pt(2400, 10, 50, now + 4 * 3600), pt(0, 30, 50, now + 4 * 3600)];
+        const cases = [
+            [{ ...ok[0], p5: 'x' }, ok[1]], [ok[0], { ...ok[1], p5: 'x' }], [ok[0], { ...ok[1], r5: 'x' }], [ok[0], { ...ok[1], r5: {} }],
+            [null, ok[1]], [{}, ok[1]], [{ ...ok[0], t: 'x' }, ok[1]], [ok[0], { ...ok[1], t: NaN }], [ok[0], { ...ok[1], p5: Infinity }],
+            [{ ...ok[0], p5: -Infinity }, ok[1]], [{ ...ok[0], r5: NaN }, ok[1]],
+        ];
+        for (const pts of cases) assert.strictEqual(e.forecast(pts, 'p5', 'r5', now), null, JSON.stringify(pts));
+        assert.ok(e.forecast(ok, 'p5', 'r5', now).full, 'a good pair still forecasts');
     });
 
     const withHist = (h002, more = {}) => {
@@ -813,6 +925,11 @@ const calls = () => (fs.existsSync(LOG) ? fs.readFileSync(LOG, 'utf8').trim().sp
     await check('render: History empty state, escaping, an 80%+ chart is orange', () => {
         const p = panel();
         assert.ok(p.render(withHist([]), ui({ view: 'history' })).includes('No history yet'));
+        const team = p.render({ ...withHist(rising), team: true }, ui({ view: 'history' }));
+        assert.ok(team.includes('not shown for a team usage file') && !team.includes('<svg'), 'team file: a short note, no local charts');
+        const src = readWv('panel.js');
+        assert.match(src, /vsc\.postMessage\(\{ wantHistory: l === 'history' \}\)/, 'switching views tells the host whether History is shown');
+        assert.match(src, /vsc\.postMessage\(\{ wantHistory: viewOf\(ui\) === 'history' \}\);\s*vsc\.postMessage\('ready'\)/, 'and so does a reload on the History tab');
         const bad = '<img src=x onerror="a()">';
         const d = { ...withHist(rising), history: [{ label: bad, icon: 'switch', tip: 't', five: 85, week: 10,
             fiveSeries: [[now, 85, null]], weekSeries: [], fivePace: '<b>', weekPace: null }] };
@@ -860,6 +977,33 @@ const calls = () => (fs.existsSync(LOG) ? fs.readFileSync(LOG, 'utf8').trim().sp
         assert.match(src, /v\.onDidChangeVisibility\(\(\) => \{ if \(v\.visible\) push\(\); \}\)/, 'shown again: the panel gets data and can ask');
     });
 
+    await check('statsFeed: a failed build is retried after about a minute, not kept for 10 min (review finding)', async () => {
+        const sent = [];
+        let fail = true, builds = 0;
+        const feed = e.statsFeed('/tmp/c.json', (m) => sent.push(m), async () => { builds++; if (fail) throw new Error('boom'); return { n: builds }; });
+        const real = Date.now, t0 = real();
+        try {
+            Date.now = () => t0;
+            await feed();
+            assert.strictEqual(sent[sent.length - 1].error, 'boom');
+            feed();
+            assert.strictEqual(builds, 1, 'right after a failure: the error is sent again, no rebuild loop');
+            assert.ok(e.STATS_RETRY_MS <= 2 * 60 * 1000 && e.STATS_RETRY_MS < e.STATS_EVERY_MS);
+            Date.now = () => t0 + e.STATS_RETRY_MS + 1000;
+            fail = false;
+            await feed();
+            assert.strictEqual(builds, 2, 'a minute later: built again');
+            assert.deepStrictEqual(sent[sent.length - 1].stats, { n: 2 });
+            fail = true;
+            Date.now = () => t0 + e.STATS_RETRY_MS + 1000 + e.STATS_EVERY_MS + 1000;
+            await feed();
+            Date.now = () => t0 + 2 * e.STATS_RETRY_MS + 3000 + e.STATS_EVERY_MS;
+            await feed();
+            assert.strictEqual(builds, 4, 'a failure after a good build is retried a minute later too');
+            assert.deepStrictEqual(sent[sent.length - 1].stats, { n: 2 }, 'the last good stats stay on screen');
+        } finally { Date.now = real; }
+    });
+
     await check('render: Stats tab; building, error, and the overview like the CLI /stats', () => {
         const p = panel();
         assert.ok(p.render(pdFour(), ui({ view: 'stats' }), null).includes('Building stats'));
@@ -890,6 +1034,24 @@ const calls = () => (fs.existsSync(LOG) ? fs.readFileSync(LOG, 'utf8').trim().sp
         const src = readWv('panel.js');
         assert.match(src, /ev\.data\.kind === 'stats'\) stats = ev\.data/, 'stats messages do not replace the account data');
         assert.match(src, /l === 'stats'\) vsc\.postMessage\(\{ wantStats: 1 \}\)/, 'opening the tab asks for stats');
+    });
+
+    await check('render: a non-number where Stats or History expects a number never reaches the HTML (review finding)', () => {
+        const p = panel(), x = '<img src=x onerror=a()>';
+        const st = statsMsg();
+        st.stats.all = rangeOf({ totalTokens: x, sessions: x, activeDays: x, totalDays: x, longestStreak: x, peakHour: x, currentStreak: x,
+            longestSession: { ms: x, date: '2026-08-26' }, dailyActivity: [{ date: '2026-10-20', messageCount: x }, { date: '2026-10-21', messageCount: 3 }],
+            models: [{ model: 'm', inputTokens: x, outputTokens: { toString: () => x } }],
+            tokensPerDay: { models: ['m'], days: [{ date: '2026-10-20', tokensByModel: { m: x } }, { date: '2026-10-21', tokensByModel: { m: 5 } }] } });
+        st.stats.all.currentStreak = x;
+        const html = p.render(pdFour(), ui({ view: 'stats' }), st);
+        assert.ok(!html.includes('<img'), 'stats: ' + html.slice(html.indexOf('<img') - 80, html.indexOf('<img') + 20));
+        assert.ok(html.includes('Sessions</span><span class="v">–<'), 'a bad number shows a dash');
+        const h = { ...withHist(rising), history: [{ label: 'a', icon: 'switch', tip: 't', five: x, week: '9" onmouseover="a()',
+            fiveSeries: [[x, x, x], [now, 5, null]], weekSeries: [[now, { toString: () => x }, null]], fivePace: null, weekPace: null }] };
+        const hist = p.render(h, ui({ view: 'history' }));
+        assert.ok(!hist.includes('<img') && !hist.includes('onmouseover'), 'history: ' + hist.slice(0, 400));
+        assert.ok(!p.render({ ...pdFour(), active: { ...pdFour().active, five: x } }, ui()).includes('<img'), 'the Usage bars too');
     });
 
     // --- G7: turning auto-switch on asks once ----------------------------------------------------------

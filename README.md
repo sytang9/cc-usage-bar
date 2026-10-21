@@ -380,6 +380,10 @@ at this pace** (a straight line through the points since that window started,
 needing 20 minutes of points) or **Lasts until reset**. When the active account
 would be full before its reset, Accounts shows the same line under that bar.
 History starts empty: nothing recorded limit percentages before this version.
+The sidebar reads these files only while it is visible (every account while
+History is open, else only the active account), and only their last week. With a
+team file (`claudeUsage.usageFile`) History shows a note instead: the history is
+this machine's, not the team's.
 
 **Stats** is the sidebar's version of Claude Code's `/stats`, built from this
 machine's Claude Code transcripts (`~/.claude/projects`), so it covers every
@@ -391,8 +395,9 @@ tokens per model, and one of the CLI's fun facts ("Your input and output are
 ~3x the tokens in The Hobbit"), a new one each day. The numbers follow the
 CLI's own definitions (2.1.305), including its days in UTC. The first build
 reads every transcript (about 11 s for 1.7 GB); after that only changed files
-are read again, at most every 10 minutes while Stats is open. Its cache is in
-VS Code's storage for this extension.
+are read again, at most every 10 minutes while Stats is open (a failed build is
+tried again after a minute). Its cache (mode `600`; counts only, no transcript
+text) is in VS Code's storage for this extension.
 
 | Icon (codicon) | Meaning |
 |------|---------|
@@ -415,8 +420,8 @@ the login. A failed check (timeout, an error) keeps the last known re-login
 marks. An older ccswitch without `--json` marks nothing as re-login.
 Each live fetch (never a cache hit, a 429 or an error) also appends one line,
 `{"t":<epoch>,"p5":..,"p7":..,"r5":..,"r7":..}` (the two percentages and the two
-reset epochs), to `~/.claude/accounts/<label>/.usage-history.jsonl`. Lines older
-than 30 days are dropped. A failed history write never affects usage output.
+reset epochs), to `~/.claude/accounts/<label>/.usage-history.jsonl` (mode `600`;
+a symlink there is never written through). Lines older than 30 days are dropped. A failed history write never affects usage output.
 The Codex row reads `${CODEX_HOME:-~/.codex}/.usage-cache`, which the same
 `ccswitch usage --json` run refreshes; the sidebar only checks that
 `auth.json` exists and never reads it.

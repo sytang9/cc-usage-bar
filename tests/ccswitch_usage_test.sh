@@ -1108,6 +1108,61 @@ case29e_history_trims_only_a_day_past_the_cutoff() {
   rm -rf "$home" "$ctl"
 }
 
+case29f_history_file_is_created_600() {
+  local home ctl hist old_umask mode
+  home="$(new_home)"
+  ctl="$(new_ctl)"
+  hist="$home/.claude/accounts/acct_hist/.usage-history.jsonl"
+  write_claude_json "$home"
+  write_account_credentials "$home" "acct_hist" "REFRESH_HIST" "TOK_HIST" "$(future_ms)"
+  set_usage_response "$ctl" "TOK_HIST" 200 "$(usage_body 41 22)"
+
+  # A permissive umask: the mode must come from ccswitch, not from the caller.
+  old_umask="$(umask)"
+  umask 022
+  run_cc "$home" "$ctl" "" --no-switch
+  umask "$old_umask"
+  mode="$(file_mode "$hist")"
+
+  if [[ "$EXIT_CODE" -eq 0 && "$mode" == "600" && "$(wc -l <"$hist")" -eq 1 ]]; then
+    pass "histf a fresh history file is created mode 600"
+  else
+    fail "histf (exit=$EXIT_CODE mode=$mode): $(cat "$hist" 2>&1)"
+  fi
+  rm -rf "$home" "$ctl"
+}
+
+case29g_history_never_follows_a_symlink() {
+  local home ctl hist target dangling
+  home="$(new_home)"
+  ctl="$(new_ctl)"
+  hist="$home/.claude/accounts/acct_hist/.usage-history.jsonl"
+  target="$home/elsewhere.txt"
+  dangling="$home/not-there.txt"
+  write_claude_json "$home"
+  write_account_credentials "$home" "acct_hist" "REFRESH_HIST" "TOK_HIST" "$(future_ms)"
+  set_usage_response "$ctl" "TOK_HIST" 200 "$(usage_body 41 22)"
+  printf 'keep\n' >"$target"
+  ln -s "$target" "$hist"
+
+  run_cc "$home" "$ctl" "" --no-switch
+  local kept_target still_link=0
+  kept_target="$(cat "$target")"
+  [[ -L "$hist" ]] && still_link=1
+  rm -f "$hist"
+  ln -s "$dangling" "$hist"
+  rm -f "$home/.claude/accounts/acct_hist/.usage-cache"
+  run_cc "$home" "$ctl" "" --no-switch
+
+  if [[ "$EXIT_CODE" -eq 0 && "$kept_target" == "keep" && "$still_link" -eq 1 && ! -e "$dangling" ]] \
+    && printf '%s' "$OUT" | grep -q '41%'; then
+    pass "histg a symlink at the history path is never written through (nor a dangling one created)"
+  else
+    fail "histg (exit=$EXIT_CODE target=$kept_target link=$still_link dangling=$([[ -e $dangling ]] && echo made)): $OUT"
+  fi
+  rm -rf "$home" "$ctl"
+}
+
 case29d_history_write_failure_keeps_output() {
   local home ctl okhome okctl
   home="$(new_home)"
@@ -1748,6 +1803,8 @@ main() {
   case29b_history_not_written_on_429
   case29c_history_trims_old_and_malformed_lines
   case29e_history_trims_only_a_day_past_the_cutoff
+  case29f_history_file_is_created_600
+  case29g_history_never_follows_a_symlink
   case29d_history_write_failure_keeps_output
   case29_json_no_accounts
   case30_json_refresh_paused

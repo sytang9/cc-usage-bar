@@ -7,7 +7,9 @@ const ICON = { active: 'circle-filled', relogin: 'warning', full: 'circle-slash'
 const ACTION = { switch: 'Switch', save: 'Save login', relogin: 'How to re-login', delete: 'Delete' };
 const ACTION_TIP = { save: 'Save your current login under this name (ccswitch save)', delete: 'Delete the saved login (ccswitch delete)' };
 
-const pctText = (p) => (p == null ? '–' : p + '%');
+// Numbers reach the HTML only as finite numbers: anything else (a tampered cache or history file) is a dash.
+const num = (v) => (typeof v === 'number' && Number.isFinite(v) ? v : null);
+const pctText = (p) => (num(p) === null ? '–' : p + '%');
 const ci = (name, cls = '', tip = '') => '<span class="codicon codicon-' + name + (cls ? ' ' + cls : '') + '"'
     + (tip ? ' title="' + esc(tip) + '" role="img" aria-label="' + esc(tip) + '"' : ' aria-hidden="true"') + '></span>';
 const kv = (k, v) => '<div class="kv"><span class="k">' + k + '</span><span class="v">' + v + '</span></div>';
@@ -22,7 +24,7 @@ function section(key, title, open, right = '', extra = '') {
 const HIGH = 80;
 function usage(name, p, reset, pace) {
     return '<div class="use"><div class="top"><span>' + name + '</span><span class="p">' + pctText(p) + '</span></div>'
-        + '<div class="bar' + (p >= HIGH ? ' hi' : '') + '">' + (p == null ? '' : '<i style="width:' + Math.max(0, Math.min(100, p)) + '%"></i>') + '</div>'
+        + '<div class="bar' + (p >= HIGH ? ' hi' : '') + '">' + (num(p) === null ? '' : '<i style="width:' + Math.max(0, Math.min(100, p)) + '%"></i>') + '</div>'
         + (reset ? '<div class="rs">Resets ' + esc(reset) + '</div>' : '') + (pace ? '<div class="rs">' + esc(pace) + '</div>' : '') + '</div>';
 }
 
@@ -102,6 +104,7 @@ function chart(title, pts, from, to, ago, pace, now) {
 // History: one row per account with recorded points (active first, open by default); an open row shows both charts.
 const histOpenLabel = (d, ui) => (ui.histOpen === undefined ? (d.history[0] || {}).label : ui.histOpen);
 function historyView(d, ui) {
+    if (d.team) return '<div class="note empty">History is not shown for a team usage file: ccswitch records it on each machine.</div>';
     if (!d.history || !d.history.length) {
         return '<div class="note empty">No history yet: ccswitch records a point each time it fetches (every 10-20 min while VS Code is open).</div>';
     }
@@ -119,10 +122,11 @@ function historyView(d, ui) {
 
 // Stats: like Claude Code's /stats, from this machine's transcripts (all accounts). st = the host's stats message.
 const RANGES = [['7d', 'Last 7 days'], ['30d', 'Last 30 days'], ['all', 'All time']];
-const big = (n) => (n >= 1e9 ? (n / 1e9).toFixed(1) + 'B' : n >= 1e6 ? (n / 1e6).toFixed(1) + 'M' : n >= 1e3 ? (n / 1e3).toFixed(1) + 'k' : String(n));
+const big = (n) => (num(n) === null ? '–' : n >= 1e9 ? (n / 1e9).toFixed(1) + 'B' : n >= 1e6 ? (n / 1e6).toFixed(1) + 'M' : n >= 1e3 ? (n / 1e3).toFixed(1) + 'k' : String(n));
+const count = (n) => (num(n) === null ? '–' : String(n));
 const span = (ms) => { const m = Math.floor(ms / 60000), h = Math.floor(m / 60), d = Math.floor(h / 24);
     return d ? d + 'd ' + (h % 24) + 'h' : h ? h + 'h ' + (m % 60) + 'm' : m + 'm'; };
-const days = (n) => n + (n === 1 ? ' day' : ' days');
+const days = (n) => (num(n) === null ? '–' : n + (n === 1 ? ' day' : ' days'));
 const hh = (h) => String(h).padStart(2, '0') + ':00';
 function seg(a, items, on) {
     return '<div class="seg" role="tablist">' + items.map(([k, t]) => '<button class="sg' + (k === on ? ' on' : '') + '" role="tab" aria-selected="'
@@ -133,14 +137,14 @@ function seg(a, items, on) {
 const WEEKS = 26;
 function heatmap(daily, today) {
     const counts = new Map(daily.map((x) => [x.date, x.messageCount]));
-    const v = daily.map((x) => x.messageCount).filter((n) => n > 0).sort((a, b) => a - b);
+    const v = daily.map((x) => num(x.messageCount)).filter((n) => n > 0).sort((a, b) => a - b);
     const q = (f) => v[Math.floor(v.length * f)];
     const level = (n) => (!n || !v.length ? 0 : n >= q(0.75) ? 4 : n >= q(0.5) ? 3 : n >= q(0.25) ? 2 : 1);
     const end = new Date(today + 'T00:00:00Z'), start = new Date(end);
     start.setUTCDate(end.getUTCDate() - end.getUTCDay() - (WEEKS - 1) * 7);
     let cells = '';
     for (let d = new Date(start), i = 0; d <= end; d.setUTCDate(d.getUTCDate() + 1), i++) {
-        const key = d.toISOString().slice(0, 10), n = counts.get(key) || 0;
+        const key = d.toISOString().slice(0, 10), n = num(counts.get(key)) || 0;
         cells += '<rect class="lv' + level(n) + '" x="' + Math.floor(i / 7) * 11 + '" y="' + (i % 7) * 11 + '" width="9" height="9" rx="2"><title>'
             + key + ': ' + n + ' messages</title></rect>';
     }
@@ -170,10 +174,10 @@ function statsView(st, ui) {
         + '<div class="note">This machine · all accounts' + (st.building ? ' · updating…' : '') + (st.error ? ' · last update failed' : '') + '</div>'
         + '<div class="grp">Activity</div><div class="hmw">' + heatmap(s.all.dailyActivity, s.meta.today) + '</div>'
         + '<div class="grp">Overview</div>'
-        + kv('Favorite model', r.favoriteModel ? esc(r.favoriteModel) : '–') + kv('Total tokens', big(r.totalTokens)) + kv('Sessions', String(r.sessions))
-        + kv('Longest session', ls && ls.ms ? span(ls.ms) + ' <span class="d">' + esc(ls.date) + '</span>' : '–')
+        + kv('Favorite model', r.favoriteModel ? esc(r.favoriteModel) : '–') + kv('Total tokens', big(r.totalTokens)) + kv('Sessions', count(r.sessions))
+        + kv('Longest session', ls && num(ls.ms) ? span(ls.ms) + ' <span class="d">' + esc(ls.date) + '</span>' : '–')
         + kv('Current streak', days(s.all.currentStreak)) + kv('Longest streak', days(r.longestStreak))
-        + kv('Active days', r.activeDays + '/' + r.totalDays) + kv('Peak hour', r.peakHour == null ? '–' : hh(r.peakHour) + '-' + hh((r.peakHour + 1) % 24))
+        + kv('Active days', count(r.activeDays) + '/' + count(r.totalDays)) + kv('Peak hour', num(r.peakHour) === null ? '–' : hh(r.peakHour) + '-' + hh((r.peakHour + 1) % 24))
         + (r.funFact ? '<div class="fun">' + esc(r.funFact) + '</div>' : '')
         + tokensChart(r.tokensPerDay)
         + (r.models.length ? '<div class="grp">Models</div>' + r.models.map((m) => kv(esc(m.model), 'In ' + big(m.inputTokens) + ' · Out ' + big(m.outputTokens))).join('') : '');
@@ -218,7 +222,7 @@ if (typeof acquireVsCodeApi === 'function') {
         const a = el.dataset.a, l = el.dataset.l;
         if (SECTIONS[a]) ui[SECTIONS[a]] = !ui[SECTIONS[a]];
         else if (a === 'row') ui.openRow = ui.openRow === l ? null : l;
-        else if (a === 'view') { ui.view = l; if (l === 'stats') vsc.postMessage({ wantStats: 1 }); }
+        else if (a === 'view') { ui.view = l; vsc.postMessage({ wantHistory: l === 'history' }); if (l === 'stats') vsc.postMessage({ wantStats: 1 }); }
         else if (a === 'srange') ui.statsRange = l;
         else if (a === 'hrow') ui.histOpen = histOpenLabel(data, ui) === l ? null : l;
         else if (a === 'switch' || a === 'relogin') return vsc.postMessage({ seat: l });  // switchSeat routes re-login to enrol
@@ -238,5 +242,6 @@ if (typeof acquireVsCodeApi === 'function') {
         else { data = ev.data; if (viewOf(ui) === 'stats') vsc.postMessage({ wantStats: 1 }); }  // the host rebuilds at most every 10 min
         paint();
     });
+    vsc.postMessage({ wantHistory: viewOf(ui) === 'history' });
     vsc.postMessage('ready');
 }

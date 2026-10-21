@@ -238,6 +238,64 @@ const run = (dir, cachePath) => buildStats({ projectsDir: dir, cachePath, now: N
         assert.ok(JSON.parse(fs.readFileSync(cache, 'utf8')).files[f].agg, 'the entry is repaired');
     });
 
+    await check('cache: a definitions version change recounts every transcript (review finding)', async () => {
+        const dir = newTree(), cache = path.join(dir, '..', 'cache-' + treeN + '.json');
+        write(path.join(dir, 'p', 'a.jsonl'), [user('2026-10-21T01:00:00Z')]);
+        write(path.join(dir, 'p', 'b.jsonl'), [user('2026-10-20T01:00:00Z')]);
+        await run(dir, cache);
+        const c = JSON.parse(fs.readFileSync(cache, 'utf8'));
+        assert.ok(Number.isInteger(c.defs), 'the cache records the definitions version');
+        assert.deepStrictEqual((await run(dir, cache)).meta.reused, 2);
+        c.defs -= 1;
+        fs.writeFileSync(cache, JSON.stringify(c));
+        const s = await run(dir, cache);
+        assert.deepStrictEqual([s.meta.parsed, s.meta.reused], [2, 0]);
+        delete c.defs;
+        fs.writeFileSync(cache, JSON.stringify(c));
+        assert.deepStrictEqual((await run(dir, cache)).meta.parsed, 2, 'a cache from before the definitions version: recounted');
+    });
+
+    await check('cache: every number in an entry is checked; a bad entry is parsed again and never breaks the build (review finding)', async () => {
+        const dir = newTree(), cache = path.join(dir, '..', 'cache-' + treeN + '.json');
+        const f = path.join(dir, 'p', 'a.jsonl');
+        write(f, [user('2026-10-21T01:00:00Z'), asst('2026-10-21T01:00:01Z', 'm', [1, 2, 3, 4])]);
+        const good = await run(dir, cache);
+        const base = JSON.parse(fs.readFileSync(cache, 'utf8'));
+        const bad = [
+            (e) => { e.agg.msgs['2026-10-21'] = '<img src=x>'; },
+            (e) => { e.agg.msgs['2026-10-21'] = null; },
+            (e) => { e.agg.msgs['not-a-day'] = 1; },
+            (e) => { e.agg.tok['2026-10-21'].m = ['1', 2, 3, 4]; },
+            (e) => { e.agg.tok['2026-10-21'].m = [1, 2, 3]; },
+            (e) => { e.agg.tok['2026-10-21'].m = { 0: 1 }; },
+            (e) => { e.agg.tok['2026-10-21'] = [1]; },
+            (e) => { e.agg.tok['2026-10-21'] = JSON.parse('{"__proto__":[1,2,3,4]}'); },
+            (e) => { e.agg.tok['2026-10-21'].constructor = [1, 2, 3, 4]; },
+            (e) => { e.agg.session = { start: 'x', end: 1 }; },
+            (e) => { e.agg.session = { start: 1e20, end: 1e20 }; },
+            (e) => { e.agg.session = 5; },
+            (e) => { e.agg.sub = 'no'; },
+        ];
+        for (const [i, spoil] of bad.entries()) {
+            const c = JSON.parse(JSON.stringify(base));
+            spoil(c.files[f]);
+            fs.writeFileSync(cache, JSON.stringify(c));
+            const s = await run(dir, cache);
+            assert.deepStrictEqual([s.meta.parsed, s.meta.reused], [1, 0], 'bad entry #' + i + ' is parsed again');
+            assert.deepStrictEqual([s.all.totalMessages, s.all.totalTokens], [good.all.totalMessages, good.all.totalTokens], 'entry #' + i);
+        }
+        assert.strictEqual(({}).inputTokens, undefined, 'Object.prototype is not polluted');
+    });
+
+    await check('cache: the cache file is written 600 and its new directory 700 (review finding)', async () => {
+        const dir = newTree(), cache = path.join(dir, '..', 'store-' + treeN, 'cache.json');
+        write(path.join(dir, 'p', 'a.jsonl'), [user('2026-10-21T01:00:00Z')]);
+        const old = process.umask(0o022);
+        try { await run(dir, cache); } finally { process.umask(old); }
+        assert.strictEqual((fs.statSync(cache).mode & 0o777).toString(8), '600');
+        assert.strictEqual((fs.statSync(path.dirname(cache)).mode & 0o777).toString(8), '700');
+    });
+
     await check('an empty or missing projects dir gives zeros and no fun fact', async () => {
         const s = await run(path.join(ROOT, 'missing'));
         assert.deepStrictEqual([s.all.sessions, s.all.totalTokens, s.all.peakHour, s.all.favoriteModel, s.all.longestSession, s.all.funFact],
