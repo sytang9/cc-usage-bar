@@ -72,7 +72,7 @@ const file = path.join(__dirname, '..', 'vscode', 'extension.js');
 // Each load is one fresh extension instance, as in one VS Code window.
 function load() {
     const m = new Module(file); m.filename = file; m.paths = Module._nodeModulePaths(path.dirname(file));
-    m._compile(fs.readFileSync(file, 'utf8') + '\n;Object.assign(module.exports, { isLabel, autoBlock, autoSwitch, deleteSeat, CONSENT, readSnapshot, isFresh, qualifies, capacity, parseUsageJson, mergeLogins, readAccounts, activeLabel, autoTarget, checkLogins, relogin, switchSeat, saveSeat, esc, webviewHtml, panelData, ageText, setAutoSwitch, changeAutoSwitch, AUTO_DETAIL, statusText, statusTooltip, resetText, CODICONS, rolled });', file);
+    m._compile(fs.readFileSync(file, 'utf8') + '\n;Object.assign(module.exports, { isLabel, autoBlock, autoSwitch, deleteSeat, CONSENT, readSnapshot, isFresh, qualifies, capacity, parseUsageJson, mergeLogins, readAccounts, activeLabel, autoTarget, checkLogins, relogin, switchSeat, saveSeat, esc, webviewHtml, panelData, ageText, setAutoSwitch, changeAutoSwitch, AUTO_DETAIL, statusText, statusTooltip, resetText, CODICONS, rolled, readHistory, forecast });', file);
     return m.exports;
 }
 const e = load();
@@ -462,7 +462,8 @@ const calls = () => (fs.existsSync(LOG) ? fs.readFileSync(LOG, 'utf8').trim().sp
     await check('render: codicons replace the emoji and Unicode symbols', () => {
         const p = panel();
         const all = [p.render(pdFour(), ui({ automationOpen: true })), p.render(pdFour(), ui({ openRow: '003' })), readWv('panel.js'), readWv('panel.css')].join('');
-        for (const ch of ['⛔', '⚠', '⇄', '●', '◷', '⟳', '▾', '▸', '›', '⌄', '✉', '<svg']) assert.ok(!all.includes(ch), ch);
+        for (const ch of ['⛔', '⚠', '⇄', '●', '◷', '⟳', '▾', '▸', '›', '⌄', '✉']) assert.ok(!all.includes(ch), ch);
+        assert.ok(!all.replace(/'<svg viewBox=/, '').includes('<svg'), 'no SVG icons: the only SVG is the History chart');
         assert.ok(all.includes('codicon-chevron-down') && all.includes('codicon-chevron-right'));
     });
 
@@ -565,7 +566,7 @@ const calls = () => (fs.existsSync(LOG) ? fs.readFileSync(LOG, 'utf8').trim().sp
         const { accounts, cap } = e.readAccounts();
         const row = accounts.filter((a) => a.provider === 'codex');
         assert.deepStrictEqual(row, [{ label: 'codex', provider: 'codex', state: 'ok', fetched_at: now - 60, five_pct: 0, week_pct: 1,
-            five_reset_epoch: now + 600, week_reset_epoch: now + 86400, email: null }]);
+            five_reset_epoch: now + 600, week_reset_epoch: now + 86400, email: null, history: [] }]);
         assert.strictEqual(accounts[accounts.length - 1].provider, 'codex', 'after the Claude accounts');
         assert.notStrictEqual(cap.best && cap.best.label, 'codex', 'the emptiest seat, but never a target');
         assert.ok(!('codex' in cap.loads) && !cap.saved.includes('codex'));
@@ -717,6 +718,101 @@ const calls = () => (fs.existsSync(LOG) ? fs.readFileSync(LOG, 'utf8').trim().sp
     await check('no View details link: Claude Code\'s own Account & Usage section has the full dialog', () => {
         const all = panel().render(pdFour(), ui()) + readWv('panel.js') + fs.readFileSync(file, 'utf8');
         assert.ok(!all.includes('View details') && !all.includes('openUsage') && !all.includes('claude.ai/settings'));
+    });
+
+    // --- History view and pace (ccswitch's .usage-history.jsonl) -------------------------------------
+    const pt = (dt, p5, p7, r5 = now + 3600, r7 = now + 3 * 86400) => ({ t: now - dt, p5, p7, r5, r7 });
+
+    await check('readHistory: last 7 days, sorted; bad, future and old lines skipped; no file -> []', () => {
+        const f = path.join(ACC, 'personal', '.usage-history.jsonl');
+        try {
+            fs.writeFileSync(f, [JSON.stringify(pt(60, 5, 5)), 'not json', '', JSON.stringify(pt(8 * 86400, 1, 1)),
+                JSON.stringify({ t: now + 3600, p5: 1 }), JSON.stringify(pt(1200, 2, 4)), JSON.stringify({ p5: 3 })].join('\n'));
+            assert.deepStrictEqual(e.readHistory('personal', now).map((x) => x.p5), [2, 5]);
+            assert.deepStrictEqual(e.readHistory('spare', now), []);
+            const p = e.readAccounts().accounts.find((a) => a.label === 'personal');
+            assert.strictEqual(p.history.length, 2, 'readAccounts carries it');
+        } finally { fs.rmSync(f, { force: true }); }
+    });
+
+    await check('forecast: straight line since the window started; full before reset, lasts, or nothing to judge', () => {
+        // 10% -> 30% over 40 min: 0.5%/min, 70% left -> full in 140 min, before a reset 4 h away.
+        const rising = [pt(2400, 10, 50, now + 4 * 3600), pt(1200, 20, 50, now + 4 * 3600), pt(0, 30, 50, now + 4 * 3600)];
+        assert.strictEqual(Math.round(e.forecast(rising, 'p5', 'r5', now).full - now), 140 * 60);
+        const slow = [pt(2400, 10, 50, now + 3600), pt(0, 12, 50, now + 3600)];
+        assert.deepStrictEqual(e.forecast(slow, 'p5', 'r5', now), { lasts: true }, '0.05%/min: 100% only after the reset');
+        // Points from the previous window (another reset time) do not count.
+        const mixed = [pt(9000, 90, 50, now - 1800), pt(1500, 1, 50, now + 4 * 3600), pt(0, 31, 50, now + 4 * 3600)];
+        assert.strictEqual(Math.round(e.forecast(mixed, 'p5', 'r5', now).full - now), 69 * 1500 / 30, '1% -> 31% in 25 min');
+        assert.strictEqual(e.forecast([pt(600, 10, 5), pt(0, 30, 5)], 'p5', 'r5', now), null, 'under 20 min of points');
+        assert.strictEqual(e.forecast([pt(3600, 30, 5), pt(0, 30, 5)], 'p5', 'r5', now), null, 'no rise');
+        assert.strictEqual(e.forecast([pt(3600, 50, 5), pt(0, 100, 5)], 'p5', 'r5', now), null, 'already full');
+        assert.strictEqual(e.forecast([pt(3600, 5, 5, now - 60), pt(1800, 9, 5, now - 60)], 'p5', 'r5', now), null, 'that window has reset');
+        assert.strictEqual(e.forecast([], 'p5', 'r5', now), null);
+    });
+
+    const withHist = (h002, more = {}) => {
+        const a = four().map((x) => ({ ...x, history: x.label === '002' ? h002 : (more[x.label] || []) }));
+        return e.panelData(a, capOf(a, '002', ['003']), opts);
+    };
+    const rising = [pt(2400, 10, 50, now + 4 * 3600), pt(1200, 20, 51, now + 4 * 3600), pt(0, 30, 52, now + 4 * 3600)];
+
+    await check('panelData: history blocks, active first; 24 h session and 7 d weekly series; pace lines', () => {
+        const d = withHist([pt(2 * 86400, 70, 40, now - 86400), ...rising], { '004': [pt(60, 46, 13)] });
+        assert.deepStrictEqual(d.history.map((h) => h.label), ['002', '004'], 'only accounts with points, active first');
+        const h = d.history[0];
+        assert.strictEqual(h.fiveSeries.length, 3, 'the 2-day-old point is outside the session chart');
+        assert.strictEqual(h.weekSeries.length, 4);
+        assert.deepStrictEqual(h.fiveSeries[2], [now, 30, now + 4 * 3600]);
+        assert.match(h.fivePace, /^Full in 2h (19|20)m at this pace$/, 'resetText reads the clock: allow the minute to tick');
+        assert.strictEqual(h.weekPace, 'Lasts until reset');
+        assert.strictEqual(d.active.fivePace, h.fivePace, 'Active account shows the pace when full comes first');
+        assert.strictEqual(d.active.weekPace, null, '"lasts until reset" is not repeated there');
+        assert.strictEqual(d.now, now);
+        assert.deepStrictEqual(withHist([]).history, []);
+    });
+
+    await check('render: Accounts | History switcher; Accounts by default; the choice is a tab', () => {
+        const p = panel(), d = withHist(rising);
+        const acc = p.render(d, ui());
+        assert.match(acc, /^<div class="seg" role="tablist"><button class="sg on" role="tab" aria-selected="true" data-a="view" data-l="accounts">Accounts<\/button><button class="sg" role="tab" aria-selected="false" data-a="view" data-l="history">History<\/button><\/div>/);
+        assert.ok(acc.includes('Active account') && !acc.includes('last 24h'));
+        assert.match(acc, /Resets [^<]+<\/div><div class="rs">Full in 2h (19|20)m at this pace</, 'the pace line under the session bar');
+        const hist = p.render(d, ui({ view: 'history' }));
+        assert.ok(hist.includes('aria-selected="true" data-a="view" data-l="history"') && !hist.includes('class="t">Active account') && !hist.includes('Automation'), 'no Accounts sections (the active row keeps its tooltip)');
+        assert.ok(p.render(d, ui({ view: 'nonsense' })).includes('Active account'), 'an unknown view falls back to Accounts');
+    });
+
+    await check('render: History opens the active account with two charts; a reset starts a new line', () => {
+        const p = panel();
+        const d = withHist([pt(5 * 3600, 60, 40, now - 3 * 3600), pt(4 * 3600, 80, 41, now - 3 * 3600), ...rising], { '004': [pt(60, 46, 13)] });
+        const html = p.render(d, ui({ view: 'history' }));
+        assert.match(html, /data-a="hrow" data-l="002" role="button" tabindex="0" aria-expanded="true"/);
+        assert.match(html, /data-a="hrow" data-l="004" role="button" tabindex="0" aria-expanded="false"/);
+        const det = html.slice(html.indexOf('<div class="det">'), html.indexOf('data-l="004"'));
+        assert.ok(det.includes('Session (5hr) · last 24h') && det.includes('Weekly (7 day) · last 7d') && det.includes('24h ago') && det.includes('7d ago'));
+        const session = det.slice(0, det.indexOf('Weekly (7 day)'));
+        assert.strictEqual(session.split('<polyline').length - 1, 2, 'two windows, two lines');
+        assert.strictEqual(session.split('class="rz"').length - 1, 1, 'one tick where the new window starts');
+        assert.match(session, /Full in 2h (19|20)m at this pace/);
+        assert.match(det, /class="g80" x1="0" x2="300" y1="11\.2"/, 'the 80% guide');
+        assert.ok(!/<div class="ch hi">[^]*Session/.test(det.slice(0, det.indexOf('</svg>'))), 'session at 30%: not orange');
+        const other = p.render(d, ui({ view: 'history', histOpen: '004' }));
+        assert.match(other, /data-l="004" role="button" tabindex="0" aria-expanded="true"/);
+        assert.match(other, /data-l="002" role="button" tabindex="0" aria-expanded="false"/);
+        assert.ok(!p.render(d, ui({ view: 'history', histOpen: null })).includes('<svg'), 'all closed');
+    });
+
+    await check('render: History empty state, escaping, an 80%+ chart is orange', () => {
+        const p = panel();
+        assert.ok(p.render(withHist([]), ui({ view: 'history' })).includes('No history yet'));
+        const bad = '<img src=x onerror="a()">';
+        const d = { ...withHist(rising), history: [{ label: bad, icon: 'switch', tip: 't', five: 85, week: 10,
+            fiveSeries: [[now, 85, null]], weekSeries: [], fivePace: '<b>', weekPace: null }] };
+        const html = p.render(d, ui({ view: 'history' }));
+        assert.ok(!html.includes('<img src=x') && !html.includes('<b>') && html.includes('&lt;b&gt;'));
+        assert.match(html, /<div class="ch hi"><div class="top"><span>Session/, '85% now: orange line');
+        assert.match(html, /<polyline class="ln" points="300\.0,8\.4 302\.0,8\.4"\/>/, 'a lone point is a short dash');
     });
 
     // --- G7: turning auto-switch on asks once ----------------------------------------------------------

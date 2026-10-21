@@ -20,17 +20,17 @@ function section(key, title, open, right = '', extra = '') {
 
 // One bar per limit. Like Claude Code's own: the theme's progress blue, Claude orange from 80% (HIGH) up.
 const HIGH = 80;
-function usage(name, p, reset) {
+function usage(name, p, reset, pace) {
     return '<div class="use"><div class="top"><span>' + name + '</span><span class="p">' + pctText(p) + '</span></div>'
         + '<div class="bar' + (p >= HIGH ? ' hi' : '') + '">' + (p == null ? '' : '<i style="width:' + Math.max(0, Math.min(100, p)) + '%"></i>') + '</div>'
-        + (reset ? '<div class="rs">Resets ' + esc(reset) + '</div>' : '') + '</div>';
+        + (reset ? '<div class="rs">Resets ' + esc(reset) + '</div>' : '') + (pace ? '<div class="rs">' + esc(pace) + '</div>' : '') + '</div>';
 }
 
 function active(a) {
     if (!a) return '<div class="kv"><span class="k">Not logged in to Claude Code</span></div>';
     return '<div class="grp">Account</div>' + kv('Nickname', esc(a.label)) + (a.email ? kv('Email', esc(a.email)) : '')
         + (a.age ? kv('Last data', esc(a.age)) : '')
-        + '<div class="grp">Usage</div>' + usage('Session (5hr)', a.five, a.fiveReset) + usage('Weekly (7 day)', a.week, a.weekReset);
+        + '<div class="grp">Usage</div>' + usage('Session (5hr)', a.five, a.fiveReset, a.fivePace) + usage('Weekly (7 day)', a.week, a.weekReset, a.weekPace);
 }
 
 function nextLine(d) {
@@ -76,7 +76,59 @@ function automation(d, ui) {
             + '<div class="note">Moves every new Claude Code session on this machine to the account in "If you run out". Asks once when you turn it on.</div>' : '');
 }
 
+// One limit over time: an SVG line from `from` to `to` (epoch s), 0-100%, with a dashed 80% guide. A new window (the
+// reset time changes, or the percent drops) starts a new line and gets a faint tick. Orange when the latest is 80%+.
+const CW = 300, CH = 56;
+function chart(title, pts, from, to, ago, pace, now) {
+    const x = (t) => ((t - from) / (to - from) * CW).toFixed(1);
+    const y = (p) => (CH - Math.max(0, Math.min(100, p)) / 100 * CH).toFixed(1);
+    const runs = [];
+    pts.forEach((q, i) => { const b = pts[i - 1]; if (!b || q[2] !== b[2] || q[1] < b[1]) runs.push([]); runs[runs.length - 1].push(q); });
+    const svg = runs.map((run, i) => {
+        const xy = run.map((q) => x(q[0]) + ',' + y(q[1]));
+        if (xy.length === 1) xy.push((+x(run[0][0]) + 2).toFixed(1) + ',' + y(run[0][1]));  // a lone point: a short dash
+        return (i ? '<line class="rz" x1="' + x(run[0][0]) + '" x2="' + x(run[0][0]) + '" y1="0" y2="' + CH + '"/>' : '')
+            + '<polyline class="ln" points="' + xy.join(' ') + '"/>';
+    }).join('');
+    return '<div class="ch' + (now >= HIGH ? ' hi' : '') + '"><div class="top"><span>' + title + '</span><span class="p">' + pctText(now) + '</span></div>'
+        + '<svg viewBox="0 0 ' + CW + ' ' + CH + '" preserveAspectRatio="none" role="img" aria-label="' + title + ', ' + pts.length + ' points">'
+        + '<line class="g80" x1="0" x2="' + CW + '" y1="' + y(HIGH) + '" y2="' + y(HIGH) + '"/>'
+        + '<line class="base" x1="0" x2="' + CW + '" y1="' + CH + '" y2="' + CH + '"/>' + svg + '</svg>'
+        + '<div class="ax"><span>' + ago + '</span><span>now</span></div>'
+        + (pace ? '<div class="rs">' + esc(pace) + '</div>' : '') + '</div>';
+}
+
+// History: one row per account with recorded points (active first, open by default); an open row shows both charts.
+const histOpenLabel = (d, ui) => (ui.histOpen === undefined ? (d.history[0] || {}).label : ui.histOpen);
+function historyView(d, ui) {
+    if (!d.history || !d.history.length) {
+        return '<div class="note empty">No history yet: ccswitch records a point each time it fetches (every 10-20 min while VS Code is open).</div>';
+    }
+    const openL = histOpenLabel(d, ui);
+    return '<div class="rows">' + d.history.map((h) => {
+        const l = esc(h.label), open = h.label === openL;
+        return '<div class="row' + (open ? ' open' : '') + '" data-a="hrow" data-l="' + l + '" role="button" tabindex="0" aria-expanded="' + open + '">'
+            + (h.icon ? ci(ICON[h.icon], 'i-' + h.icon, h.tip) : '<span class="codicon" aria-hidden="true"></span>')
+            + '<span class="nm">' + l + '</span><span class="d">' + pctText(h.five) + ' · ' + pctText(h.week) + '</span>'
+            + ci(open ? 'chevron-down' : 'chevron-right') + '</div>'
+            + (open ? '<div class="det">' + chart('Session (5hr) · last 24h', h.fiveSeries, d.now - 86400, d.now, '24h ago', h.fivePace, h.five)
+                + chart('Weekly (7 day) · last 7d', h.weekSeries, d.now - 7 * 86400, d.now, '7d ago', h.weekPace, h.week) + '</div>' : '');
+    }).join('') + '</div>';
+}
+
+// The view switcher at the top, like Claude Code's own Day / Week toggle.
+const VIEWS = [['accounts', 'Accounts'], ['history', 'History']];
+function switcher(view) {
+    return '<div class="seg" role="tablist">' + VIEWS.map(([k, t]) => '<button class="sg' + (k === view ? ' on' : '') + '" role="tab" aria-selected="'
+        + (k === view) + '" data-a="view" data-l="' + k + '">' + t + '</button>').join('') + '</div>';
+}
+
 function render(d, ui) {
+    const view = VIEWS.some(([k]) => k === ui.view) ? ui.view : 'accounts';
+    return switcher(view) + (view === 'history' ? historyView(d, ui) : accountsView(d, ui));
+}
+
+function accountsView(d, ui) {
     const activeOpen = ui.activeOpen !== false, nextOpen = ui.nextOpen !== false, open = ui.accountsOpen !== false;
     const health = d.loginHealth === 'unknown' ? ' title="ccswitch could not check logins, so none is marked re-login"' : '';
     const n = d.installed ? d.counts.saved + ' saved' : d.counts.total + (d.counts.total === 1 ? ' account' : ' accounts');
@@ -107,6 +159,8 @@ if (typeof acquireVsCodeApi === 'function') {
         const a = el.dataset.a, l = el.dataset.l;
         if (SECTIONS[a]) ui[SECTIONS[a]] = !ui[SECTIONS[a]];
         else if (a === 'row') ui.openRow = ui.openRow === l ? null : l;
+        else if (a === 'view') ui.view = l;
+        else if (a === 'hrow') ui.histOpen = histOpenLabel(data, ui) === l ? null : l;
         else if (a === 'switch' || a === 'relogin') return vsc.postMessage({ seat: l });  // switchSeat routes re-login to enrol
         else if (a === 'save') return vsc.postMessage({ save: l });
         else if (a === 'delete') return vsc.postMessage({ del: l });

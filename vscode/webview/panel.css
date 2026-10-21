@@ -86,3 +86,23 @@ button { font: inherit; cursor: pointer; }
 .tg.on { background: var(--vscode-button-background); }
 .tg.on::after { left: 15px; background: var(--vscode-button-foreground); }
 .note { padding: 2px 16px 6px; }
+
+/* View switcher (Accounts | History), like Claude Code's own Day / Week toggle. */
+.seg { display: flex; margin: 8px 16px 6px; border: 1px solid var(--vscode-widget-border, var(--vscode-panel-border)); border-radius: 4px; overflow: hidden; }
+.sg { flex: 1; padding: 2px 0; border: 0; font-size: 12px; color: var(--vscode-descriptionForeground); background: none; }
+.sg.on { color: var(--vscode-foreground); background: var(--vscode-list-inactiveSelectionBackground); outline: 1px solid var(--vscode-contrastActiveBorder, transparent); outline-offset: -1px; }
+.sg:hover { color: var(--vscode-foreground); }
+
+/* History charts: one line per window, a dashed 80% guide, faint ticks where a window starts. */
+.ch { padding: 6px 16px 4px 38px; }
+.ch .top { display: flex; justify-content: space-between; }
+.ch .p { font-variant-numeric: tabular-nums; }
+.ch svg { display: block; width: 100%; height: 56px; margin: 4px 0 2px; overflow: visible; }
+.ch .ln { fill: none; stroke: var(--vscode-progressBar-background); stroke-width: 1.5; vector-effect: non-scaling-stroke; }
+.ch.hi .ln { stroke: var(--vscode-charts-orange); }
+.ch .g80, .ch .rz, .ch .base { stroke: var(--vscode-descriptionForeground); vector-effect: non-scaling-stroke; }
+.ch .g80 { stroke-dasharray: 3 3; opacity: .45; }
+.ch .rz { opacity: .3; }
+.ch .base { opacity: .25; }
+.ax { display: flex; justify-content: space-between; font-size: 11px; color: var(--vscode-descriptionForeground); opacity: .8; }
+.empty { padding: 8px 16px; }

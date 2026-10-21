@@ -323,7 +323,8 @@ account with its data age and re-login state.
 Both screenshots are real VS Code captures with live accounts (emails blurred).
 
 The sidebar follows your VS Code theme (Dark, Light and High Contrast) and the
-look of Claude Code's own Account & Usage view. Every section folds. Top to
+look of Claude Code's own Account & Usage view. A switcher at the top picks the
+view: **Accounts** (below) or **History**. In Accounts, every section folds. Top to
 bottom:
 
 - **Active account** — **Account**: the nickname and email of the account you
@@ -366,6 +367,19 @@ bottom:
   one. At most once every 10 minutes on this machine, across all VS Code windows:
   the last switch time is in `~/.claude/accounts/.autoswitch.json`, and a lock
   (`.autoswitch.lock`) lets one window at a time decide and switch.
+
+**History** draws each account's usage over time from
+`~/.claude/accounts/<label>/.usage-history.jsonl`, which ccswitch appends to on
+every live fetch (30 days kept; the sidebar asks ccswitch every 10 minutes, and
+ccswitch reuses numbers under 10 minutes old, so a point every 10-20 minutes
+while VS Code is open). The
+active account is open first; click a row to open another. Each has two lines:
+**Session (5hr) · last 24h** and **Weekly (7 day) · last 7d**, with a dashed
+80% guide and a new line where a window resets. Under each: **Full in 2h 10m
+at this pace** (a straight line through the points since that window started,
+needing 20 minutes of points) or **Lasts until reset**. When the active account
+would be full before its reset, Accounts shows the same line under that bar.
+History starts empty: nothing recorded limit percentages before this version.
 
 | Icon (codicon) | Meaning |
 |------|---------|
