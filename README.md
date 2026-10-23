@@ -156,13 +156,16 @@ the `5H` and `WK` meters of the main bar show what they cost the account.
 account as `<label>`. It prints an authorize URL; open it in any browser and
 paste the code back. Your live login is never touched, and nothing is switched.
 Extra options go to `claude auth login` (for example `--email you@example.com`
-or `--sso`). `ccswitch save <label>` still snapshots whichever account is
+or `--sso`). ccswitch is for subscription accounts: `--console` logs in to a
+Console (API billing) account, which has no subscription usage to show.
+`ccswitch save <label>` still snapshots whichever account is
 *currently logged in*.
 
 ```
 ccswitch                     list saved accounts (same as `list`)
 ccswitch list                list saved accounts; '*' marks the active one
 ccswitch add <label> [opts]  log in to an account and save it as <label>
+                              (subscription accounts only; see above)
 ccswitch save <label>        snapshot the currently active account
 ccswitch <label>             switch to a saved account
 ccswitch <label> --relaunch  switch, then exec the `claude` CLI (override

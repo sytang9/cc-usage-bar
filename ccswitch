@@ -472,7 +472,9 @@ cmd_add() {
     exit 1
   }
 
-  if ! CLAUDE_CONFIG_DIR="$login_dir" claude auth login "$@"; then
+  # Drop auth env vars: they would override or confuse an interactive login.
+  if ! env -u CLAUDE_CODE_OAUTH_TOKEN -u ANTHROPIC_API_KEY -u ANTHROPIC_AUTH_TOKEN \
+    CLAUDE_CONFIG_DIR="$login_dir" claude auth login "$@"; then
     echo "Error: login failed; nothing saved." >&2
     exit 1
   fi
@@ -1907,6 +1909,8 @@ COMMANDS
   ccswitch                     list saved accounts ('*' marks the active one)
   ccswitch list                same as above
   ccswitch add <label> [opts]  log in to an account and save it as <label>
+                                (subscription accounts only: --console gives
+                                an API-billing login with no usage data)
                                (opts go to `claude auth login`, e.g. --email, --sso)
   ccswitch save <label>        snapshot the CURRENTLY active account as <label>
   ccswitch <label>             switch to a saved account (then restart Claude Code)
