@@ -1173,6 +1173,28 @@ const calls = () => (fs.existsSync(LOG) ? fs.readFileSync(LOG, 'utf8').trim().sp
         assert.ok(total < 2 * N / 5, 'drawn points: ' + total + ' (raw ' + 2 * N + ')');
     });
 
+    await check('layout: List is the default (rows that expand); Grid shows every account\'s two charts at once, with hover and range', () => {
+        const p = panel(), d = withHist(rising, { '004': [pt(60, 46, 13)] });
+        const list = p.render(d, ui({ view: 'history' })), grid = p.render(d, ui({ view: 'history', histLayout: 'grid' }));
+        assert.ok(list.includes('aria-selected="true" data-a="hlay" data-l="list"') && !list.includes('class="hgrid"'), 'default = List');
+        assert.strictEqual(list.split('<svg').length - 1, 2, 'List: only the open row\'s two charts');
+        assert.ok(grid.includes('aria-selected="true" data-a="hlay" data-l="grid"') && grid.includes('class="hgrid"'));
+        assert.ok(!grid.includes('data-a="hrow"'), 'Grid has no expanding rows');
+        assert.strictEqual(grid.split('class="card"').length - 1, 2, 'one card per account with history');
+        assert.strictEqual(grid.split('<svg').length - 1, 4, 'Grid: both charts of both accounts');
+        assert.strictEqual(grid.split('class="gl"').length - 1, 4, 'hover works in Grid: each chart has its guide line');
+        assert.ok(grid.includes('data-l="002"') === false && grid.includes('>002<') && grid.includes('>004<'), 'cards are titled by account');
+        const g30 = p.render(d, ui({ view: 'history', histLayout: 'grid', histRange: '30d' }));
+        assert.strictEqual(g30.split('last 30d').length - 1, 8, 'range applies to every card: title and aria-label of 4 charts');
+        assert.ok(p.render(d, ui({ view: 'history', histLayout: 'bogus' })).includes('class="rows"'), 'unknown layout = List');
+        assert.ok(p.render({ ...d, history: [] }, ui({ view: 'history', histLayout: 'grid' })).includes('No history yet'));
+        const css = readWv('panel.css');
+        assert.match(css, /\.hgrid \{ display: grid; grid-template-columns: repeat\(auto-fill, minmax\(240px, 1fr\)\)/, 'columns follow the panel width');
+        assert.ok(!/animation|transition/.test(css.slice(css.indexOf('.hctl'))), 'nothing animated in the new styles (reduced motion)');
+        const src = readWv('panel.js');
+        assert.match(src, /else if \(a === 'hlay'\) ui\.histLayout = l;/, 'the click stores the layout in ui, which is saved with vsc.setState(ui) like statsRange');
+    });
+
     await check('render: History empty state, escaping, an 80%+ chart is orange', () => {
         const p = panel();
         assert.ok(p.render(withHist([]), ui({ view: 'history' })).includes('No history yet'));

@@ -143,3 +143,14 @@ button { font: inherit; cursor: pointer; }
 .lgd { display: flex; flex-wrap: wrap; gap: 4px 12px; font-size: 11px; margin-top: 2px; }
 .sw { display: inline-block; width: 10px; height: 3px; margin-right: 4px; vertical-align: middle; }
 .fun { margin: 6px 16px 2px; padding: 6px 8px; border-left: 2px solid var(--vscode-charts-orange); font-style: italic; }
+
+/* History controls (range | layout) and the Grid layout: one card per account, columns by panel width. */
+.hctl { display: flex; align-items: center; gap: 6px; margin: 8px 16px 6px; }
+.hctl .seg { margin: 0; }
+.hctl .seg:first-child { flex: 1; min-width: 0; }
+.hgrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 8px; padding: 0 16px 6px; }
+.card { min-width: 0; background: var(--vscode-list-inactiveSelectionBackground); border: 1px solid var(--vscode-widget-border, var(--vscode-panel-border)); border-radius: 4px; padding-bottom: 4px; }
+.card .ch-h { display: flex; align-items: center; gap: 8px; padding: 4px 8px; font-size: 12px; }
+.card .ch-h .nm { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.card .ch-h .d { margin-left: auto; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.card .ch { padding: 2px 8px; }

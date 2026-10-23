@@ -153,6 +153,9 @@ function hoverAt(spec, t) {
 // shows 24h and the weekly chart 7d; 24h / 7d / 30d give both charts that span. The host sends the series for the range.
 const HRANGES = [['auto', 'Auto'], ['24h', '24h'], ['7d', '7d'], ['30d', '30d']];
 const HSPAN = { '24h': 86400, '7d': 7 * 86400, '30d': 30 * 86400 };
+// List (the default) is one expandable row per account; Grid shows every account's charts at once.
+const HLAYOUTS = [['list', 'List'], ['grid', 'Grid']];
+const histLayoutOf = (ui) => (ui.histLayout === 'grid' ? 'grid' : 'list');
 const histRangeOf = (ui) => (HRANGES.some(([k]) => k === ui.histRange) ? ui.histRange : 'auto');
 const spanOf = (range, dflt) => HSPAN[range] || dflt;
 const spanName = (secs) => (secs >= 86400 * 2 ? secs / 86400 + 'd' : secs / 3600 + 'h');
@@ -163,14 +166,20 @@ function historyView(d, ui) {
         return '<div class="note empty">No history yet: ccswitch records a point each time it fetches (every 10-20 min while VS Code is open).</div>';
     }
     const openL = histOpenLabel(d, ui), range = histRangeOf(ui), s5 = spanOf(range, 86400), s7 = spanOf(range, 7 * 86400);
-    return seg('hrange', HRANGES, range) + '<div class="rows">' + d.history.map((h) => {
+    const charts = (h) => chart('Session (5hr) \u00b7 last ' + spanName(s5), h.fiveSeries, d.now - s5, d.now, spanName(s5) + ' ago', h.fivePace, h.five, 'five')
+        + chart('Weekly (7 day) \u00b7 last ' + spanName(s7), h.weekSeries, d.now - s7, d.now, spanName(s7) + ' ago', h.weekPace, h.week, 'week');
+    const head = (h) => (h.icon ? ci(ICON[h.icon], 'i-' + h.icon, h.tip) : '<span class="codicon" aria-hidden="true"></span>')
+        + '<span class="nm">' + esc(h.label) + '</span><span class="d">' + pctText(h.five) + ' \u00b7 ' + pctText(h.week) + '</span>';
+    const ctl = '<div class="hctl">' + seg('hrange', HRANGES, range) + seg('hlay', HLAYOUTS, histLayoutOf(ui)) + '</div>';
+    // Grid: every account's charts at once, as cards in a CSS grid whose column count follows the panel width.
+    if (histLayoutOf(ui) === 'grid') {
+        return ctl + '<div class="hgrid">' + d.history.map((h) => '<div class="card"><div class="ch-h">' + head(h) + '</div>' + charts(h) + '</div>').join('') + '</div>';
+    }
+    return ctl + '<div class="rows">' + d.history.map((h) => {
         const l = esc(h.label), open = h.label === openL;
         return '<div class="row' + (open ? ' open' : '') + '" data-a="hrow" data-l="' + l + '" role="button" tabindex="0" aria-expanded="' + open + '">'
-            + (h.icon ? ci(ICON[h.icon], 'i-' + h.icon, h.tip) : '<span class="codicon" aria-hidden="true"></span>')
-            + '<span class="nm">' + l + '</span><span class="d">' + pctText(h.five) + ' · ' + pctText(h.week) + '</span>'
-            + ci(open ? 'chevron-down' : 'chevron-right') + '</div>'
-            + (open ? '<div class="det">' + chart('Session (5hr) · last ' + spanName(s5), h.fiveSeries, d.now - s5, d.now, spanName(s5) + ' ago', h.fivePace, h.five, 'five')
-                + chart('Weekly (7 day) · last ' + spanName(s7), h.weekSeries, d.now - s7, d.now, spanName(s7) + ' ago', h.weekPace, h.week, 'week') + '</div>' : '');
+            + head(h) + ci(open ? 'chevron-down' : 'chevron-right') + '</div>'
+            + (open ? '<div class="det">' + charts(h) + '</div>' : '');
     }).join('') + '</div>';
 }
 
@@ -287,6 +296,7 @@ if (typeof acquireVsCodeApi === 'function') {
         else if (a === 'row') ui.openRow = ui.openRow === l ? null : l;
         else if (a === 'view') { ui.view = l; vsc.postMessage({ wantHistory: l === 'history' }); if (l === 'stats') vsc.postMessage({ wantStats: 1 }); }
         else if (a === 'srange') ui.statsRange = l;
+        else if (a === 'hlay') ui.histLayout = l;
         else if (a === 'hrange') { ui.histRange = l; vsc.postMessage({ histRange: l }); }  // the host sends the series for that span
         else if (a === 'hrow') ui.histOpen = histOpenLabel(data, ui) === l ? null : l;
         else if (a === 'switch' || a === 'relogin') return vsc.postMessage({ seat: l });  // switchSeat routes re-login to enrol
