@@ -148,6 +148,10 @@ button { font: inherit; cursor: pointer; }
 .hctl { display: flex; align-items: center; gap: 6px; margin: 8px 16px 6px; }
 .hctl .seg { margin: 0; }
 .hctl .seg:first-child { flex: 1; min-width: 0; }
+.itg { flex: none; display: flex; gap: 2px; }
+.ib { display: flex; padding: 3px; border: 0; border-radius: 4px; background: none; color: var(--vscode-descriptionForeground); }
+.ib:hover { color: var(--vscode-foreground); background: var(--vscode-toolbar-hoverBackground); }
+.ib.on { color: var(--vscode-foreground); background: var(--vscode-toolbar-activeBackground, var(--vscode-toolbar-hoverBackground)); outline: 1px solid var(--vscode-contrastActiveBorder, transparent); outline-offset: -1px; }
 .hgrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 8px; padding: 0 16px 6px; }
 .card { min-width: 0; background: var(--vscode-list-inactiveSelectionBackground); border: 1px solid var(--vscode-widget-border, var(--vscode-panel-border)); border-radius: 4px; padding-bottom: 4px; }
 .card .ch-h { display: flex; align-items: center; gap: 8px; padding: 4px 8px; font-size: 12px; }

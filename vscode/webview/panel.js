@@ -154,7 +154,7 @@ function hoverAt(spec, t) {
 const HRANGES = [['auto', 'Auto'], ['24h', '24h'], ['7d', '7d'], ['30d', '30d']];
 const HSPAN = { '24h': 86400, '7d': 7 * 86400, '30d': 30 * 86400 };
 // List (the default) is one expandable row per account; Grid shows every account's charts at once.
-const HLAYOUTS = [['list', 'List'], ['grid', 'Grid']];
+const HLAYOUTS = [['list', 'list-flat', 'List view'], ['grid', 'table', 'Grid view']];
 const histLayoutOf = (ui) => (ui.histLayout === 'grid' ? 'grid' : 'list');
 const histRangeOf = (ui) => (HRANGES.some(([k]) => k === ui.histRange) ? ui.histRange : 'auto');
 const spanOf = (range, dflt) => HSPAN[range] || dflt;
@@ -170,7 +170,7 @@ function historyView(d, ui) {
         + chart('Weekly (7 day) \u00b7 last ' + spanName(s7), h.weekSeries, d.now - s7, d.now, spanName(s7) + ' ago', h.weekPace, h.week, 'week');
     const head = (h) => (h.icon ? ci(ICON[h.icon], 'i-' + h.icon, h.tip) : '<span class="codicon" aria-hidden="true"></span>')
         + '<span class="nm">' + esc(h.label) + '</span><span class="d">' + pctText(h.five) + ' \u00b7 ' + pctText(h.week) + '</span>';
-    const ctl = '<div class="hctl">' + seg('hrange', HRANGES, range) + seg('hlay', HLAYOUTS, histLayoutOf(ui)) + '</div>';
+    const ctl = '<div class="hctl">' + seg('hrange', HRANGES, range) + iconToggle('hlay', HLAYOUTS, histLayoutOf(ui)) + '</div>';
     // Grid: every account's charts at once, as cards in a CSS grid whose column count follows the panel width.
     if (histLayoutOf(ui) === 'grid') {
         return ctl + '<div class="hgrid">' + d.history.map((h) => '<div class="card"><div class="ch-h">' + head(h) + '</div>' + charts(h) + '</div>').join('') + '</div>';
@@ -191,6 +191,11 @@ const span = (ms) => { const m = Math.floor(ms / 60000), h = Math.floor(m / 60),
     return d ? d + 'd ' + (h % 24) + 'h' : h ? h + 'h ' + (m % 60) + 'm' : m + 'm'; };
 const days = (n) => (num(n) === null ? '–' : n + (n === 1 ? ' day' : ' days'));
 const hh = (h) => String(h).padStart(2, '0') + ':00';
+// Icon buttons for a two-way choice: [key, codicon, label]. Same data-a / data-l click handling as seg().
+function iconToggle(a, items, on) {
+    return '<div class="itg" role="group">' + items.map(([k, ic, t]) => '<button class="ib' + (k === on ? ' on' : '') + '" aria-pressed="' + (k === on)
+        + '" title="' + t + '" aria-label="' + t + '" data-a="' + a + '" data-l="' + k + '">' + ci(ic) + '</button>').join('') + '</div>';
+}
 function seg(a, items, on) {
     return '<div class="seg" role="tablist">' + items.map(([k, t]) => '<button class="sg' + (k === on ? ' on' : '') + '" role="tab" aria-selected="'
         + (k === on) + '" data-a="' + a + '" data-l="' + k + '">' + t + '</button>').join('') + '</div>';

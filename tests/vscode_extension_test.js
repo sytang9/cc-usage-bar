@@ -1176,9 +1176,9 @@ const calls = () => (fs.existsSync(LOG) ? fs.readFileSync(LOG, 'utf8').trim().sp
     await check('layout: List is the default (rows that expand); Grid shows every account\'s two charts at once, with hover and range', () => {
         const p = panel(), d = withHist(rising, { '004': [pt(60, 46, 13)] });
         const list = p.render(d, ui({ view: 'history' })), grid = p.render(d, ui({ view: 'history', histLayout: 'grid' }));
-        assert.ok(list.includes('aria-selected="true" data-a="hlay" data-l="list"') && !list.includes('class="hgrid"'), 'default = List');
+        assert.ok(list.includes('aria-pressed="true" title="List view" aria-label="List view" data-a="hlay" data-l="list"') && list.includes('aria-pressed="false" title="Grid view" aria-label="Grid view" data-a="hlay" data-l="grid"') && list.includes('codicon-list-flat') && list.includes('codicon-table') && !list.includes('>List<') && !list.includes('class="hgrid"'), 'default = List');
         assert.strictEqual(list.split('<svg').length - 1, 2, 'List: only the open row\'s two charts');
-        assert.ok(grid.includes('aria-selected="true" data-a="hlay" data-l="grid"') && grid.includes('class="hgrid"'));
+        assert.ok(grid.includes('aria-pressed="true" title="Grid view" aria-label="Grid view" data-a="hlay" data-l="grid"') && grid.includes('aria-pressed="false" title="List view" aria-label="List view" data-a="hlay" data-l="list"') && grid.includes('class="hgrid"'));
         assert.ok(!grid.includes('data-a="hrow"'), 'Grid has no expanding rows');
         assert.strictEqual(grid.split('class="card"').length - 1, 2, 'one card per account with history');
         assert.strictEqual(grid.split('<svg').length - 1, 4, 'Grid: both charts of both accounts');
