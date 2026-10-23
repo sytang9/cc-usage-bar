@@ -891,7 +891,7 @@ const calls = () => (fs.existsSync(LOG) ? fs.readFileSync(LOG, 'utf8').trim().sp
     await check('render: Accounts | History switcher; Accounts by default; the choice is a tab', () => {
         const p = panel(), d = withHist(rising);
         const acc = p.render(d, ui());
-        assert.match(acc, /^<div class="seg" role="tablist"><button class="sg on" role="tab" aria-selected="true" data-a="view" data-l="accounts">Accounts<\/button><button class="sg" role="tab" aria-selected="false" data-a="view" data-l="history">History<\/button><button class="sg" role="tab" aria-selected="false" data-a="view" data-l="stats">Stats<\/button><\/div>/);
+        assert.match(acc, /^<div class="vbar"><div class="seg" role="tablist"><button class="sg on" role="tab" aria-selected="true" data-a="view" data-l="accounts">Accounts<\/button><button class="sg" role="tab" aria-selected="false" data-a="view" data-l="history">History<\/button><button class="sg" role="tab" aria-selected="false" data-a="view" data-l="stats">Stats<\/button><\/div>/);
         assert.ok(acc.includes('Active account') && !acc.includes('last 24h'));
         assert.match(acc, /Resets [^<]+<\/div><div class="rs">Full in 2h (19|20)m at this pace</, 'the pace line under the session bar');
         const hist = p.render(d, ui({ view: 'history' }));
@@ -1346,6 +1346,68 @@ const calls = () => (fs.existsSync(LOG) ? fs.readFileSync(LOG, 'utf8').trim().sp
         said.length = 0;
         try { await e.changeAutoSwitch(false); } finally { vscode.workspace.getConfiguration = realUpdate; }
         assert.deepStrictEqual(said, ['ERROR Could not change auto-switch: settings.json is read-only']);
+    });
+
+    await check('reload button: the codicon refresh icon is in the panel; it spins only when busy; reduced motion stops the rotation', () => {
+        const p = panel(), idle = p.render(pdFour(), ui()), busy = p.render(pdFour(), ui(), null, true);
+        assert.match(idle, /<button class="rl" data-a="reload"[^>]*aria-busy="false"><span class="codicon codicon-refresh"/);
+        assert.match(busy, /<button class="rl spin" data-a="reload"[^>]*aria-busy="true"/);
+        const css = readWv('panel.css');
+        assert.match(css, /\.rl\.spin \.codicon \{ animation: rl-spin/);
+        assert.match(css, /@media \(prefers-reduced-motion: reduce\) \{ \.rl\.spin \.codicon \{ animation: none/);
+    });
+
+    await check('reload button: spin is set by a click and by the timed fetch, not by the 60 s poll; it clears on success and on failure; a second click runs no second fetch', async () => {
+        const posted = [], timers = [], ctx = { subscriptions: [], globalStorageUri: { fsPath: path.join(HOME, 'gs') }, globalState: memento(false) };
+        let provider, onMsg;
+        const keep = { win: { ...vscode.window }, commands: vscode.commands, ws: vscode.workspace.onDidChangeConfiguration, st: global.setTimeout, si: global.setInterval };
+        Object.assign(vscode.window, { createStatusBarItem: () => ({ show() {}, dispose() {} }), registerWebviewViewProvider: (id, pr) => { provider = pr; return { dispose() {} }; } });
+        vscode.StatusBarAlignment = { Right: 2 };
+        vscode.commands = { registerCommand: () => ({ dispose() {} }), executeCommand: async () => {} };
+        vscode.extensions = { getExtension: () => undefined };
+        vscode.workspace.onDidChangeConfiguration = () => ({ dispose() {} });
+        global.setTimeout = (f, ms, ...a) => (ms === 30000 || ms === 600000 ? (timers.push([ms, f]), 0) : keep.st(f, ms, ...a));  // capture the app's timers, keep the rest real
+        global.setInterval = (f, ms) => { timers.push([ms, f]); return 0; };
+        const fetches = () => (fs.existsSync(LOG) ? fs.readFileSync(LOG, 'utf8') : '').split('\n').filter((l) => l === 'usage --json').length;
+        const busyOf = () => posted.filter((m) => m.kind === 'busy').map((m) => m.on);
+        const idle = async () => { for (let i = 0; i < 200 && busyOf().length % 2; i++) await new Promise((r) => keep.st(r, 25)); };
+        try {
+            usageReply(usageDoc({ work: 'ok' }));
+            load().activate(ctx);
+            global.setTimeout = keep.st; global.setInterval = keep.si;
+            const v = { visible: true, onDidChangeVisibility: () => {}, onDidDispose: () => {},
+                webview: { ...fakeWebview, postMessage: async (m) => { posted.push(m); }, onDidReceiveMessage: (f) => { onMsg = f; } } };
+            provider.resolveWebviewView(v);
+            const poll = timers.find(([ms]) => ms === 60000)[1], timed = timers.filter(([ms]) => ms === 600000 || ms === 30000).map(([, f]) => f);
+            assert.strictEqual(timed.length, 2, 'the 30 s first check and the 10 min check');
+            poll(); await idle();
+            assert.deepStrictEqual(busyOf(), [], 'the 60 s cache re-read never spins');
+            const n0 = fetches();
+            onMsg({ refresh: 1 }); onMsg({ refresh: 1 });  // a second click while the first fetch runs
+            assert.deepStrictEqual(busyOf(), [true], 'a click sets the spin at once');
+            await idle();
+            assert.deepStrictEqual(busyOf(), [true, false], 'success clears the spin');
+            assert.strictEqual(fetches() - n0, 1, 'the second click ran no second fetch');
+            posted.length = 0;
+            timed[1](); assert.deepStrictEqual(busyOf(), [true], 'the 10 min fetch spins');
+            await idle(); assert.deepStrictEqual(busyOf(), [true, false]);
+            posted.length = 0;
+            timed[0](); assert.deepStrictEqual(busyOf(), [true], 'the 30 s first check spins');
+            await idle();
+            posted.length = 0;
+            usageReply('not json', 1);  // a failed fetch
+            onMsg({ refresh: 1 }); assert.deepStrictEqual(busyOf(), [true]);
+            await idle(); assert.deepStrictEqual(busyOf(), [true, false], 'failure clears the spin');
+            onMsg({ refresh: 1 }); await idle();
+            assert.strictEqual(fetches() - n0, 5, 'after the fetch ends, a click fetches again');
+        } finally {
+            global.setTimeout = keep.st; global.setInterval = keep.si;
+            Object.assign(vscode.window, keep.win);
+            vscode.commands = keep.commands;
+            vscode.workspace.onDidChangeConfiguration = keep.ws;
+            usageReply('');
+            for (const d of ctx.subscriptions) if (d && d.dispose) d.dispose();
+        }
     });
 
     console.log('----------------------------------------');

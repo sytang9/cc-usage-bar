@@ -93,6 +93,15 @@ button { font: inherit; cursor: pointer; }
 .sg.on { color: var(--vscode-foreground); background: var(--vscode-list-inactiveSelectionBackground); outline: 1px solid var(--vscode-contrastActiveBorder, transparent); outline-offset: -1px; }
 .sg:hover { color: var(--vscode-foreground); }
 
+/* Reload button: at the end of the switcher row; spins while a fetch runs, still (dimmed) if the user prefers reduced motion. */
+.vbar { display: flex; align-items: center; padding-right: 12px; }
+.vbar .seg { flex: 1; min-width: 0; margin-right: 6px; }
+.rl { flex: none; display: flex; padding: 3px; border: 0; border-radius: 4px; background: none; color: var(--vscode-descriptionForeground); }
+.rl:hover { color: var(--vscode-foreground); background: var(--vscode-toolbar-hoverBackground); outline: 1px dashed var(--vscode-contrastActiveBorder, transparent); outline-offset: -1px; }
+@keyframes rl-spin { to { transform: rotate(360deg); } }
+.rl.spin .codicon { animation: rl-spin 1s linear infinite; }
+@media (prefers-reduced-motion: reduce) { .rl.spin .codicon { animation: none; opacity: .4; } }
+
 /* History charts: one line per window, a dashed 80% guide, faint ticks where a window starts. */
 .ch { padding: 6px 16px 4px 38px; }
 .ch .top { display: flex; justify-content: space-between; }

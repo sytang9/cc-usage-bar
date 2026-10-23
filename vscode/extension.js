@@ -594,7 +594,8 @@ function activate(context) {
                 v.webview.html = webviewHtml(v.webview);
                 v.webview.onDidReceiveMessage((m) => {
                     if (!m) return;
-                    if (m === 'ready') push();
+                    if (m === 'ready') { push(); if (fetching) post({ kind: 'busy', on: true }); }
+                    else if (m.refresh) health();
                     else if (m.seat) switchSeat(m.seat, poll);
                     else if (m.save) saveSeat(m.save, poll);
                     else if (m.del) deleteSeat(m.del, poll);
@@ -610,7 +611,16 @@ function activate(context) {
 
     poll();
     const timer = setInterval(poll, POLL_MS);
-    const health = () => checkLogins().then(poll, () => {});
+    // The one fetch (timed or from the button). The panel spins from start to end; a second request while one runs is dropped.
+    // checkLogins never rejects (run() has a 90 s timeout), so the spin always ends.
+    let fetching = false;
+    const post = (m) => view && view.webview.postMessage(m);
+    const health = () => {
+        if (fetching) return;
+        fetching = true;
+        post({ kind: 'busy', on: true });
+        checkLogins().then(poll, () => {}).finally(() => { fetching = false; post({ kind: 'busy', on: false }); });
+    };
     const firstCheck = setTimeout(health, 30 * 1000);
     // ccswitch's own cache: refresh at its 10-min TTL; with a team file, hourly is enough to keep tokens alive
     const healthTimer = setInterval(health, (usageFile() ? 60 : 10) * 60 * 1000);

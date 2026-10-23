@@ -186,9 +186,12 @@ function statsView(st, ui) {
 // The view switcher at the top, like Claude Code's own Day / Week toggle.
 const VIEWS = [['accounts', 'Accounts'], ['history', 'History'], ['stats', 'Stats']];
 const viewOf = (ui) => (VIEWS.some(([k]) => k === ui.view) ? ui.view : 'accounts');
-function render(d, ui, st) {
+// The reload button sits at the end of the switcher row. It spins while the host runs a fetch (busy).
+const reload = (busy) => '<button class="rl' + (busy ? ' spin' : '') + '" data-a="reload" title="' + (busy ? 'Refreshing…' : 'Refresh usage now (ccswitch usage)')
+    + '" aria-label="Refresh usage" aria-busy="' + !!busy + '">' + ci('refresh') + '</button>';
+function render(d, ui, st, busy) {
     const view = viewOf(ui);
-    return seg('view', VIEWS, view) + (view === 'history' ? historyView(d, ui) : view === 'stats' ? statsView(st, ui) : accountsView(d, ui));
+    return '<div class="vbar">' + seg('view', VIEWS, view) + reload(busy) + '</div>' + (view === 'history' ? historyView(d, ui) : view === 'stats' ? statsView(st, ui) : accountsView(d, ui));
 }
 
 function accountsView(d, ui) {
@@ -207,11 +210,11 @@ if (typeof acquireVsCodeApi === 'function') {
     const vsc = acquireVsCodeApi();
     const ui = Object.assign({ activeOpen: true, nextOpen: true, accountsOpen: true, automationOpen: false, openRow: null }, vsc.getState() || {});
     const root = document.getElementById('root');
-    let data = null, stats = null;
+    let data = null, stats = null, busy = false;
     const paint = () => {
         if (!data) return;
         const f = document.activeElement, keep = f && f.dataset && f.dataset.a ? [f.dataset.a, f.dataset.l] : null;
-        root.innerHTML = render(data, ui, stats);
+        root.innerHTML = render(data, ui, stats, busy);
         if (keep) {  // a repaint (every poll) must not drop keyboard focus
             const again = [...root.querySelectorAll('[data-a]')].find((el) => el.dataset.a === keep[0] && el.dataset.l === keep[1]);
             if (again) again.focus();
@@ -220,6 +223,7 @@ if (typeof acquireVsCodeApi === 'function') {
     const SECTIONS = { active: 'activeOpen', next: 'nextOpen', accounts: 'accountsOpen', automation: 'automationOpen' };
     const act = (el) => {
         const a = el.dataset.a, l = el.dataset.l;
+        if (a === 'reload') return busy ? undefined : vsc.postMessage({ refresh: 1 });  // the host sends busy back; one fetch at a time
         if (SECTIONS[a]) ui[SECTIONS[a]] = !ui[SECTIONS[a]];
         else if (a === 'row') ui.openRow = ui.openRow === l ? null : l;
         else if (a === 'view') { ui.view = l; vsc.postMessage({ wantHistory: l === 'history' }); if (l === 'stats') vsc.postMessage({ wantStats: 1 }); }
@@ -238,7 +242,8 @@ if (typeof acquireVsCodeApi === 'function') {
         if ((ev.key === 'Enter' || ev.key === ' ') && ev.target.matches('[role="button"][data-a]')) { ev.preventDefault(); act(ev.target); }
     });
     window.addEventListener('message', (ev) => {
-        if (ev.data && ev.data.kind === 'stats') stats = ev.data;
+        if (ev.data && ev.data.kind === 'busy') busy = ev.data.on === true;
+        else if (ev.data && ev.data.kind === 'stats') stats = ev.data;
         else { data = ev.data; if (viewOf(ui) === 'stats') vsc.postMessage({ wantStats: 1 }); }  // the host rebuilds at most every 10 min
         paint();
     });
