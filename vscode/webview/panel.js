@@ -215,6 +215,8 @@ if (typeof acquireVsCodeApi === 'function') {
         if (!data) return;
         const f = document.activeElement, keep = f && f.dataset && f.dataset.a ? [f.dataset.a, f.dataset.l] : null;
         root.innerHTML = render(data, ui, stats, busy);
+        const ic = busy && root.querySelector('.rl.spin .codicon');
+        if (ic) ic.style.animationDelay = -(Date.now() % 1000) + 'ms';  // the new icon joins the turn at the phase the old one had (1 s period), so a repaint does not jump it back
         if (keep) {  // a repaint (every poll) must not drop keyboard focus
             const again = [...root.querySelectorAll('[data-a]')].find((el) => el.dataset.a === keep[0] && el.dataset.l === keep[1]);
             if (again) again.focus();

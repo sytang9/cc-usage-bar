@@ -372,7 +372,7 @@ async function enroll(label, expired, onDone) {
             + `Then click the ${label} row in the sidebar and choose Save login. After that, switching to it is instant.` },
         'Open terminal');
     if (ok !== 'Open terminal') return;
-    await checkLogins();  // ccswitch copies your current seat's newest tokens into its saved copy before /login replaces them
+    await fetchLogins();  // ccswitch copies your current seat's newest tokens into its saved copy before /login replaces them
     onDone();
     const t = vscode.window.createTerminal(`Claude login: ${label}`);
     t.show();
@@ -416,6 +416,15 @@ function mergeLogins(prev, doc, isSaved) {
         else if (a.login === 'ok') next.delete(a.label);
     }
     return new Set([...next].filter(isSaved));
+}
+
+// The one guarded fetch: every `ccswitch usage --json` run goes through here, so two never overlap. A caller that
+// arrives while one runs gets that run's promise. onBusy (set by activate) tells the panel to spin; it never rejects.
+let inflight = null, onBusy = () => {};
+function fetchLogins() {
+    if (inflight) return inflight;
+    onBusy(true);
+    return (inflight = checkLogins().catch(() => {}).finally(() => { inflight = null; onBusy(false); }));
 }
 
 async function checkLogins() {
@@ -580,13 +589,18 @@ function activate(context) {
         autoSwitch(cap, context.globalState, poll);
     };
 
+    // The fetch (timed, from the button or the command). The panel spins from start to end; a request while one runs is dropped.
+    const post = (m) => view && view.webview.postMessage(m);
+    onBusy = (on) => post({ kind: 'busy', on });
+    const health = () => { if (!inflight) fetchLogins().then(poll); };
+
     context.subscriptions.push(status,
         vscode.commands.registerCommand('claudeUsage.toggleAutoSwitch', toggleAuto),
         vscode.workspace.onDidChangeConfiguration((e) => {
             if (e.affectsConfiguration('claudeUsage.usageFile')) { fs.unwatchFile(watched); watched = usageFile() || ACCOUNTS; fs.watchFile(watched, { interval: 5000 }, poll); }
             if (e.affectsConfiguration('claudeUsage')) poll();
         }),
-        vscode.commands.registerCommand('claudeUsage.refresh', poll),
+        vscode.commands.registerCommand('claudeUsage.refresh', health),
         vscode.window.registerWebviewViewProvider('claudeUsage.view', {
             resolveWebviewView(v) {
                 view = v;
@@ -594,7 +608,7 @@ function activate(context) {
                 v.webview.html = webviewHtml(v.webview);
                 v.webview.onDidReceiveMessage((m) => {
                     if (!m) return;
-                    if (m === 'ready') { push(); if (fetching) post({ kind: 'busy', on: true }); }
+                    if (m === 'ready') { push(); if (inflight) post({ kind: 'busy', on: true }); }
                     else if (m.refresh) health();
                     else if (m.seat) switchSeat(m.seat, poll);
                     else if (m.save) saveSeat(m.save, poll);
@@ -611,16 +625,6 @@ function activate(context) {
 
     poll();
     const timer = setInterval(poll, POLL_MS);
-    // The one fetch (timed or from the button). The panel spins from start to end; a second request while one runs is dropped.
-    // checkLogins never rejects (run() has a 90 s timeout), so the spin always ends.
-    let fetching = false;
-    const post = (m) => view && view.webview.postMessage(m);
-    const health = () => {
-        if (fetching) return;
-        fetching = true;
-        post({ kind: 'busy', on: true });
-        checkLogins().then(poll, () => {}).finally(() => { fetching = false; post({ kind: 'busy', on: false }); });
-    };
     const firstCheck = setTimeout(health, 30 * 1000);
     // ccswitch's own cache: refresh at its 10-min TTL; with a team file, hourly is enough to keep tokens alive
     const healthTimer = setInterval(health, (usageFile() ? 60 : 10) * 60 * 1000);

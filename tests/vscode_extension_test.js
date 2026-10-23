@@ -801,7 +801,7 @@ const calls = () => (fs.existsSync(LOG) ? fs.readFileSync(LOG, 'utf8').trim().sp
             const v = { visible: false, onDidChangeVisibility: (f) => { onVis = f; }, onDidDispose: () => {},
                 webview: { ...fakeWebview, postMessage: async (m) => { posted.push(m); }, onDidReceiveMessage: (f) => { onMsg = f; } } };
             provider.resolveWebviewView(v);
-            const last = () => posted.filter((m) => m.kind !== 'stats').pop();
+            const last = () => posted.filter((m) => m.kind !== 'stats' && m.kind !== 'busy').pop();
             const step = (f) => { seen.length = 0; f(); return [...new Set(seen)].sort(); };
             assert.deepStrictEqual(step(() => onMsg('ready')), [], 'hidden sidebar: no history read');
             assert.deepStrictEqual(last().history, []);
@@ -813,7 +813,9 @@ const calls = () => (fs.existsSync(LOG) ? fs.readFileSync(LOG, 'utf8').trim().sp
             assert.deepStrictEqual(step(() => onMsg({ wantHistory: false })), ['work']);
             fs.writeFileSync(tf, JSON.stringify({ generated_at: now, accounts: [{ label: 'personal', provider: 'claude', state: 'ok', five_pct: 1, week_pct: 1 }] }));
             cfg.usageFile = tf;
-            assert.deepStrictEqual(step(() => { onMsg({ wantHistory: true }); cmds['claudeUsage.refresh'](); }), [], 'team file: local history is never read');
+            seen.length = 0; onMsg({ wantHistory: true }); cmds['claudeUsage.refresh']();  // the command fetches, then re-reads
+            await new Promise((r) => setTimeout(r, 400));
+            assert.deepStrictEqual([...new Set(seen)], [], 'team file: local history is never read');
             assert.deepStrictEqual([last().history, last().team], [[], true]);
         } finally {
             delete cfg.usageFile;
@@ -1408,6 +1410,85 @@ const calls = () => (fs.existsSync(LOG) ? fs.readFileSync(LOG, 'utf8').trim().sp
             usageReply('');
             for (const d of ctx.subscriptions) if (d && d.dispose) d.dispose();
         }
+    });
+
+    await check('reload: the Refresh command runs the guarded fetch with the spin; a rejecting fetch clears it; a seat switch runs no second fetch', async () => {
+        const posted = [], cmds = {}, ctx = { subscriptions: [], globalStorageUri: { fsPath: path.join(HOME, 'gs') }, globalState: memento(false) };
+        let provider, onMsg;
+        const keep = { win: { ...vscode.window }, commands: vscode.commands, ws: vscode.workspace.onDidChangeConfiguration, exists: fs.existsSync };
+        Object.assign(vscode.window, { createStatusBarItem: () => ({ show() {}, dispose() {} }), registerWebviewViewProvider: (id, pr) => { provider = pr; return { dispose() {} }; } });
+        vscode.StatusBarAlignment = { Right: 2 };
+        vscode.commands = { registerCommand: (id, f) => { cmds[id] = f; return { dispose() {} }; }, executeCommand: async () => {} };
+        vscode.extensions = { getExtension: () => undefined };
+        vscode.workspace.onDidChangeConfiguration = () => ({ dispose() {} });
+        const fetches = () => (fs.existsSync(LOG) ? fs.readFileSync(LOG, 'utf8') : '').split('\n').filter((l) => l === 'usage --json').length;
+        const busyOf = () => posted.filter((m) => m.kind === 'busy').map((m) => m.on);
+        const idle = async () => { for (let i = 0; i < 200 && busyOf().length % 2; i++) await new Promise((r) => setTimeout(r, 25)); };
+        try {
+            usageReply(usageDoc({ work: 'ok' }));
+            const x = load();  // the instance that is activated is the one whose guard the switch must share
+            x.activate(ctx);
+            provider.resolveWebviewView({ visible: true, onDidChangeVisibility: () => {}, onDidDispose: () => {},
+                webview: { ...fakeWebview, postMessage: async (m) => { posted.push(m); }, onDidReceiveMessage: (f) => { onMsg = f; } } });
+            await idle();
+            const n0 = fetches();
+            cmds['claudeUsage.refresh'](); cmds['claudeUsage.refresh']();
+            assert.deepStrictEqual(busyOf(), [true], 'the command spins at once, once');
+            await idle();
+            assert.deepStrictEqual(busyOf(), [true, false]);
+            assert.strictEqual(fetches() - n0, 1, 'the command ran one real fetch');
+            // #5: a seat switch to an expired seat (it syncs tokens first) while a fetch runs joins that fetch
+            x.relogin.add('personal'); answer = 'Open terminal'; posted.length = 0;
+            const n1 = fetches();
+            onMsg({ refresh: 1 });
+            await x.switchSeat('personal', () => {});
+            await idle();
+            assert.strictEqual(fetches() - n1, 1, 'the switch ran no second `ccswitch usage --json`');
+            // #2: checkLogins rejects (not just a bad reply): the spin still clears
+            posted.length = 0;
+            fs.existsSync = (f) => { if (f === path.join(HOME, '.claude', 'ccswitch')) throw new Error('boom'); return keep.exists(f); };
+            onMsg({ refresh: 1 });
+            assert.deepStrictEqual(busyOf(), [true]);
+            await idle();
+            assert.deepStrictEqual(busyOf(), [true, false], 'a rejecting fetch clears the spin');
+            fs.existsSync = keep.exists;
+            onMsg({ refresh: 1 }); await idle();
+            assert.deepStrictEqual(busyOf(), [true, false, true, false], 'after a rejection, the next click fetches again');
+        } finally {
+            fs.existsSync = keep.exists;
+            Object.assign(vscode.window, keep.win);
+            vscode.commands = keep.commands;
+            vscode.workspace.onDidChangeConfiguration = keep.ws;
+            usageReply('');
+            for (const d of ctx.subscriptions) if (d && d.dispose) d.dispose();
+        }
+    });
+
+    await check('reload (webview): idle click posts {refresh:1}; busy click posts nothing; busy toggles the spin; the spin survives a repaint and keeps its phase', () => {
+        let T = 5250, onMessage, onClick;
+        const sent = [], icon = { style: {} };
+        const root = { innerHTML: '', addEventListener: (t, f) => { if (t === 'click') onClick = f; },
+            querySelector: () => (/class="rl spin"/.test(root.innerHTML) ? icon : null), querySelectorAll: () => [] };
+        const ctx = { esc: e.esc, document: { getElementById: () => root, activeElement: null },
+            window: { addEventListener: (t, f) => { if (t === 'message') onMessage = f; } },
+            acquireVsCodeApi: () => ({ getState: () => null, setState() {}, postMessage: (m) => sent.push(m) }), Date: { now: () => T } };
+        require('vm').runInNewContext(readWv('panel.js'), ctx);
+        const data = pdFour(), msg = (m) => onMessage({ data: m }), spinning = () => /class="rl spin"/.test(root.innerHTML);
+        const click = () => onClick({ target: { closest: () => ({ dataset: { a: 'reload' } }) } });
+        msg(data);
+        sent.length = 0; click();
+        assert.deepStrictEqual(JSON.parse(JSON.stringify(sent)), [{ refresh: 1 }], 'an idle click asks the host to fetch');
+        assert.ok(!spinning());
+        msg({ kind: 'busy', on: true });
+        assert.ok(spinning(), 'busy:true starts the spin');
+        assert.strictEqual(icon.style.animationDelay, '-250ms');
+        sent.length = 0; click();
+        assert.deepStrictEqual(sent, [], 'a click while busy posts nothing');
+        T = 5750; msg(data);
+        assert.ok(spinning(), 'a data repaint keeps the spin');
+        assert.strictEqual(icon.style.animationDelay, '-750ms', 'the repainted icon starts at the phase the old one reached');
+        msg({ kind: 'busy', on: false });
+        assert.ok(!spinning(), 'busy:false stops the spin');
     });
 
     console.log('----------------------------------------');
