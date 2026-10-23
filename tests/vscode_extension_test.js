@@ -1050,6 +1050,40 @@ const calls = () => (fs.existsSync(LOG) ? fs.readFileSync(LOG, 'utf8').trim().sp
         assert.strictEqual(js.slice(0, js.indexOf('Weekly (7 day)')).split('<polyline').length - 1, 1, 'reset times a second apart: one line');
     });
 
+    await check('hover: tooltip text from a known series: time ago + clock, usage %, rate in %/h (5h) and %/day (weekly), reset, no data', () => {
+        const p = panel(), t0 = now - 3 * 3600, R = now + 3600, R2 = now + 9000;
+        const five = { kind: 'five', from: now - 86400, to: now, pts: [[t0, 10, R], [t0 + 600, 12, R], [t0 + 1200, 15, R], [t0 + 1800, 3, R2], [t0 + 5400, 10, R2], [t0 + 6000, 13, R2]] };
+        const z = (n) => String(n).padStart(2, '0'), clock = (t) => z(new Date(t * 1000).getHours()) + ':' + z(new Date(t * 1000).getMinutes());
+        assert.deepStrictEqual({ ...p.hoverAt(five, t0 + 250) }, { when: '2h 55m ago \u00b7 ' + clock(t0 + 250), pct: '10%', rate: '+12.0%/h' }, '2 points in 10 min = +12.0%/h');
+        assert.strictEqual(p.hoverAt(five, t0 + 900).rate, '+18.0%/h', '12 -> 15 in 10 min');
+        assert.strictEqual(p.hoverAt(five, t0 + 1500).rate, 'reset', 'usage falls 15 -> 3: a reset, not a negative rate');
+        assert.strictEqual(p.hoverAt(five, t0 + 3000).rate, 'no data', 'the 1 h gap is longer than 3x the 10 min spacing');
+        assert.strictEqual(p.hoverAt(five, now).rate, 'no data', 'after the last sample');
+        assert.strictEqual(p.hoverAt(five, now).pct, '\u2013', 'and no % either: the nearest sample is too far');
+        assert.strictEqual(p.hoverAt(five, now - 30).when.split(' \u00b7 ')[0], 'just now');
+        assert.strictEqual(p.hoverAt({ ...five, pts: [] }, t0), null);
+        const d2 = now - 2 * 86400;
+        const week = { kind: 'week', from: now - 7 * 86400, to: now, pts: [[d2, 40, R], [d2 + 3600, 41, R], [d2 + 7200, 41.5, R]] };
+        const w = p.hoverAt(week, d2 + 1800);
+        assert.strictEqual(w.rate, '+24.0%/day', '1% in 1 h on the weekly chart is 24.0%/day');
+        assert.strictEqual(p.hoverAt(week, d2 + 5400).rate, '+12.0%/day');
+        assert.ok(/^1d 23h ago \u00b7 (Sun|Mon|Tue|Wed|Thu|Fri|Sat) \d\d:\d\d$/.test(w.when), w.when + ': a day or more back adds the weekday');
+        assert.strictEqual(w.pct, '40%');
+    });
+
+    await check('hover: each chart carries a guide line and a tooltip box, the wiring uses listeners (no inline handlers), and text goes in as text', () => {
+        const p = panel(), html = p.render(withHist(rising), ui({ view: 'history' }));
+        assert.strictEqual(html.split('class="gl"').length - 1, 2, 'a guide line in each of the two charts');
+        assert.strictEqual(html.split('class="tip"').length - 1, 2);
+        assert.ok(!/ on[a-z]+=/.test(html), 'no inline handlers: the CSP');
+        const src = readWv('panel.js');
+        assert.match(src, /root\.addEventListener\('pointermove'/);
+        assert.match(src, /tip\.textContent = /);
+        assert.ok(!/tip\.innerHTML/.test(src));
+        assert.match(src, /Math\.min\(box\.width - tip\.offsetWidth/, 'the tooltip is clamped inside the chart box');
+        assert.ok(/script-src 'unsafe-inline'/.test(e.webviewHtml(fakeWebview)) && /default-src 'none'/.test(e.webviewHtml(fakeWebview)), 'CSP unchanged');
+    });
+
     await check('render: History empty state, escaping, an 80%+ chart is orange', () => {
         const p = panel();
         assert.ok(p.render(withHist([]), ui({ view: 'history' })).includes('No history yet'));

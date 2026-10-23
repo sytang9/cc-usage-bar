@@ -80,12 +80,14 @@ function automation(d, ui) {
 
 // One limit over time: an SVG line from `from` to `to` (epoch s), 0-100%, with a dashed 80% guide. A new window (the
 // reset time changes, or the percent drops) starts a new line and gets a faint tick. Orange when the latest is 80%+.
+// Hovering shows a guide line and a tooltip (hoverAt); every drawn chart is registered in CHARTS for that.
 const CW = 300, CH = 56;
-function chart(title, pts, from, to, ago, pace, now) {
+let CHARTS = [];
+const newWindow = (a, b) => a !== b && !(a != null && b != null && Math.abs(a - b) <= 60);  // reset times a second apart: one window
+function chart(title, pts, from, to, ago, pace, now, kind) {
     const x = (t) => ((t - from) / (to - from) * CW).toFixed(1);
     const y = (p) => (CH - Math.max(0, Math.min(100, p)) / 100 * CH).toFixed(1);
     const runs = [];
-    const newWindow = (a, b) => a !== b && !(a != null && b != null && Math.abs(a - b) <= 60);  // reset times a second apart: one window
     pts.forEach((q, i) => { const b = pts[i - 1]; if (!b || newWindow(q[2], b[2]) || q[1] < b[1]) runs.push([]); runs[runs.length - 1].push(q); });
     const svg = runs.map((run, i) => {
         const xy = run.map((q) => x(q[0]) + ',' + y(q[1]));
@@ -93,12 +95,40 @@ function chart(title, pts, from, to, ago, pace, now) {
         return (i ? '<line class="rz" x1="' + x(run[0][0]) + '" x2="' + x(run[0][0]) + '" y1="0" y2="' + CH + '"/>' : '')
             + '<polyline class="ln" points="' + xy.join(' ') + '"/>';
     }).join('');
+    const cid = CHARTS.push({ pts, from, to, kind }) - 1;
     return '<div class="ch' + (now >= HIGH ? ' hi' : '') + '"><div class="top"><span>' + title + '</span><span class="p">' + pctText(now) + '</span></div>'
-        + '<svg viewBox="0 0 ' + CW + ' ' + CH + '" preserveAspectRatio="none" role="img" aria-label="' + title + ', ' + pts.length + ' points">'
+        + '<svg viewBox="0 0 ' + CW + ' ' + CH + '" data-cid="' + cid + '" preserveAspectRatio="none" role="img" aria-label="' + title + ', ' + pts.length + ' points">'
         + '<line class="g80" x1="0" x2="' + CW + '" y1="' + y(HIGH) + '" y2="' + y(HIGH) + '"/>'
-        + '<line class="base" x1="0" x2="' + CW + '" y1="' + CH + '" y2="' + CH + '"/>' + svg + '</svg>'
+        + '<line class="base" x1="0" x2="' + CW + '" y1="' + CH + '" y2="' + CH + '"/>' + svg
+        + '<line class="gl" x1="0" x2="0" y1="0" y2="' + CH + '"/></svg><div class="tip" role="presentation"></div>'
         + '<div class="ax"><span>' + ago + '</span><span>now</span></div>'
         + (pace ? '<div class="rs">' + esc(pace) + '</div>' : '') + '</div>';
+}
+
+// What the tooltip says at time t (epoch s) on a registered chart: time ago and clock time, the usage % at the nearest
+// sample, and the rate on the segment around t (%/h for the 5h chart, %/day for the weekly one). A fall in usage or a
+// new window is a "reset", not a negative rate; a segment longer than 3x the usual sample spacing, or t outside the
+// data, is "no data". Pure, so the tests can call it.
+function hoverAt(spec, t) {
+    const pts = spec.pts;
+    if (!pts.length) return null;
+    const dts = pts.slice(1).map((q, i) => q[0] - pts[i][0]).sort((a, b) => a - b);
+    const gap = dts.length ? 3 * dts[Math.floor(dts.length / 2)] : Infinity;
+    let i = 0;
+    pts.forEach((q, k) => { if (Math.abs(q[0] - t) < Math.abs(pts[i][0] - t)) i = k; });
+    const j = pts.findIndex((q, k) => k < pts.length - 1 && q[0] <= t && t <= pts[k + 1][0]);
+    let rate = 'no data';
+    if (j >= 0) {
+        const a = pts[j], b = pts[j + 1], dt = b[0] - a[0], week = spec.kind === 'week';
+        if (b[1] < a[1] || newWindow(a[2], b[2])) rate = 'reset';
+        else if (dt <= gap && dt > 0) rate = '+' + ((b[1] - a[1]) / dt * (week ? 86400 : 3600)).toFixed(1) + (week ? '%/day' : '%/h');
+    }
+    const s = Math.max(0, Math.round(spec.to - t)), m = Math.floor(s / 60), h = Math.floor(m / 60), dd = Math.floor(h / 24);
+    const agoText = s < 60 ? 'just now' : (dd ? dd + 'd ' + (h % 24) + 'h' : h ? h + 'h ' + (m % 60) + 'm' : m + 'm') + ' ago';
+    const dt0 = new Date(t * 1000), z = (n) => String(n).padStart(2, '0');
+    const clock = (dd ? ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'][dt0.getDay()] + ' ' : '') + z(dt0.getHours()) + ':' + z(dt0.getMinutes());
+    const near = Math.abs(pts[i][0] - t) <= gap;
+    return { when: agoText + ' \u00b7 ' + clock, pct: near ? pctText(pts[i][1]) : '\u2013', rate };
 }
 
 // History: one row per account with recorded points (active first, open by default); an open row shows both charts.
@@ -115,8 +145,8 @@ function historyView(d, ui) {
             + (h.icon ? ci(ICON[h.icon], 'i-' + h.icon, h.tip) : '<span class="codicon" aria-hidden="true"></span>')
             + '<span class="nm">' + l + '</span><span class="d">' + pctText(h.five) + ' · ' + pctText(h.week) + '</span>'
             + ci(open ? 'chevron-down' : 'chevron-right') + '</div>'
-            + (open ? '<div class="det">' + chart('Session (5hr) · last 24h', h.fiveSeries, d.now - 86400, d.now, '24h ago', h.fivePace, h.five)
-                + chart('Weekly (7 day) · last 7d', h.weekSeries, d.now - 7 * 86400, d.now, '7d ago', h.weekPace, h.week) + '</div>' : '');
+            + (open ? '<div class="det">' + chart('Session (5hr) · last 24h', h.fiveSeries, d.now - 86400, d.now, '24h ago', h.fivePace, h.five, 'five')
+                + chart('Weekly (7 day) · last 7d', h.weekSeries, d.now - 7 * 86400, d.now, '7d ago', h.weekPace, h.week, 'week') + '</div>' : '');
     }).join('') + '</div>';
 }
 
@@ -190,6 +220,7 @@ const viewOf = (ui) => (VIEWS.some(([k]) => k === ui.view) ? ui.view : 'accounts
 const reload = (busy) => '<button class="rl' + (busy ? ' spin' : '') + '" data-a="reload" title="' + (busy ? 'Refreshing…' : 'Refresh usage now')
     + '" aria-label="Refresh usage" aria-busy="' + !!busy + '">' + ci('refresh') + '</button>';
 function render(d, ui, st, busy) {
+    CHARTS = [];
     const view = viewOf(ui);
     return '<div class="vbar">' + seg('view', VIEWS, view) + reload(busy) + '</div>' + (view === 'history' ? historyView(d, ui) : view === 'stats' ? statsView(st, ui) : accountsView(d, ui));
 }
@@ -246,6 +277,24 @@ if (typeof acquireVsCodeApi === 'function') {
     root.addEventListener('keydown', (ev) => {
         if ((ev.key === 'Enter' || ev.key === ' ') && ev.target.matches('[role="button"][data-a]')) { ev.preventDefault(); act(ev.target); }
     });
+    // History hover: a guide line and a tooltip follow the pointer (mouse, pen and touch). No keyboard path: the % and
+    // the pace line stay printed under each chart. Text goes in with textContent; no inline handlers (the CSP).
+    const clearHover = () => root.querySelectorAll('.ch.hov').forEach((c) => c.classList.remove('hov'));
+    root.addEventListener('pointermove', (ev) => {
+        const svg = ev.target.closest && ev.target.closest('svg[data-cid]'), spec = svg && CHARTS[+svg.dataset.cid];
+        clearHover();
+        if (!spec) return;
+        const r = svg.getBoundingClientRect(), f = Math.max(0, Math.min(1, (ev.clientX - r.left) / (r.width || 1)));
+        const h = hoverAt(spec, spec.from + f * (spec.to - spec.from));
+        if (!h) return;
+        const ch = svg.closest('.ch'), tip = ch.querySelector('.tip'), box = ch.getBoundingClientRect();
+        svg.querySelector('.gl').setAttribute('x1', f * CW); svg.querySelector('.gl').setAttribute('x2', f * CW);
+        tip.textContent = h.when + '\n' + h.pct + ' \u00b7 ' + h.rate;
+        ch.classList.add('hov');
+        tip.style.left = Math.max(0, Math.min(box.width - tip.offsetWidth, r.left - box.left + f * r.width - tip.offsetWidth / 2)) + 'px';
+        tip.style.top = Math.max(0, svg.offsetTop - tip.offsetHeight - 2) + 'px';
+    });
+    root.addEventListener('pointerleave', clearHover);
     window.addEventListener('message', (ev) => {
         if (ev.data && ev.data.kind === 'busy') busy = ev.data.on === true;
         else if (ev.data && ev.data.kind === 'stats') stats = ev.data;
