@@ -187,7 +187,7 @@ function statsView(st, ui) {
 const VIEWS = [['accounts', 'Accounts'], ['history', 'History'], ['stats', 'Stats']];
 const viewOf = (ui) => (VIEWS.some(([k]) => k === ui.view) ? ui.view : 'accounts');
 // The reload button sits at the end of the switcher row. It spins while the host runs a fetch (busy).
-const reload = (busy) => '<button class="rl' + (busy ? ' spin' : '') + '" data-a="reload" title="' + (busy ? 'Refreshing…' : 'Refresh usage now (ccswitch usage)')
+const reload = (busy) => '<button class="rl' + (busy ? ' spin' : '') + '" data-a="reload" title="' + (busy ? 'Refreshing…' : 'Refresh usage now')
     + '" aria-label="Refresh usage" aria-busy="' + !!busy + '">' + ci('refresh') + '</button>';
 function render(d, ui, st, busy) {
     const view = viewOf(ui);
