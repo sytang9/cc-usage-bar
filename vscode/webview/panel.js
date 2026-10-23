@@ -202,7 +202,9 @@ function accountsView(d, ui) {
         + (activeOpen ? active(d.active) : '')
         + section('next', 'If you run out', nextOpen) + (nextOpen ? nextLine(d) : '')
         + section('accounts', 'Accounts', open, '<span class="r">' + n + '</span>', health)
-        + (open ? '<div class="rows">' + d.rows.map((r) => row(r, r.label === ui.openRow)).join('') + '</div>' : '')
+        + (open ? '<div class="rows">' + d.rows.map((r) => row(r, r.label === ui.openRow)).join('')
+            + (d.installed ? '<div class="row add" data-a="add" role="button" tabindex="0" title="Log in to another account and save it (ccswitch add)">'
+                + ci('add') + '<span class="nm">Add account</span></div>' : '') + '</div>' : '')
         + (d.installed ? automation(d, ui) : '');
 }
 
@@ -232,6 +234,7 @@ if (typeof acquireVsCodeApi === 'function') {
         else if (a === 'srange') ui.statsRange = l;
         else if (a === 'hrow') ui.histOpen = histOpenLabel(data, ui) === l ? null : l;
         else if (a === 'switch' || a === 'relogin') return vsc.postMessage({ seat: l });  // switchSeat routes re-login to enrol
+        else if (a === 'add') return vsc.postMessage({ add: 1 });
         else if (a === 'save') return vsc.postMessage({ save: l });
         else if (a === 'delete') return vsc.postMessage({ del: l });
         else if (a === 'auto') return vsc.postMessage({ toggleAuto: 1 });

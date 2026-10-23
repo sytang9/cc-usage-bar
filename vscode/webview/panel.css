@@ -64,6 +64,8 @@ button { font: inherit; cursor: pointer; }
 .row.open { background: var(--vscode-list-inactiveSelectionBackground); outline: 1px solid var(--vscode-contrastActiveBorder, transparent); outline-offset: -1px; }
 .row > .codicon { width: 14px; flex: none; }
 .row .nm { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 110px; }
+.row.add { color: var(--vscode-textLink-foreground); }
+.row.add .nm { font-weight: 400; max-width: none; }
 .row .d { margin-left: auto; text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .i-active { color: var(--vscode-charts-orange); }
 .i-switch { color: var(--vscode-charts-blue); }

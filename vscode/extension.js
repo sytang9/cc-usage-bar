@@ -347,7 +347,7 @@ async function ccswitch(args, input) {
 }
 
 // Click a seat: saved -> `ccswitch <label>` (instant). Everything goes through ccswitch; a seat that isn't
-// saved yet (or whose saved login expired) is enrolled once with Claude's own /login, then Save login.
+// saved yet (or whose saved login expired) is enrolled once with `ccswitch add <label>`.
 async function switchSeat(label, onDone) {
     if (!isLabel(label)) return;  // ccswitch's own label rule - never anything else
     if (!fs.existsSync(CCSWITCH)) return installCcswitch();
@@ -364,25 +364,59 @@ async function switchSeat(label, onDone) {
     vscode.window.showInformationMessage(`Switched Claude Code to ${label}. Restart open Claude Code tabs to use it.`);
 }
 
-// One-time enrolment of a seat ccswitch can't switch to yet: log in to it with Claude's /login, then Save login.
+// ccswitch's reserved words (RESERVED_WORDS in the ccswitch script): a label may not be one of them.
+const RESERVED = ['save', 'delete', 'list', 'usage', 'help', 'version', 'refresh-pause', 'refresh-resume', 'add'];
+// The input box's check of a new label: null when fine, else the text (or a warning) to show under the box.
+function labelProblem(v) {
+    if (!isLabel(v)) return 'Use letters, digits, _ and - only, and do not start with -.';
+    if (RESERVED.includes(v)) return `"${v}" is a ccswitch command: pick another label.`;
+    if (saved(v)) return { message: `${v} is already saved: ccswitch will ask before it overwrites it.`, severity: vscode.InputBoxValidationSeverity.Warning };
+    return null;
+}
+
+// `ccswitch add` arrived in 1.2.0. An older ccswitch prints its version (`ccswitch 1.1.0`) but fails on `add`.
+async function ccswitchHasAdd() {
+    const r = await run(CCSWITCH, ['version']);
+    const m = /(\d+)\.(\d+)\.(\d+)/.exec(r.out);
+    return r.ok && !!m && (+m[1] > 1 || (+m[1] === 1 && +m[2] >= 2));
+}
+
+// Add terminal -> the refresh to run when it closes (the accounts-dir watcher can fire before ccswitch has written the login).
+const addTerminals = new Map();
+// Log in to a label and save it with `ccswitch add <label>`, in a terminal the user can see: it prints a URL, the user
+// logs in and pastes the code back there. The live login is never touched.
+async function runAdd(label, onDone) {
+    if (!isLabel(label)) return;
+    if (!fs.existsSync(CCSWITCH)) return installCcswitch();
+    if (!(await ccswitchHasAdd())) return installCcswitch('Adding an account needs ccswitch 1.2.0 or newer (`ccswitch add`). The installed one is older, and this installer updates it.');
+    const t = vscode.window.createTerminal(`Add account: ${label}`);
+    addTerminals.set(t, onDone);
+    t.show();
+    t.sendText(`"${CCSWITCH}" add ${label}`);
+}
+
+// The "+ Add account" row: ask for a label, then runAdd.
+async function addAccount(onDone) {
+    const label = await vscode.window.showInputBox({ title: 'Add account', prompt: 'A short name for the account (letters, digits, _ and -)',
+        placeHolder: 'work', validateInput: labelProblem });
+    if (label) return runAdd(label.trim(), onDone);
+}
+
+// One-time enrolment of a seat ccswitch can't switch to yet (not saved, or its login expired): `ccswitch add`.
 async function enroll(label, expired, onDone) {
     const ok = await vscode.window.showInformationMessage(
         expired ? `The saved login for ${label} has expired (ccswitch: re-login).` : `${label} isn't saved in ccswitch yet.`,
-        { modal: true, detail: `Log in to ${label} once: a terminal opens with Claude Code - type /login and sign in as ${label}. `
-            + `Then click the ${label} row in the sidebar and choose Save login. After that, switching to it is instant.` },
+        { modal: true, detail: `Log in to ${label} once: a terminal opens and runs ccswitch add ${label}. Open the URL it prints, sign in as ${label} `
+            + `and paste the code back in that terminal. Your current Claude Code login is not touched. After that, switching to ${label} is instant.` },
         'Open terminal');
     if (ok !== 'Open terminal') return;
-    await fetchLogins();  // ccswitch copies your current seat's newest tokens into its saved copy before /login replaces them
-    onDone();
-    const t = vscode.window.createTerminal(`Claude login: ${label}`);
-    t.show();
-    t.sendText('claude');
+    await runAdd(label, onDone);
 }
 
 // cc-usage-bar (sytang9) provides ccswitch; run its own installer where the user can see and answer it.
-async function installCcswitch() {
+async function installCcswitch(why = 'Seat switching needs ccswitch from github.com/sytang9/cc-usage-bar.') {
     const ok = await vscode.window.showWarningMessage('Install ccswitch (cc-usage-bar)?',
-        { modal: true, detail: 'Seat switching needs ccswitch from github.com/sytang9/cc-usage-bar. Its installer copies three scripts into ~/.claude, '
+        { modal: true, detail: why + ' Its installer copies three scripts into ~/.claude, '
             + 'links ccswitch into ~/.local/bin and sets the Claude Code status line (your settings.json is backed up first). It runs in a terminal you can watch.' },
         'Install');
     if (ok !== 'Install') return;
@@ -456,7 +490,7 @@ async function saveSeat(label, onDone) {
 async function deleteSeat(label, onDone) {
     if (!isLabel(label)) return;
     const ok = await vscode.window.showWarningMessage(`Delete the saved login for ${label}?`,
-        { modal: true, detail: 'Your current Claude Code login is not affected. To switch to this seat again you will need to log in to it once and choose Save login in its row.' }, 'Delete');
+        { modal: true, detail: 'Your current Claude Code login is not affected. To switch to this seat again you will need to log in to it once (+ Add account).' }, 'Delete');
     if (ok !== 'Delete') return;
     const r = await ccswitch(['delete', label], 'y\n');
     if (r.ok && !saved(label)) vscode.window.showInformationMessage(`Deleted the saved login for ${label}.`);
@@ -601,6 +635,7 @@ function activate(context) {
             if (e.affectsConfiguration('claudeUsage')) poll();
         }),
         vscode.commands.registerCommand('claudeUsage.refresh', health),
+        vscode.window.onDidCloseTerminal((t) => { if (addTerminals.has(t)) { addTerminals.delete(t); health(); } }),
         vscode.window.registerWebviewViewProvider('claudeUsage.view', {
             resolveWebviewView(v) {
                 view = v;
@@ -611,6 +646,7 @@ function activate(context) {
                     if (m === 'ready') { push(); if (inflight) post({ kind: 'busy', on: true }); }
                     else if (m.refresh) health();
                     else if (m.seat) switchSeat(m.seat, poll);
+                    else if (m.add) addAccount(health);
                     else if (m.save) saveSeat(m.save, poll);
                     else if (m.del) deleteSeat(m.del, poll);
                     else if (m.toggleAuto) toggleAuto();
