@@ -60,7 +60,12 @@ const vscode = {
         showErrorMessage: (m) => said.push('ERROR ' + m),
         createTerminal: (name) => { const t = { name, show() {}, sendText(x) { said.push('TERMINAL ' + x); } }; terminals.push(t); return t; },
         onDidCloseTerminal: (f) => { closeTerminal = f; return { dispose() {} }; },
-        showInputBox: async (o) => { inputOpts.push(o); return inputAnswer; },
+        // Like VS Code: an Error from validateInput blocks the Enter key (a string counts as an error), so nothing is returned.
+        showInputBox: async (o) => {
+            inputOpts.push(o);
+            const v = o.validateInput && inputAnswer !== undefined ? o.validateInput(inputAnswer) : null;
+            return v && (typeof v === 'string' || v.severity !== 2) ? undefined : inputAnswer;
+        },
     },
     InputBoxValidationSeverity: { Warning: 2 },
     workspace: { getConfiguration: () => ({ get: (k) => cfg[k], update: async (k, v, t) => { updates.push([k, v, t]); } }) },
@@ -76,7 +81,7 @@ const file = path.join(__dirname, '..', 'vscode', 'extension.js');
 // Each load is one fresh extension instance, as in one VS Code window.
 function load() {
     const m = new Module(file); m.filename = file; m.paths = Module._nodeModulePaths(path.dirname(file));
-    m._compile(fs.readFileSync(file, 'utf8') + '\n;Object.assign(module.exports, { isLabel, autoBlock, autoSwitch, deleteSeat, CONSENT, readSnapshot, isFresh, qualifies, capacity, parseUsageJson, mergeLogins, readAccounts, activeLabel, autoTarget, checkLogins, relogin, switchSeat, saveSeat, addAccount, labelProblem, ccswitchHasAdd, esc, webviewHtml, panelData, ageText, setAutoSwitch, changeAutoSwitch, AUTO_DETAIL, statusText, statusTooltip, resetText, CODICONS, rolled, readHistory, forecast, statsFeed, STATS_EVERY_MS, STATS_RETRY_MS, withHistory, HISTORY_READ_BYTES });', file);
+    m._compile(fs.readFileSync(file, 'utf8') + '\n;Object.assign(module.exports, { isLabel, autoBlock, autoSwitch, deleteSeat, CONSENT, readSnapshot, isFresh, qualifies, capacity, parseUsageJson, mergeLogins, readAccounts, activeLabel, autoTarget, checkLogins, relogin, switchSeat, saveSeat, addAccount, runAdd, labelProblem, ccswitchHasAdd, esc, webviewHtml, panelData, ageText, setAutoSwitch, changeAutoSwitch, AUTO_DETAIL, statusText, statusTooltip, resetText, CODICONS, rolled, readHistory, forecast, statsFeed, STATS_EVERY_MS, STATS_RETRY_MS, withHistory, HISTORY_READ_BYTES });', file);
     return m.exports;
 }
 const e = load();
@@ -358,7 +363,7 @@ const calls = () => (fs.existsSync(LOG) ? fs.readFileSync(LOG, 'utf8').trim().sp
         assert.ok(!calls().includes('usage --json'), 'enroll no longer syncs tokens: ccswitch add leaves the live login alone');
         assert.ok(!calls().includes('personal'), 'never switches');
         assert.ok(!said.includes('TERMINAL claude'), 'no claude /login any more');
-        assert.deepStrictEqual(said.filter((m) => m.startsWith('TERMINAL')), [`TERMINAL "${ccswitch}" add personal`]);
+        assert.deepStrictEqual(said.filter((m) => m.startsWith('TERMINAL')), [`TERMINAL "${ccswitch}" add personal && exit`]);
         assert.strictEqual(terminals[0].name, 'Add account: personal');
     });
 
@@ -376,11 +381,58 @@ const calls = () => (fs.existsSync(LOG) ? fs.readFileSync(LOG, 'utf8').trim().sp
         fs.rmSync(LOG, { force: true }); said.length = 0; terminals.length = 0; inputOpts.length = 0; inputAnswer = 'newone';
         await e.addAccount(() => {});
         assert.strictEqual(inputOpts[0].validateInput, e.labelProblem);
-        assert.deepStrictEqual(said.filter((m) => m.startsWith('TERMINAL')), [`TERMINAL "${ccswitch}" add newone`]);
+        assert.deepStrictEqual(said.filter((m) => m.startsWith('TERMINAL')), [`TERMINAL "${ccswitch}" add newone && exit`]);
         assert.strictEqual(terminals[0].name, 'Add account: newone');
         inputAnswer = undefined; said.length = 0; terminals.length = 0;
         await e.addAccount(() => {});
         assert.deepStrictEqual([said, terminals], [[], []], 'cancelling the box opens nothing');
+    });
+
+    await check('an unsafe label never reaches the terminal: validateInput stops it in the box, and runAdd checks again', async () => {
+        said.length = 0; terminals.length = 0;
+        inputAnswer = 'a;rm -rf x';
+        await e.addAccount(() => {});
+        assert.deepStrictEqual([said, terminals], [[], []], 'the box rejects it (the stub runs validateInput like VS Code)');
+        await e.runAdd('a;rm -rf x', () => {});
+        await e.runAdd('--help', () => {});
+        assert.deepStrictEqual([said, terminals], [[], []], 'runAdd refuses it even if the box did not');
+    });
+
+    await check('the sidebar "+ Add account" click ({add:1}) reaches addAccount through the host route', async () => {
+        const cmds = {}, ctx = { subscriptions: [], globalStorageUri: { fsPath: path.join(HOME, 'gs') }, globalState: memento(false) };
+        let provider, onMsg;
+        const keep = { win: { ...vscode.window }, commands: vscode.commands, ws: vscode.workspace.onDidChangeConfiguration };
+        Object.assign(vscode.window, { createStatusBarItem: () => ({ show() {}, dispose() {} }), registerWebviewViewProvider: (id, p) => { provider = p; return { dispose() {} }; } });
+        vscode.StatusBarAlignment = { Right: 2 };
+        vscode.commands = { registerCommand: (id, f) => { cmds[id] = f; return { dispose() {} }; }, executeCommand: async () => {} };
+        vscode.extensions = { getExtension: () => undefined };
+        vscode.workspace.onDidChangeConfiguration = () => ({ dispose() {} });
+        try {
+            load().activate(ctx);
+            provider.resolveWebviewView({ visible: true, onDidChangeVisibility: () => {}, onDidDispose: () => {},
+                webview: { ...fakeWebview, postMessage: async () => {}, onDidReceiveMessage: (f) => { onMsg = f; } } });
+            inputAnswer = 'viaclick'; terminals.length = 0; inputOpts.length = 0;
+            onMsg({ add: 1 });
+            for (let i = 0; i < 40 && !terminals.length; i++) await new Promise((r) => setTimeout(r, 50));
+            assert.strictEqual(inputOpts.length, 1, 'the click asks for a label');
+            assert.strictEqual(terminals[0].name, 'Add account: viaclick');
+        } finally {
+            Object.assign(vscode.window, keep.win); vscode.commands = keep.commands; vscode.workspace.onDidChangeConfiguration = keep.ws;
+            for (const d of ctx.subscriptions) if (d && d.dispose) d.dispose();
+        }
+    });
+
+    await check('the enroll dialog says to paste the code if prompted, and for an expired seat warns that ccswitch asks before overwriting', async () => {
+        const detail = async (expired) => { saidOpts.length = 0; answer = undefined;
+            const info = vscode.window.showInformationMessage;
+            vscode.window.showInformationMessage = async (m, o) => { saidOpts.push(o); };
+            try { await e.switchSeat(expired ? 'personal' : 'spare2', () => {}); } finally { vscode.window.showInformationMessage = info; }
+            return saidOpts[0].detail; };
+        e.relogin.add('personal');
+        const d1 = await detail(true), d2 = await detail(false);
+        assert.ok(/paste the code if it asks/.test(d1) && /ccswitch asks before it overwrites/.test(d1), d1);
+        assert.ok(/paste the code if it asks/.test(d2) && !/overwrites/.test(d2), d2);
+        e.relogin.delete('personal');
     });
 
     await check('an old ccswitch without `add` gets the install/update offer, not a failing command', async () => {

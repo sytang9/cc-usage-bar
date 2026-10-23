@@ -384,7 +384,8 @@ async function ccswitchHasAdd() {
 // Add terminal -> the refresh to run when it closes (the accounts-dir watcher can fire before ccswitch has written the login).
 const addTerminals = new Map();
 // Log in to a label and save it with `ccswitch add <label>`, in a terminal the user can see: it prints a URL, the user
-// logs in and pastes the code back there. The live login is never touched.
+// logs in and pastes the code back there. The live login is never touched. `&& exit` closes the terminal after a
+// successful save, so the close hook refreshes (and clears a stale "Re-login needed"); on failure it stays open to read the error.
 async function runAdd(label, onDone) {
     if (!isLabel(label)) return;
     if (!fs.existsSync(CCSWITCH)) return installCcswitch();
@@ -392,7 +393,7 @@ async function runAdd(label, onDone) {
     const t = vscode.window.createTerminal(`Add account: ${label}`);
     addTerminals.set(t, onDone);
     t.show();
-    t.sendText(`"${CCSWITCH}" add ${label}`);
+    t.sendText(`"${CCSWITCH}" add ${label} && exit`);
 }
 
 // The "+ Add account" row: ask for a label, then runAdd.
@@ -407,7 +408,8 @@ async function enroll(label, expired, onDone) {
     const ok = await vscode.window.showInformationMessage(
         expired ? `The saved login for ${label} has expired (ccswitch: re-login).` : `${label} isn't saved in ccswitch yet.`,
         { modal: true, detail: `Log in to ${label} once: a terminal opens and runs ccswitch add ${label}. Open the URL it prints, sign in as ${label} `
-            + `and paste the code back in that terminal. Your current Claude Code login is not touched. After that, switching to ${label} is instant.` },
+            + `and paste the code if it asks for one. `
+            + (expired ? `ccswitch asks before it overwrites the saved login for ${label}: answer y. ` : '') + `Your current Claude Code login is not touched. After that, switching to ${label} is instant.` },
         'Open terminal');
     if (ok !== 'Open terminal') return;
     await runAdd(label, onDone);
