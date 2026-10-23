@@ -866,17 +866,17 @@ const calls = () => (fs.existsSync(LOG) ? fs.readFileSync(LOG, 'utf8').trim().sp
     // --- History view and pace (ccswitch's .usage-history.jsonl) -------------------------------------
     const pt = (dt, p5, p7, r5 = now + 3600, r7 = now + 3 * 86400) => ({ t: now - dt, p5, p7, r5, r7 });
 
-    await check('readHistory: last 7 days, sorted; bad, future and old lines skipped; no file -> []', () => {
+    await check('readHistory: last 30 days, sorted; bad, future and old lines skipped; no file -> []', () => {
         const f = path.join(ACC, 'personal', '.usage-history.jsonl');
         try {
-            fs.writeFileSync(f, [JSON.stringify(pt(60, 5, 5)), 'not json', '', JSON.stringify(pt(8 * 86400, 1, 1)),
+            fs.writeFileSync(f, [JSON.stringify(pt(60, 5, 5)), 'not json', '', JSON.stringify(pt(31 * 86400, 1, 1)), JSON.stringify(pt(8 * 86400, 7, 7)),
                 JSON.stringify({ t: now + 3600, p5: 1 }), JSON.stringify(pt(1200, 2, 4)), JSON.stringify({ p5: 3 })].join('\n'));
-            assert.deepStrictEqual(e.readHistory('personal', now).map((x) => x.p5), [2, 5]);
+            assert.deepStrictEqual(e.readHistory('personal', now).map((x) => x.p5), [7, 2, 5], 'an 8-day-old point is kept (30-day range), a 31-day-old one is not');
             assert.deepStrictEqual(e.readHistory('spare', now), []);
             const accounts = e.readAccounts().accounts;
             assert.ok(accounts.every((a) => !('history' in a)), 'a poll reads no history (review finding: cost on every poll)');
             const p = e.withHistory(accounts, () => true, now).find((a) => a.label === 'personal');
-            assert.strictEqual(p.history.length, 2, 'withHistory carries it');
+            assert.strictEqual(p.history.length, 3, 'withHistory carries it');
         } finally { fs.rmSync(f, { force: true }); }
     });
 
@@ -895,7 +895,7 @@ const calls = () => (fs.existsSync(LOG) ? fs.readFileSync(LOG, 'utf8').trim().sp
         } finally { fs.rmSync(f, { force: true }); }
     });
 
-    await check('readHistory reads only the file\'s tail (the last 7 days), not the whole 30-day file (review finding)', () => {
+    await check('readHistory reads only the file\'s tail (the last 30 days), not the whole 30-day file (review finding)', () => {
         const f = path.join(ACC, 'personal', '.usage-history.jsonl');
         try {
             const pad = (JSON.stringify(pt(3 * 86400, 5, 5)) + '\n').repeat(Math.ceil(e.HISTORY_READ_BYTES / 60));
@@ -1084,6 +1084,95 @@ const calls = () => (fs.existsSync(LOG) ? fs.readFileSync(LOG, 'utf8').trim().sp
         assert.ok(/script-src 'unsafe-inline'/.test(e.webviewHtml(fakeWebview)) && /default-src 'none'/.test(e.webviewHtml(fakeWebview)), 'CSP unchanged');
     });
 
+    await check('range: the selector (Auto | 24h | 7d | 30d) sets both charts\' span; Auto keeps 24h + 7d; a click persists and tells the host', () => {
+        const p = panel(), d = withHist(rising);
+        const seg = (u) => p.render(d, ui({ view: 'history', ...u }));
+        const det = (h) => h.slice(h.indexOf('<div class="det">'));
+        const auto = seg({});
+        assert.ok(auto.includes('aria-selected="true" data-a="hrange" data-l="auto"'), 'default is Auto');
+        for (const k of ['24h', '7d', '30d']) assert.ok(auto.includes('data-a="hrange" data-l="' + k + '"'), k);
+        assert.ok(det(auto).includes('Session (5hr) \u00b7 last 24h') && det(auto).includes('Weekly (7 day) \u00b7 last 7d'), 'Auto = today\'s look');
+        const m = det(seg({ histRange: '30d' }));
+        assert.ok(m.includes('Session (5hr) \u00b7 last 30d') && m.includes('Weekly (7 day) \u00b7 last 30d') && m.split('30d ago').length - 1 === 2, 'both charts reach 30d');
+        assert.ok(seg({ histRange: '30d' }).includes('aria-selected="true" data-a="hrange" data-l="30d"'));
+        const d24 = det(seg({ histRange: '24h' }));
+        assert.ok(d24.includes('Weekly (7 day) \u00b7 last 24h') && d24.includes('24h ago'));
+        assert.ok(det(seg({ histRange: 'bogus' })).includes('last 24h'), 'an unknown range falls back to Auto');
+        const src = readWv('panel.js');
+        assert.match(src, /else if \(a === 'hrange'\) \{ ui\.histRange = l; vsc\.postMessage\(\{ histRange: l \}\);/, 'the click stores the range in ui (vsc.setState below it, as statsRange) and asks the host');
+        assert.match(src, /vsc\.setState\(ui\);\s*paint\(\);/);
+    });
+
+    await check('range: the host sends the series for the range (Auto 24h + 7d, else both), keeps 30 days, and the forecast does not change', async () => {
+        const hist = [pt(20 * 86400, 5, 5, now - 19 * 86400), pt(2 * 86400, 70, 40, now - 86400), ...rising];
+        const mk = (histRange) => { const a = four().map((x) => ({ ...x, history: x.label === '002' ? hist : [] })); return e.panelData(a, capOf(a, '002', ['003']), { ...opts, histRange }); };
+        const h = (r) => mk(r).history[0];
+        assert.deepStrictEqual([h('auto').fiveSeries.length, h('auto').weekSeries.length], [3, 4], 'Auto = 24h session, 7d weekly');
+        assert.deepStrictEqual([h('24h').fiveSeries.length, h('24h').weekSeries.length], [3, 3]);
+        assert.deepStrictEqual([h('7d').fiveSeries.length, h('7d').weekSeries.length], [4, 4]);
+        assert.deepStrictEqual([h('30d').fiveSeries.length, h('30d').weekSeries.length], [5, 5], 'the 20-day-old point shows at 30d');
+        assert.strictEqual(mk('30d').histRange, '30d'); assert.strictEqual(mk('nope').histRange, 'auto');
+        assert.strictEqual(mk('constructor').histRange, 'auto');
+        for (const r of ['24h', '7d', '30d']) assert.deepStrictEqual([h(r).fivePace, h(r).weekPace], [h('auto').fivePace, h('auto').weekPace], 'Full in X at this pace is the same for ' + r);
+        assert.match(h('30d').fivePace, /^Full in 2h (19|20)m at this pace$/);
+        assert.strictEqual(e.readHistory('x', now).length, 0);
+    });
+
+    await check('range: the host remembers the range from {histRange} (and {wantHistory, histRange}) and ignores a bad one', async () => {
+        const f = path.join(ACC, 'work', '.usage-history.jsonl');
+        fs.writeFileSync(f, [pt(15 * 86400, 5, 5), pt(60, 50, 40)].map((x) => JSON.stringify(x)).join('\n') + '\n');
+        const posted = [], ctx = { subscriptions: [], globalStorageUri: { fsPath: path.join(HOME, 'gs') }, globalState: memento(false) };
+        let provider, onMsg;
+        const keep = { win: { ...vscode.window }, commands: vscode.commands, ws: vscode.workspace.onDidChangeConfiguration };
+        Object.assign(vscode.window, { createStatusBarItem: () => ({ show() {}, dispose() {} }), registerWebviewViewProvider: (id, p) => { provider = p; return { dispose() {} }; } });
+        vscode.StatusBarAlignment = { Right: 2 };
+        vscode.commands = { registerCommand: () => ({ dispose() {} }), executeCommand: async () => {} };
+        vscode.extensions = { getExtension: () => undefined };
+        vscode.workspace.onDidChangeConfiguration = () => ({ dispose() {} });
+        try {
+            load().activate(ctx);
+            provider.resolveWebviewView({ visible: true, onDidChangeVisibility: () => {}, onDidDispose: () => {},
+                webview: { ...fakeWebview, postMessage: async (m) => { posted.push(m); }, onDidReceiveMessage: (f) => { onMsg = f; } } });
+            const last = () => posted.filter((m) => m.kind !== 'stats' && m.kind !== 'busy').pop();
+            onMsg({ wantHistory: true, histRange: '30d' });
+            assert.deepStrictEqual([last().histRange, last().history[0].weekSeries.length], ['30d', 2]);
+            onMsg({ histRange: '24h' });
+            assert.deepStrictEqual([last().histRange, last().history[0].weekSeries.length], ['24h', 1]);
+            onMsg({ wantHistory: true });
+            assert.strictEqual(last().histRange, '24h', 'a view change alone keeps the range');
+            onMsg({ histRange: '__proto__' });
+            assert.strictEqual(last().histRange, 'auto');
+        } finally {
+            fs.rmSync(f, { force: true });
+            for (const d of ctx.subscriptions) if (d && d.dispose) d.dispose();
+            Object.assign(vscode.window, keep.win); vscode.commands = keep.commands; vscode.workspace.onDidChangeConfiguration = keep.ws;
+        }
+    });
+
+    await check('downsample: 30 days of samples are capped near one point per pixel column; resets and the line shape survive', () => {
+        const p = panel(), N = 30 * 144, from = now - 30 * 86400;
+        const raw = Array.from({ length: N }, (_, i) => [from + i * 600, (i % 30) * 3, now + 3600 + Math.floor(i / 30) * 18000]);  // a reset every 30 samples
+        const out = p.downsample(raw, from, now, 300);
+        const resets = raw.filter((q, i) => i && newW(q, raw[i - 1])).length;
+        function newW(q, b) { return q[1] < b[1]; }
+        assert.ok(out.length <= 300 + 2 * resets, out.length + ' points');
+        assert.ok(out.length < N / 3, 'much fewer than the ' + N + ' samples');
+        assert.ok(raw.filter((q, i) => i && newW(q, raw[i - 1])).every((q) => out.includes(q)), 'every window start is kept');
+        assert.strictEqual(out[out.length - 1], raw[N - 1], 'the newest point is kept');
+        assert.ok(out.every((q, i) => !i || q[0] > out[i - 1][0]), 'time order kept');
+        const few = raw.slice(0, 100);
+        assert.strictEqual(p.downsample(few, from, now, 300), few, 'a short series is untouched');
+    });
+
+    await check('downsample: the drawn chart carries the capped points (render on a 30d series)', () => {
+        const p = panel(), d = withHist(rising), N = 4320, from = now - 30 * 86400;
+        const series = Array.from({ length: N }, (_, i) => [from + i * 600, 10 + (i % 50) / 2, now + 4 * 3600]);
+        const big = { ...d, history: [{ ...d.history[0], fiveSeries: series, weekSeries: series }] };
+        const html = p.render(big, ui({ view: 'history', histRange: '30d' }));
+        const total = (html.match(/points="[^"]*"/g) || []).join(' ').split(' ').length;
+        assert.ok(total < 2 * N / 5, 'drawn points: ' + total + ' (raw ' + 2 * N + ')');
+    });
+
     await check('render: History empty state, escaping, an 80%+ chart is orange', () => {
         const p = panel();
         assert.ok(p.render(withHist([]), ui({ view: 'history' })).includes('No history yet'));
@@ -1091,7 +1180,7 @@ const calls = () => (fs.existsSync(LOG) ? fs.readFileSync(LOG, 'utf8').trim().sp
         assert.ok(team.includes('not shown for a team usage file') && !team.includes('<svg'), 'team file: a short note, no local charts');
         const src = readWv('panel.js');
         assert.match(src, /vsc\.postMessage\(\{ wantHistory: l === 'history' \}\)/, 'switching views tells the host whether History is shown');
-        assert.match(src, /vsc\.postMessage\(\{ wantHistory: viewOf\(ui\) === 'history' \}\);\s*vsc\.postMessage\('ready'\)/, 'and so does a reload on the History tab');
+        assert.match(src, /vsc\.postMessage\(\{ wantHistory: viewOf\(ui\) === 'history', histRange: histRangeOf\(ui\) \}\);\s*vsc\.postMessage\('ready'\)/, 'and so does a reload on the History tab');
         const bad = '<img src=x onerror="a()">';
         const d = { ...withHist(rising), history: [{ label: bad, icon: 'switch', tip: 't', five: 85, week: 10,
             fiveSeries: [[now, 85, null]], weekSeries: [], fivePace: '<b>', weekPace: null }] };

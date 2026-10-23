@@ -63,12 +63,14 @@ function codexRows() {
 }
 
 // History: ccswitch appends one line per live fetch to <label>/.usage-history.jsonl ({t, p5, p7, r5, r7}). The panel
-// reads the last 7 days (the weekly chart's span); a bad line is skipped. Only the file's last HISTORY_READ_BYTES are
+// reads the last 30 days (the longest History range; ccswitch keeps 30 days); a bad line is skipped. Only the file's last HISTORY_READ_BYTES are
 // read, and the parsed points are reused while the file's size and mtime are unchanged.
-const HISTORY_SECS = 7 * 86400;
+const HISTORY_SECS = 30 * 86400;
+// The History range selector: how far back the charts reach. 'auto' keeps the original look (5h chart 24h, weekly chart 7d).
+const HIST_RANGES = { '24h': 86400, '7d': 7 * 86400, '30d': 30 * 86400 };
 // minimize: a fixed tail, not a scan back to the 7-day cutoff. A line is about 70 bytes and ccswitch adds one per
-// live fetch (about every 10 min), so 128 KB holds about 13 days. If fetches get much more frequent, scan back instead.
-const HISTORY_READ_BYTES = 128 * 1024;
+// live fetch (about every 10 min), so 512 KB holds about 52 days (30 days is about 300 KB). If fetches get much more frequent, scan back instead.
+const HISTORY_READ_BYTES = 512 * 1024;
 const fin = Number.isFinite;
 // A usable line: a finite t, and each percent and reset a finite number or null (ccswitch writes null for no data).
 const isPoint = (o) => !!o && fin(o.t) && ['p5', 'p7', 'r5', 'r7'].every((k) => o[k] === null || fin(o[k]));
@@ -243,7 +245,7 @@ function readAccounts() {
 // An active account with no row (not saved, no data) gets one. A Codex row is read-only: a lock (or 'full'), no actions.
 const TIPS = { active: 'Active account', relogin: 'Needs re-login', full: 'A limit is at 100%', switch: 'You can switch here',
     readonly: 'Codex (read-only)', '': '' };
-function panelData(accounts, cap, { now, installed, auto, team = false }) {
+function panelData(accounts, cap, { now, installed, auto, team = false, histRange = 'auto' }) {
     const savedSet = new Set(cap.saved || []), dead = new Set(cap.relogin || []);
     const ctx = { you: cap.you, isSaved: (l) => savedSet.has(l), relogin: dead, now };
     const pct = (v) => (v == null ? null : Math.round(v));
@@ -282,7 +284,7 @@ function panelData(accounts, cap, { now, installed, auto, team = false }) {
         .map((a) => {
             const r = rows.find((x) => x.provider === 'claude' && x.label === a.label);
             return { label: a.label, icon: r.icon, tip: r.tip, five: pct(a.five_pct), week: pct(a.week_pct),
-                fiveSeries: series(a.history, 'p5', 'r5', 86400), weekSeries: series(a.history, 'p7', 'r7', HISTORY_SECS),
+                fiveSeries: series(a.history, 'p5', 'r5', (Object.hasOwn(HIST_RANGES, histRange) ? HIST_RANGES[histRange] : 86400)), weekSeries: series(a.history, 'p7', 'r7', (Object.hasOwn(HIST_RANGES, histRange) ? HIST_RANGES[histRange] : 7 * 86400)),
                 fivePace: pace(a.history, 'p5', 'r5'), weekPace: pace(a.history, 'p7', 'r7') };
         });
     return {
@@ -293,7 +295,7 @@ function panelData(accounts, cap, { now, installed, auto, team = false }) {
         next: cap.best ? { label: cap.best.label, five: pct(cap.best.five), week: pct(cap.best.week) } : null,
         counts: { total: rows.length, saved: rows.filter((r) => r.provider === 'claude' && savedSet.has(r.label)).length,
             relogin: rows.filter((r) => r.icon === 'relogin').length, full: rows.filter((r) => r.icon === 'full').length },
-        rows, history, now,
+        rows, history, now, histRange: Object.hasOwn(HIST_RANGES, histRange) ? histRange : 'auto',
     };
 }
 
@@ -607,12 +609,13 @@ function activate(context) {
     status.show();
 
     const wantStats = statsFeed(path.join(context.globalStorageUri.fsPath, 'stats-cache.json'), (m) => view && view.webview.postMessage(m));
+    let histRange = 'auto';  // the History range the webview shows (it says so at start and on every change)
     let historyOn = false;  // the webview shows its History tab (it says so on every view change)
     const push = () => {
         if (!view || !cap) return;
         const now = Date.now() / 1000, want = (l) => historyOn || l === cap.you;
         view.webview.postMessage(panelData(view.visible ? withHistory(accounts, want, now) : accounts, cap,
-            { now, installed: fs.existsSync(CCSWITCH), auto: !!cap.auto, team: !!usageFile() }));
+            { now, installed: fs.existsSync(CCSWITCH), auto: !!cap.auto, team: !!usageFile(), histRange }));
     };
     const autoOn = () => vscode.workspace.getConfiguration('claudeUsage').get('autoSwitch');
     const toggleAuto = () => changeAutoSwitch(!autoOn(), context.globalState);
@@ -654,7 +657,11 @@ function activate(context) {
                     else if (m.toggleAuto) toggleAuto();
                     else if (m.installCc) installCcswitch();
                     else if (m.wantStats) { if (v.visible) wantStats(); }  // a hidden, retained Stats tab never rebuilds
-                    else if (m.wantHistory !== undefined) { historyOn = m.wantHistory === true; push(); }
+                    else if (m.wantHistory !== undefined || m.histRange !== undefined) {
+                        if (m.wantHistory !== undefined) historyOn = m.wantHistory === true;
+                        if (m.histRange !== undefined) histRange = Object.hasOwn(HIST_RANGES, m.histRange) ? m.histRange : 'auto';
+                        push();
+                    }
                 });
                 v.onDidChangeVisibility(() => { if (v.visible) push(); });  // shown again: Stats asks for a rebuild if it is due
                 v.onDidDispose(() => { view = null; });

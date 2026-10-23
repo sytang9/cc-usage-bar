@@ -87,6 +87,7 @@ const newWindow = (a, b) => a !== b && !(a != null && b != null && Math.abs(a - 
 function chart(title, pts, from, to, ago, pace, now, kind) {
     const x = (t) => ((t - from) / (to - from) * CW).toFixed(1);
     const y = (p) => (CH - Math.max(0, Math.min(100, p)) / 100 * CH).toFixed(1);
+    pts = downsample(pts, from, to, CW);
     const runs = [];
     pts.forEach((q, i) => { const b = pts[i - 1]; if (!b || newWindow(q[2], b[2]) || q[1] < b[1]) runs.push([]); runs[runs.length - 1].push(q); });
     const svg = runs.map((run, i) => {
@@ -103,6 +104,22 @@ function chart(title, pts, from, to, ago, pace, now, kind) {
         + '<line class="gl" x1="0" x2="0" y1="0" y2="' + CH + '"/></svg><div class="tip" role="presentation"></div>'
         + '<div class="ax"><span>' + ago + '</span><span>now</span></div>'
         + (pace ? '<div class="rs">' + esc(pace) + '</div>' : '') + '</div>';
+}
+
+// About one point per pixel column (the chart is CW columns wide): the last point in each column, so 30 days of
+// samples stay fast. A point that starts a new window (usage falls, or the reset time changes) is always kept, so the
+// reset ticks survive; the result is at most `cols` points plus two for each window start.
+function downsample(pts, from, to, cols) {
+    if (pts.length <= cols) return pts;
+    const out = [];
+    let last = -1, keep = false;
+    pts.forEach((q, i) => {
+        const b = Math.max(0, Math.min(cols - 1, Math.floor((q[0] - from) / (to - from) * cols))), p = pts[i - 1];
+        const starts = !!p && (q[1] < p[1] || newWindow(q[2], p[2]));
+        if (b === last && !starts && !keep) out[out.length - 1] = q; else out.push(q);
+        last = b; keep = starts;
+    });
+    return out;
 }
 
 // What the tooltip says at time t (epoch s) on a registered chart: time ago and clock time, the usage % at the nearest
@@ -132,21 +149,28 @@ function hoverAt(spec, t) {
 }
 
 // History: one row per account with recorded points (active first, open by default); an open row shows both charts.
+// The range selector sets how far back the charts reach. 'auto' is the default and keeps the original look: the 5h chart
+// shows 24h and the weekly chart 7d; 24h / 7d / 30d give both charts that span. The host sends the series for the range.
+const HRANGES = [['auto', 'Auto'], ['24h', '24h'], ['7d', '7d'], ['30d', '30d']];
+const HSPAN = { '24h': 86400, '7d': 7 * 86400, '30d': 30 * 86400 };
+const histRangeOf = (ui) => (HRANGES.some(([k]) => k === ui.histRange) ? ui.histRange : 'auto');
+const spanOf = (range, dflt) => HSPAN[range] || dflt;
+const spanName = (secs) => (secs >= 86400 * 2 ? secs / 86400 + 'd' : secs / 3600 + 'h');
 const histOpenLabel = (d, ui) => (ui.histOpen === undefined ? (d.history[0] || {}).label : ui.histOpen);
 function historyView(d, ui) {
     if (d.team) return '<div class="note empty">History is not shown for a team usage file: ccswitch records it on each machine.</div>';
     if (!d.history || !d.history.length) {
         return '<div class="note empty">No history yet: ccswitch records a point each time it fetches (every 10-20 min while VS Code is open).</div>';
     }
-    const openL = histOpenLabel(d, ui);
-    return '<div class="rows">' + d.history.map((h) => {
+    const openL = histOpenLabel(d, ui), range = histRangeOf(ui), s5 = spanOf(range, 86400), s7 = spanOf(range, 7 * 86400);
+    return seg('hrange', HRANGES, range) + '<div class="rows">' + d.history.map((h) => {
         const l = esc(h.label), open = h.label === openL;
         return '<div class="row' + (open ? ' open' : '') + '" data-a="hrow" data-l="' + l + '" role="button" tabindex="0" aria-expanded="' + open + '">'
             + (h.icon ? ci(ICON[h.icon], 'i-' + h.icon, h.tip) : '<span class="codicon" aria-hidden="true"></span>')
             + '<span class="nm">' + l + '</span><span class="d">' + pctText(h.five) + ' · ' + pctText(h.week) + '</span>'
             + ci(open ? 'chevron-down' : 'chevron-right') + '</div>'
-            + (open ? '<div class="det">' + chart('Session (5hr) · last 24h', h.fiveSeries, d.now - 86400, d.now, '24h ago', h.fivePace, h.five, 'five')
-                + chart('Weekly (7 day) · last 7d', h.weekSeries, d.now - 7 * 86400, d.now, '7d ago', h.weekPace, h.week, 'week') + '</div>' : '');
+            + (open ? '<div class="det">' + chart('Session (5hr) · last ' + spanName(s5), h.fiveSeries, d.now - s5, d.now, spanName(s5) + ' ago', h.fivePace, h.five, 'five')
+                + chart('Weekly (7 day) · last ' + spanName(s7), h.weekSeries, d.now - s7, d.now, spanName(s7) + ' ago', h.weekPace, h.week, 'week') + '</div>' : '');
     }).join('') + '</div>';
 }
 
@@ -263,6 +287,7 @@ if (typeof acquireVsCodeApi === 'function') {
         else if (a === 'row') ui.openRow = ui.openRow === l ? null : l;
         else if (a === 'view') { ui.view = l; vsc.postMessage({ wantHistory: l === 'history' }); if (l === 'stats') vsc.postMessage({ wantStats: 1 }); }
         else if (a === 'srange') ui.statsRange = l;
+        else if (a === 'hrange') { ui.histRange = l; vsc.postMessage({ histRange: l }); }  // the host sends the series for that span
         else if (a === 'hrow') ui.histOpen = histOpenLabel(data, ui) === l ? null : l;
         else if (a === 'switch' || a === 'relogin') return vsc.postMessage({ seat: l });  // switchSeat routes re-login to enrol
         else if (a === 'add') return vsc.postMessage({ add: 1 });
@@ -301,6 +326,6 @@ if (typeof acquireVsCodeApi === 'function') {
         else { data = ev.data; if (viewOf(ui) === 'stats') vsc.postMessage({ wantStats: 1 }); }  // the host rebuilds at most every 10 min
         paint();
     });
-    vsc.postMessage({ wantHistory: viewOf(ui) === 'history' });
+    vsc.postMessage({ wantHistory: viewOf(ui) === 'history', histRange: histRangeOf(ui) });
     vsc.postMessage('ready');
 }
