@@ -1122,6 +1122,23 @@ const calls = () => (fs.existsSync(LOG) ? fs.readFileSync(LOG, 'utf8').trim().sp
         assert.match(src, /pointerleave', \(\) => \{ hover = null;/, 'leaving the chart forgets it');
     });
 
+    await check('hover: a repaint keeps the tooltip only on the same chart (account, limit, span), not on whatever chart now has its index (review finding)', () => {
+        const p = panel(), d = withHist(rising, { '004': [pt(60, 46, 13)] }), g = ui({ view: 'history', histLayout: 'grid' });
+        p.render(d, g);
+        const k0 = p.chartKey(0), k2 = p.chartKey(2);
+        assert.ok(k0 && k2 && k0 !== k2 && k0 !== p.chartKey(1), 'each chart has its own key');
+        p.render({ ...d, now: d.now + 60 }, g);
+        assert.strictEqual(p.chartKey(0), k0, 'the next poll (now moved on): the same chart, so the tooltip stays');
+        p.render({ ...d, history: [...d.history].reverse() }, g);
+        assert.notStrictEqual(p.chartKey(0), k0, 'the order changed: index 0 is another account, so the tooltip goes');
+        p.render({ ...d, histRange: '30d' }, g);
+        assert.notStrictEqual(p.chartKey(0), k0, 'another span: another chart');
+        assert.strictEqual(p.chartKey(99), null, 'no chart at that index');
+        const src = readWv('panel.js');
+        assert.match(src, /hover = \{ cid: svg\.dataset\.cid, f, key: chartKey\(svg\.dataset\.cid\) \}/, 'the hover stores the chart key');
+        assert.match(src, /const paint = [\s\S]*?hover && hover\.key === chartKey\(hover\.cid\)[\s\S]*?hover = null/, 'a repaint re-shows it only for the same key, else drops it');
+    });
+
     await check('payload: no history series unless the History tab is shown; the host downsamples to the chart width (review finding)', () => {
         const N = 31 * 144, h30 = Array.from({ length: N }, (_, i) => ({ t: now - (N - 1 - i) * 600, p5: (i % 30) * 3, p7: 10 + i / 1000,
             r5: now + Math.floor(i / 30) * 18000, r7: now + 86400 }));

@@ -83,8 +83,10 @@ function automation(d, ui) {
 // Hovering shows a guide line and a tooltip (hoverAt); every drawn chart is registered in CHARTS for that.
 const CW = 300, CH = 56;
 let CHARTS = [];
+// A chart's identity across repaints: account, limit and span (from/to move on with every poll). null = no such chart.
+function chartKey(cid) { const s = CHARTS[+cid]; return s ? s.label + '|' + s.kind + '|' + (s.to - s.from) : null; }
 const newWindow = (a, b) => a !== b && !(a != null && b != null && Math.abs(a - b) <= 60);  // reset times a second apart: one window
-function chart(title, pts, from, to, ago, pace, now, kind) {
+function chart(title, pts, from, to, ago, pace, now, kind, label) {
     const x = (t) => ((t - from) / (to - from) * CW).toFixed(1);
     const y = (p) => (CH - Math.max(0, Math.min(100, p)) / 100 * CH).toFixed(1);
     pts = downsample(pts, from, to, CW);
@@ -96,7 +98,7 @@ function chart(title, pts, from, to, ago, pace, now, kind) {
         return (i ? '<line class="rz" x1="' + x(run[0][0]) + '" x2="' + x(run[0][0]) + '" y1="0" y2="' + CH + '"/>' : '')
             + '<polyline class="ln" points="' + xy.join(' ') + '"/>';
     }).join('');
-    const cid = CHARTS.push({ pts, from, to, kind }) - 1;
+    const cid = CHARTS.push({ pts, from, to, kind, label }) - 1;
     return '<div class="ch' + (now >= HIGH ? ' hi' : '') + '"><div class="top"><span>' + title + '</span><span class="p">' + pctText(now) + '</span></div>'
         + '<svg viewBox="0 0 ' + CW + ' ' + CH + '" data-cid="' + cid + '" preserveAspectRatio="none" role="img" aria-label="' + title + ', ' + pts.length + ' points">'
         + '<line class="g80" x1="0" x2="' + CW + '" y1="' + y(HIGH) + '" y2="' + y(HIGH) + '"/>'
@@ -176,8 +178,8 @@ function historyView(d, ui) {
     }
     const openL = histOpenLabel(d, ui), range = histRangeOf(ui), shown = histRangeOf({ histRange: d.histRange });
     const s5 = spanOf(shown, 86400), s7 = spanOf(shown, 7 * 86400);
-    const charts = (h) => chart('Session (5hr) \u00b7 last ' + spanName(s5), h.fiveSeries, d.now - s5, d.now, spanName(s5) + ' ago', h.fivePace, h.five, 'five')
-        + chart('Weekly (7 day) \u00b7 last ' + spanName(s7), h.weekSeries, d.now - s7, d.now, spanName(s7) + ' ago', h.weekPace, h.week, 'week');
+    const charts = (h) => chart('Session (5hr) \u00b7 last ' + spanName(s5), h.fiveSeries, d.now - s5, d.now, spanName(s5) + ' ago', h.fivePace, h.five, 'five', h.label)
+        + chart('Weekly (7 day) \u00b7 last ' + spanName(s7), h.weekSeries, d.now - s7, d.now, spanName(s7) + ' ago', h.weekPace, h.week, 'week', h.label);
     const head = (h) => (h.icon ? ci(ICON[h.icon], 'i-' + h.icon, h.tip) : '<span class="codicon" aria-hidden="true"></span>')
         + '<span class="nm">' + esc(h.label) + '</span><span class="d">' + pctText(h.five) + ' \u00b7 ' + pctText(h.week) + '</span>';
     const ctl = '<div class="hctl">' + seg('hrange', HRANGES, range) + iconToggle('hlay', HLAYOUTS, histLayoutOf(ui)) + '</div>';
@@ -292,8 +294,8 @@ if (typeof acquireVsCodeApi === 'function') {
     const ui = Object.assign({ activeOpen: true, nextOpen: true, accountsOpen: true, automationOpen: false, openRow: null }, vsc.getState() || {});
     const root = document.getElementById('root');
     let data = null, stats = null, busy = false;
-    // History hover: a guide line and a tooltip at fraction f of a chart's width. hover = the last one ({ cid, f }), shown
-    // again after a repaint (every 60 s poll) so a still pointer keeps its tooltip.
+    // History hover: a guide line and a tooltip at fraction f of a chart's width. hover = the last one ({ cid, f, key }), shown
+    // again after a repaint (every 60 s poll) so a still pointer keeps its tooltip, but only on the same chart (key).
     let hover = null;
     const clearHover = () => root.querySelectorAll('.ch.hov').forEach((c) => c.classList.remove('hov'));
     const showHover = (svg, f) => {
@@ -316,8 +318,8 @@ if (typeof acquireVsCodeApi === 'function') {
             const again = [...root.querySelectorAll('[data-a]')].find((el) => el.dataset.a === keep[0] && el.dataset.l === keep[1]);
             if (again) again.focus();
         }
-        const hs = hover && root.querySelector('svg[data-cid="' + hover.cid + '"]');
-        if (hs) showHover(hs, hover.f);
+        if (hover && hover.key === chartKey(hover.cid)) showHover(root.querySelector('svg[data-cid="' + hover.cid + '"]'), hover.f);
+        else hover = null;  // the charts changed under a still pointer: another chart has that index now
     };
     const SECTIONS = { active: 'activeOpen', next: 'nextOpen', accounts: 'accountsOpen', automation: 'automationOpen' };
     const act = (el) => {
@@ -351,7 +353,7 @@ if (typeof acquireVsCodeApi === 'function') {
         hover = null;
         if (!svg || !CHARTS[+svg.dataset.cid]) return;
         const r = svg.getBoundingClientRect(), f = Math.max(0, Math.min(1, (ev.clientX - r.left) / (r.width || 1)));
-        hover = { cid: svg.dataset.cid, f };
+        hover = { cid: svg.dataset.cid, f, key: chartKey(svg.dataset.cid) };
         showHover(svg, f);
     });
     root.addEventListener('pointerleave', () => { hover = null; clearHover(); });
