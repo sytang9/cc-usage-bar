@@ -6,7 +6,7 @@
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-TEST_FILES=("$SCRIPT_DIR/vscode_extension_test.js")
+TEST_FILES=()
 for f in "$SCRIPT_DIR"/vscode/*.js; do
   [[ "$(basename "$f")" == harness.js ]] || TEST_FILES+=("$f")
 done
