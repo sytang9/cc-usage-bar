@@ -609,6 +609,43 @@ EOF
 
   rm -rf "$glob_cwd19" "$home19"
 
+  # --- Case 20: `save` writes under the refresh lock (shared with `add`). A
+  # usage run that holds the lock may be writing this label's tokens back, so
+  # a save that cannot get the lock must fail and leave the old pair intact.
+  local home20 acc20 sum20 holder20
+  home20="$(make_sandbox)"
+  write_claude_json "$home20" "a@x.com" "OrgA" "uuid-a"
+  write_credentials "$home20" "REFRESH_A" "$SECRET_A"
+  acc20="$home20/.claude/accounts"
+  run_cc "$home20" "" save keep20
+  sum20="$(cat "$acc20/keep20/credentials.json" "$acc20/keep20/oauthAccount.json" | sha256sum)"
+  write_claude_json "$home20" "b@x.com" "OrgB" "uuid-b"
+  write_credentials "$home20" "REFRESH_B" "$SECRET_B"
+  sleep 60 &
+  holder20=$!
+  mkdir "$acc20/.refresh-lock" && echo "$holder20" >"$acc20/.refresh-lock/pid"
+  OUT="$(HOME="$home20" CCSWITCH_SNAPSHOT_LOCK_WAIT_SECONDS=1 bash "$TARGET" save keep20 <<<"y" 2>&1)"
+  EXIT_CODE=$?
+  printf '%s\n' "$OUT" >>"$ALL_OUTPUT_LOG"
+  kill "$holder20" 2>/dev/null
+  wait "$holder20" 2>/dev/null
+  if [[ "$EXIT_CODE" -ne 0 ]] && printf '%s' "$OUT" | grep -q "another ccswitch" \
+    && [[ "$(cat "$acc20/keep20/credentials.json" "$acc20/keep20/oauthAccount.json" | sha256sum)" == "$sum20" ]] \
+    && [[ -z "$(find "$acc20" -maxdepth 1 -name '.staging*' -print -quit)" ]]; then
+    pass "case20 save with the refresh lock held fails clearly and keeps the old pair"
+  else
+    fail "case20 save under a held lock (exit=$EXIT_CODE): $OUT"
+  fi
+  rm -rf "$acc20/.refresh-lock"
+  run_cc "$home20" "y" save keep20
+  if [[ "$EXIT_CODE" -eq 0 ]] && [[ "$(jq -r .accountUuid "$acc20/keep20/oauthAccount.json")" == "uuid-b" ]] \
+    && [[ ! -d "$acc20/.refresh-lock" ]]; then
+    pass "case20b save with the lock free overwrites the pair and releases the lock"
+  else
+    fail "case20b save after the lock is free (exit=$EXIT_CODE): $OUT"
+  fi
+  rm -rf "$home20"
+
   # --- Case 8: security -- no token ever appears in any captured output -----
   # Runs LAST, after every other case has had a chance to append to
   # $ALL_OUTPUT_LOG: a scan positioned earlier in main() would silently miss

@@ -158,6 +158,10 @@ paste the code back. Your live login is never touched, and nothing is switched.
 Extra options go to `claude auth login` (for example `--email you@example.com`
 or `--sso`). ccswitch is for subscription accounts: `--console` logs in to a
 Console (API billing) account, which has no subscription usage to show.
+If the account you log in to is already saved under another label (or is the
+live account), `add` says so and asks before it saves a second copy (default
+no). Re-adding over an existing label replaces it in one step: a cancelled or
+failed login leaves the old one as it was.
 `ccswitch save <label>` still snapshots whichever account is
 *currently logged in*.
 

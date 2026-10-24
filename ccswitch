@@ -54,6 +54,9 @@ fi
 # cleanup_tmpdir reads it and `set -u` turns an unset read into a hard exit --
 # an early failure would otherwise die inside its own cleanup handler.
 HAVE_REFRESH_LOCK=0
+# Set by write_account_snapshot while it builds a new snapshot. Declared here
+# for the same reason as HAVE_REFRESH_LOCK: cleanup_tmpdir reads it.
+SNAPSHOT_STAGING_DIR=""
 
 cleanup_tmpdir() {
   # The lock release is inlined rather than calling release_refresh_lock: this
@@ -62,6 +65,9 @@ cleanup_tmpdir() {
   # flag is 0 until the lock is actually taken, and && short-circuits, so
   # $REFRESH_LOCK_DIR is never expanded before it is defined either.
   [[ "$HAVE_REFRESH_LOCK" == "1" ]] && rm -rf "$REFRESH_LOCK_DIR"
+  # Only the staging dir: once the swap has started, the old snapshot sits in
+  # "$SNAPSHOT_STAGING_DIR.old", and deleting that here could lose the account.
+  [[ -n "$SNAPSHOT_STAGING_DIR" ]] && rm -rf "$SNAPSHOT_STAGING_DIR"
   rm -rf "$CCSWITCH_TMPDIR"
 }
 trap 'cleanup_tmpdir' EXIT
@@ -133,6 +139,12 @@ REFRESH_TIMEOUT_SECONDS=20
 # reporting the accounts as transiently unavailable. See acquire_refresh_lock.
 # Overridable so the lock-contention test does not spend the full wait.
 REFRESH_LOCK_WAIT_SECONDS="${CCSWITCH_LOCK_WAIT_SECONDS:-5}"
+
+# How long `save` / `add` wait for that same lock before they give up without
+# writing. Longer than the usage wait: a usage run holds the lock for its whole
+# run (network round trips included), and giving up here throws away a login
+# the user just finished. Overridable for the lock tests.
+SNAPSHOT_LOCK_WAIT_SECONDS="${CCSWITCH_SNAPSHOT_LOCK_WAIT_SECONDS:-60}"
 
 # Set from cmd_usage's --refresh flag. Defaulted here because fetch_row_usage
 # reads it and `set -u` turns an unset read into a hard exit -- a trap for any
@@ -492,43 +504,118 @@ cmd_add() {
     cjson="$login_dir/.claude.json"
   fi
 
+  confirm_new_identity "$label" "$cjson"
   write_account_snapshot "$label" "$cjson" "$creds"
 
   echo "Saved account '$label'. Switch with: ccswitch $label"
+}
+
+# confirm_new_identity <label> <claude_json>: a login of an account that is
+# already saved under ANOTHER label, or is the live one, makes a second copy:
+# a second grant whose tokens nothing keeps in sync (mirror_live_to_snapshot
+# updates only the first label that matches the live account, so the other
+# copy goes stale and later shows a false re-login). Warn, name the label, and
+# ask; default no. No accountUuid -> nothing to compare, no question.
+confirm_new_identity() {
+  local label="$1" cjson="$2" uuid other where=""
+  uuid="$(jq -r '.oauthAccount.accountUuid // empty' "$cjson" 2>/dev/null)"
+  [[ -n "$uuid" ]] || return 0
+  # Unquoted $(saved_labels) is safe: see saved_labels' GUARANTEE.
+  for other in $(saved_labels); do
+    [[ "$other" == "$label" ]] && continue
+    if [[ "$(saved_account_uuid "$other")" == "$uuid" ]]; then
+      where="already saved as '$other'"
+      break
+    fi
+  done
+  # Re-adding the live account under the label that already holds it is a
+  # refresh of that label, not a second copy.
+  if [[ -z "$where" ]] && [[ -f "$CLAUDE_JSON" ]] && [[ "$(live_account_uuid)" == "$uuid" ]] \
+    && [[ "$(saved_account_uuid "$label")" != "$uuid" ]]; then
+    where="the account Claude Code is logged in to now (save it with: ccswitch save <label>)"
+  fi
+  [[ -n "$where" ]] || return 0
+  echo "Warning: this account is $where." >&2
+  if ! confirm "Save a second copy as '$label'?"; then
+    echo "Aborted; nothing saved."
+    exit 0
+  fi
 }
 
 # write_account_snapshot <label> <src_claude_json> <src_credentials>: copy the
 # credentials and the .oauthAccount block of the given files into
 # $ACCOUNTS_DIR/<label>/. Shared by `save` (live files) and `add` (temp login
 # dir). The caller has validated the label and settled any overwrite prompt.
+#
+# The pair is built in a staging dir beside the label (same filesystem) and
+# swapped in by rename, under the refresh lock. Three failures this closes:
+#  - a write that dies half-way (cp done, identity not) used to leave the NEW
+#    credentials next to the OLD identity file: a confidently wrong pair. Now a
+#    failure leaves the old pair untouched.
+#  - a `usage` run holds the lock while it refreshes this label; without the
+#    lock its write-back of the OLD account's rotated tokens could land on top
+#    of the new login.
+#  - the old snapshot's dot-files describe the old snapshot. .refresh-inflight
+#    says "this refresh token may be spent": carried over only for the very
+#    same token, else the next refresh would retire (blank) the new one.
+#    .usage-cache and .usage-history.jsonl belong to an account: carried over
+#    only when the accountUuid is the same (both known).
 write_account_snapshot() {
   local label="$1" src_claude_json="$2" src_credentials="$3"
-  local label_dir="$ACCOUNTS_DIR/$label"
-  secure_dir "$label_dir"
+  local label_dir="$ACCOUNTS_DIR/$label" staging
+  staging="$(mktemp -d "$ACCOUNTS_DIR/.staging.XXXXXX")" || {
+    echo "Error: failed to create a staging directory in $ACCOUNTS_DIR; account '$label' not saved." >&2
+    exit 1
+  }
+  SNAPSHOT_STAGING_DIR="$staging"
+  chmod 700 "$staging"
 
-  if ! secure_copy "$src_credentials" "$label_dir/credentials.json"; then
-    # Do not leave a partial/stale credentials.json behind: on an OVERWRITE
-    # save, a failed cp can leave the PREVIOUS account's credentials (or a
-    # truncated file) sitting where the switch pre-flight looks for the NEW
-    # account's snapshot. Removing it here means a present-but-broken copy
-    # cannot masquerade as a healthy save.
-    rm -f "$label_dir/credentials.json"
+  if ! secure_copy "$src_credentials" "$staging/credentials.json"; then
     echo "Error: failed to write $label_dir/credentials.json; account '$label' not saved." >&2
     exit 1
   fi
-
-  if ! jq_write "$label_dir/oauthAccount.json" '.oauthAccount // {}' "$src_claude_json"; then
-    # Do not leave a stale oauthAccount.json behind: on an OVERWRITE save,
-    # jq_write's failure leaves the PREVIOUS account's identity file sitting
-    # next to the NEW account's just-copied credentials.json. That mismatched
-    # pair would otherwise pass the switch pre-flight's existence/content
-    # checks and switch cleanly to the wrong identity. Removing it here makes
-    # this snapshot look like a credentials-only save (no identity available)
-    # instead of a confidently wrong one.
-    rm -f "$label_dir/oauthAccount.json"
-    echo "Error: failed to write $label_dir/oauthAccount.json; account '$label' not saved cleanly." >&2
+  if ! jq_write "$staging/oauthAccount.json" '.oauthAccount // {}' "$src_claude_json"; then
+    echo "Error: failed to write $label_dir/oauthAccount.json; account '$label' not saved." >&2
     exit 1
   fi
+
+  if ! acquire_refresh_lock "$SNAPSHOT_LOCK_WAIT_SECONDS"; then
+    echo "Error: another ccswitch is refreshing tokens; account '$label' not saved. Re-run when it finishes." >&2
+    exit 1
+  fi
+
+  if [[ -d "$label_dir" ]]; then
+    local old_uuid new_uuid old_rt new_rt f
+    old_uuid="$(saved_account_uuid "$label")"
+    new_uuid="$(jq -r '.accountUuid // empty' "$staging/oauthAccount.json" 2>/dev/null)"
+    if [[ -n "$new_uuid" ]] && [[ "$new_uuid" == "$old_uuid" ]]; then
+      # Best effort: losing a cache or history costs a refetch, not a login.
+      for f in .usage-cache .usage-history.jsonl; do
+        [[ -f "$label_dir/$f" ]] && cp -p "$label_dir/$f" "$staging/$f" 2>/dev/null
+      done
+    fi
+    old_rt="$(jq -r '.claudeAiOauth.refreshToken // empty' "$label_dir/credentials.json" 2>/dev/null)"
+    new_rt="$(jq -r '.claudeAiOauth.refreshToken // empty' "$staging/credentials.json" 2>/dev/null)"
+    if [[ -f "$(refresh_inflight_marker "$label")" ]] && [[ -n "$new_rt" ]] && [[ "$new_rt" == "$old_rt" ]]; then
+      # Not best effort: without it the next run could replay a spent token.
+      if ! { : >"$staging/.refresh-inflight"; } 2>/dev/null; then
+        echo "Error: failed to carry $label's refresh marker over; account '$label' not saved." >&2
+        exit 1
+      fi
+    fi
+    if ! mv "$label_dir" "$staging.old"; then
+      echo "Error: failed to replace $label_dir; account '$label' not saved." >&2
+      exit 1
+    fi
+  fi
+  if ! mv "$staging" "$label_dir"; then
+    [[ -d "$staging.old" ]] && mv "$staging.old" "$label_dir"
+    echo "Error: failed to move the new snapshot into $label_dir; account '$label' not saved." >&2
+    exit 1
+  fi
+  SNAPSHOT_STAGING_DIR=""
+  rm -rf "$staging.old"
+  release_refresh_lock
 }
 
 cmd_list() {
@@ -940,11 +1027,12 @@ NO_REFRESH_FLAG="$ACCOUNTS_DIR/.no-refresh"
 # macOS, and this file targets bash 3.2 for that reason.
 REFRESH_LOCK_DIR="$ACCOUNTS_DIR/.refresh-lock"
 
-# acquire_refresh_lock -> 0 if held (sets HAVE_REFRESH_LOCK=1), 1 if not.
+# acquire_refresh_lock [wait_seconds] -> 0 if held (sets HAVE_REFRESH_LOCK=1),
+# 1 if not. The wait defaults to REFRESH_LOCK_WAIT_SECONDS.
 # A caller that does not get it must treat refresh as transiently unavailable,
 # never as an account being dead.
 acquire_refresh_lock() {
-  local waited=0 reclaimed=0 holder
+  local wait_max="${1:-$REFRESH_LOCK_WAIT_SECONDS}" waited=0 reclaimed=0 holder
   [[ -d "$ACCOUNTS_DIR" ]] || return 1
   while ! mkdir "$REFRESH_LOCK_DIR" 2>/dev/null; do
     # Reclaim a lock whose owner is gone. A crash or SIGKILL runs no trap, and
@@ -958,7 +1046,7 @@ acquire_refresh_lock() {
         continue
       fi
     fi
-    [[ "$waited" -ge "$REFRESH_LOCK_WAIT_SECONDS" ]] && return 1
+    [[ "$waited" -ge "$wait_max" ]] && return 1
     sleep 1
     waited=$((waited + 1))
   done
