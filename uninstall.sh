@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# uninstall.sh -- reverse install.sh: remove the two installed scripts, the
-# ~/.local/bin symlink, and the statusLine entry it added to settings.json.
+# uninstall.sh -- reverse install.sh: remove the three installed scripts, the
+# ~/.local/bin symlink, and the statusLine and subagentStatusLine entries it
+# added to settings.json.
 #
 # What this deliberately does NOT do: touch $HOME/.claude/accounts/. That
 # directory holds live OAuth credentials for every account you enrolled, and
@@ -187,9 +188,11 @@ main() {
   if [[ "$PRINT_ONLY" == "1" ]]; then
     echo "Would remove:"
     echo "  $CLAUDE_DIR/statusline-usage.sh"
+    echo "  $CLAUDE_DIR/subagent-statusline.sh"
     echo "  $CLAUDE_DIR/ccswitch"
     echo "  $BIN_DIR/ccswitch (only if it symlinks to the above)"
     echo "  the .statusLine key in $SETTINGS_FILE (only if it points at cc-usage-bar)"
+    echo "  the .subagentStatusLine key in $SETTINGS_FILE (only if it points at cc-usage-bar)"
     echo "  the VS Code sidebar $VSCODE_EXTENSION_ID (only if the 'code' CLI lists it)"
     if [[ "$PURGE_ACCOUNTS" == "1" ]]; then
       echo "Would DELETE (after interactive confirmation): $ACCOUNTS_DIR"

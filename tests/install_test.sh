@@ -486,6 +486,34 @@ main() {
   fi
   rm -rf "$home18"
 
+  # --- Case 19: uninstall --print-only names everything install wrote --------
+  # Derived from what install actually put in the sandbox, so a new installed
+  # file or settings key fails here until the uninstaller lists it too.
+  local home19
+  home19="$(make_sandbox)"
+  run_install "$home19" "n"
+  OUT="$(HOME="$home19" SHELL=/bin/bash bash "$REPO_DIR/uninstall.sh" --print-only <<<"" 2>&1)"
+  EXIT_CODE=$?
+  local missing19="" f19 k19
+  while IFS= read -r f19; do
+    printf '%s' "$OUT" | grep -qF "$f19" || missing19+=" $f19"
+  done < <(find "$home19/.claude" -type f)
+  if [[ "$EXIT_CODE" -eq 0 ]] && [[ -z "$missing19" ]]; then
+    pass "case19a uninstall --print-only names every file install wrote"
+  else
+    fail "case19a uninstall --print-only misses:$missing19: $OUT"
+  fi
+  missing19=""
+  while IFS= read -r k19; do
+    printf '%s' "$OUT" | grep -qF ".$k19 key" || missing19+=" $k19"
+  done < <(jq -r 'keys[]' "$home19/.claude/settings.json")
+  if [[ -z "$missing19" ]]; then
+    pass "case19b uninstall --print-only names every settings.json key install wrote"
+  else
+    fail "case19b uninstall --print-only misses keys:$missing19: $OUT"
+  fi
+  rm -rf "$home19"
+
   echo
   echo "----------------------------------------"
   echo "Passed: $PASS_COUNT  Failed: $FAIL_COUNT"
