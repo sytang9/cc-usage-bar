@@ -17,6 +17,7 @@ SUITES=(
   ccswitch_codex_usage_test.sh
   install_test.sh
   vscode_extension_test.sh
+  ccswitch_sidebar_contract_test.sh
   stats_test.sh
 )
 
