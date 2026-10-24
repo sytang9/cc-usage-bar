@@ -2,7 +2,7 @@
   "name": "claude-usage",
   "displayName": "Claude Usage (ccswitch)",
   "description": "All your ccswitch accounts in the sidebar: 5h/weekly usage, most headroom, one-click switch, auto-switch",
-  "version": "1.8.1",
+  "version": "1.8.3",
   "publisher": "cc-usage-bar",
   "license": "MIT",
   "repository": "https://github.com/sytang9/cc-usage-bar",

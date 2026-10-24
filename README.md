@@ -158,6 +158,10 @@ paste the code back. Your live login is never touched, and nothing is switched.
 Extra options go to `claude auth login` (for example `--email you@example.com`
 or `--sso`). ccswitch is for subscription accounts: `--console` logs in to a
 Console (API billing) account, which has no subscription usage to show.
+If the account you log in to is already saved under another label (or is the
+live account), `add` says so and asks before it saves a second copy (default
+no; a no exits 1 with nothing saved). Re-adding over an existing label replaces it in one step: a cancelled or
+failed login leaves the old one as it was.
 `ccswitch save <label>` still snapshots whichever account is
 *currently logged in*.
 
@@ -425,6 +429,9 @@ accounts' tokens alive and reports each login as `ok` or `re-login`. **How to
 re-login** opens a terminal with `claude` for a one-time `/login`, then you save
 the login. A failed check (timeout, an error) keeps the last known re-login
 marks. An older ccswitch without `--json` marks nothing as re-login.
+The reload button (and **Claude Usage: Refresh**) runs `ccswitch usage --json
+--refresh` for live numbers, at most once a minute (a second click within the
+minute reads the cache); ccswitch's 429 backoff and refresh lock still apply.
 Each live fetch (never a cache hit, a 429 or an error) also appends one line,
 `{"t":<epoch>,"p5":..,"p7":..,"r5":..,"r7":..}` (the two percentages and the two
 reset epochs), to `~/.claude/accounts/<label>/.usage-history.jsonl` (mode `600`;

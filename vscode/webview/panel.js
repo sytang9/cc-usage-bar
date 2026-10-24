@@ -83,8 +83,10 @@ function automation(d, ui) {
 // Hovering shows a guide line and a tooltip (hoverAt); every drawn chart is registered in CHARTS for that.
 const CW = 300, CH = 56;
 let CHARTS = [];
+// A chart's identity across repaints: account, limit and span (from/to move on with every poll). null = no such chart.
+function chartKey(cid) { const s = CHARTS[+cid]; return s ? s.label + '|' + s.kind + '|' + (s.to - s.from) : null; }
 const newWindow = (a, b) => a !== b && !(a != null && b != null && Math.abs(a - b) <= 60);  // reset times a second apart: one window
-function chart(title, pts, from, to, ago, pace, now, kind) {
+function chart(title, pts, from, to, ago, pace, now, kind, label) {
     const x = (t) => ((t - from) / (to - from) * CW).toFixed(1);
     const y = (p) => (CH - Math.max(0, Math.min(100, p)) / 100 * CH).toFixed(1);
     pts = downsample(pts, from, to, CW);
@@ -96,7 +98,7 @@ function chart(title, pts, from, to, ago, pace, now, kind) {
         return (i ? '<line class="rz" x1="' + x(run[0][0]) + '" x2="' + x(run[0][0]) + '" y1="0" y2="' + CH + '"/>' : '')
             + '<polyline class="ln" points="' + xy.join(' ') + '"/>';
     }).join('');
-    const cid = CHARTS.push({ pts, from, to, kind }) - 1;
+    const cid = CHARTS.push({ pts, from, to, kind, label }) - 1;
     return '<div class="ch' + (now >= HIGH ? ' hi' : '') + '"><div class="top"><span>' + title + '</span><span class="p">' + pctText(now) + '</span></div>'
         + '<svg viewBox="0 0 ' + CW + ' ' + CH + '" data-cid="' + cid + '" preserveAspectRatio="none" role="img" aria-label="' + title + ', ' + pts.length + ' points">'
         + '<line class="g80" x1="0" x2="' + CW + '" y1="' + y(HIGH) + '" y2="' + y(HIGH) + '"/>'
@@ -123,9 +125,12 @@ function downsample(pts, from, to, cols) {
 }
 
 // What the tooltip says at time t (epoch s) on a registered chart: time ago and clock time, the usage % at the nearest
-// sample, and the rate on the segment around t (%/h for the 5h chart, %/day for the weekly one). A fall in usage or a
-// new window is a "reset", not a negative rate; a segment longer than 3x the usual sample spacing, or t outside the
-// data, is "no data". Pure, so the tests can call it.
+// sample, and the rate up to the end of the segment around t (%/h for the 5h chart, %/day for the weekly one), taken
+// over a trailing RATE_SPAN (1 h / 24 h, cut at the window start): percents come in whole-number steps, so one 10-min
+// segment alone jumps between 0 and +6%/h. A fall in usage or a new window is a "reset", not a negative rate; a
+// segment longer than 3x the usual sample spacing, or t outside the data, is "no data". Pure, so the tests can call it.
+const RATE_SPAN = { five: 3600, week: 86400 };
+const startsWindow = (q, b) => q[1] < b[1] || newWindow(q[2], b[2]);  // q follows b
 function hoverAt(spec, t) {
     const pts = spec.pts;
     if (!pts.length) return null;
@@ -137,8 +142,12 @@ function hoverAt(spec, t) {
     let rate = 'no data';
     if (j >= 0) {
         const a = pts[j], b = pts[j + 1], dt = b[0] - a[0], week = spec.kind === 'week';
-        if (b[1] < a[1] || newWindow(a[2], b[2])) rate = 'reset';
-        else if (dt <= gap && dt > 0) rate = '+' + ((b[1] - a[1]) / dt * (week ? 86400 : 3600)).toFixed(1) + (week ? '%/day' : '%/h');
+        if (startsWindow(b, a)) rate = 'reset';
+        else if (dt <= gap && dt > 0) {
+            let k = j;
+            while (k > 0 && pts[k - 1][0] >= b[0] - (RATE_SPAN[spec.kind] || RATE_SPAN.five) && !startsWindow(pts[k], pts[k - 1])) k--;
+            rate = '+' + ((b[1] - pts[k][1]) / (b[0] - pts[k][0]) * (week ? 86400 : 3600)).toFixed(1) + (week ? '%/day' : '%/h');
+        }
     }
     const s = Math.max(0, Math.round(spec.to - t)), m = Math.floor(s / 60), h = Math.floor(m / 60), dd = Math.floor(h / 24);
     const agoText = s < 60 ? 'just now' : (dd ? dd + 'd ' + (h % 24) + 'h' : h ? h + 'h ' + (m % 60) + 'm' : m + 'm') + ' ago';
@@ -150,7 +159,9 @@ function hoverAt(spec, t) {
 
 // History: one row per account with recorded points (active first, open by default); an open row shows both charts.
 // The range selector sets how far back the charts reach. 'auto' is the default and keeps the original look: the 5h chart
-// shows 24h and the weekly chart 7d; 24h / 7d / 30d give both charts that span. The host sends the series for the range.
+// shows 24h and the weekly chart 7d; 24h / 7d / 30d give both charts that span. The host sends the series for the range
+// with d.histRange, and the spans follow that (so a click never draws the old series on the new axis); ui.histRange only
+// marks the tab.
 const HRANGES = [['auto', 'Auto'], ['24h', '24h'], ['7d', '7d'], ['30d', '30d']];
 const HSPAN = { '24h': 86400, '7d': 7 * 86400, '30d': 30 * 86400 };
 // List (the default) is one expandable row per account; Grid shows every account's charts at once.
@@ -165,9 +176,10 @@ function historyView(d, ui) {
     if (!d.history || !d.history.length) {
         return '<div class="note empty">No history yet: ccswitch records a point each time it fetches (every 10-20 min while VS Code is open).</div>';
     }
-    const openL = histOpenLabel(d, ui), range = histRangeOf(ui), s5 = spanOf(range, 86400), s7 = spanOf(range, 7 * 86400);
-    const charts = (h) => chart('Session (5hr) \u00b7 last ' + spanName(s5), h.fiveSeries, d.now - s5, d.now, spanName(s5) + ' ago', h.fivePace, h.five, 'five')
-        + chart('Weekly (7 day) \u00b7 last ' + spanName(s7), h.weekSeries, d.now - s7, d.now, spanName(s7) + ' ago', h.weekPace, h.week, 'week');
+    const openL = histOpenLabel(d, ui), range = histRangeOf(ui), shown = histRangeOf({ histRange: d.histRange });
+    const s5 = spanOf(shown, 86400), s7 = spanOf(shown, 7 * 86400);
+    const charts = (h) => chart('Session (5hr) \u00b7 last ' + spanName(s5), h.fiveSeries, d.now - s5, d.now, spanName(s5) + ' ago', h.fivePace, h.five, 'five', h.label)
+        + chart('Weekly (7 day) \u00b7 last ' + spanName(s7), h.weekSeries, d.now - s7, d.now, spanName(s7) + ' ago', h.weekPace, h.week, 'week', h.label);
     const head = (h) => (h.icon ? ci(ICON[h.icon], 'i-' + h.icon, h.tip) : '<span class="codicon" aria-hidden="true"></span>')
         + '<span class="nm">' + esc(h.label) + '</span><span class="d">' + pctText(h.five) + ' \u00b7 ' + pctText(h.week) + '</span>';
     const ctl = '<div class="hctl">' + seg('hrange', HRANGES, range) + iconToggle('hlay', HLAYOUTS, histLayoutOf(ui)) + '</div>';
@@ -282,6 +294,20 @@ if (typeof acquireVsCodeApi === 'function') {
     const ui = Object.assign({ activeOpen: true, nextOpen: true, accountsOpen: true, automationOpen: false, openRow: null }, vsc.getState() || {});
     const root = document.getElementById('root');
     let data = null, stats = null, busy = false;
+    // History hover: a guide line and a tooltip at fraction f of a chart's width. hover = the last one ({ cid, f, key }), shown
+    // again after a repaint (every 60 s poll) so a still pointer keeps its tooltip, but only on the same chart (key).
+    let hover = null;
+    const clearHover = () => root.querySelectorAll('.ch.hov').forEach((c) => c.classList.remove('hov'));
+    const showHover = (svg, f) => {
+        const spec = CHARTS[+svg.dataset.cid], h = spec && hoverAt(spec, spec.from + f * (spec.to - spec.from));
+        if (!h) return;
+        const r = svg.getBoundingClientRect(), ch = svg.closest('.ch'), tip = ch.querySelector('.tip'), box = ch.getBoundingClientRect();
+        svg.querySelector('.gl').setAttribute('x1', f * CW); svg.querySelector('.gl').setAttribute('x2', f * CW);
+        tip.textContent = h.when + '\n' + h.pct + ' \u00b7 ' + h.rate;
+        ch.classList.add('hov');
+        tip.style.left = Math.max(0, Math.min(box.width - tip.offsetWidth, r.left - box.left + f * r.width - tip.offsetWidth / 2)) + 'px';
+        tip.style.top = Math.max(0, svg.offsetTop - tip.offsetHeight - 2) + 'px';
+    };
     const paint = () => {
         if (!data) return;
         const f = document.activeElement, keep = f && f.dataset && f.dataset.a ? [f.dataset.a, f.dataset.l] : null;
@@ -292,6 +318,8 @@ if (typeof acquireVsCodeApi === 'function') {
             const again = [...root.querySelectorAll('[data-a]')].find((el) => el.dataset.a === keep[0] && el.dataset.l === keep[1]);
             if (again) again.focus();
         }
+        if (hover && hover.key === chartKey(hover.cid)) showHover(root.querySelector('svg[data-cid="' + hover.cid + '"]'), hover.f);
+        else hover = null;  // the charts changed under a still pointer: another chart has that index now
     };
     const SECTIONS = { active: 'activeOpen', next: 'nextOpen', accounts: 'accountsOpen', automation: 'automationOpen' };
     const act = (el) => {
@@ -317,24 +345,18 @@ if (typeof acquireVsCodeApi === 'function') {
     root.addEventListener('keydown', (ev) => {
         if ((ev.key === 'Enter' || ev.key === ' ') && ev.target.matches('[role="button"][data-a]')) { ev.preventDefault(); act(ev.target); }
     });
-    // History hover: a guide line and a tooltip follow the pointer (mouse, pen and touch). No keyboard path: the % and
-    // the pace line stay printed under each chart. Text goes in with textContent; no inline handlers (the CSP).
-    const clearHover = () => root.querySelectorAll('.ch.hov').forEach((c) => c.classList.remove('hov'));
+    // History hover follows the pointer (mouse, pen and touch). No keyboard path: the % and the pace line stay printed
+    // under each chart. Text goes in with textContent; no inline handlers (the CSP).
     root.addEventListener('pointermove', (ev) => {
-        const svg = ev.target.closest && ev.target.closest('svg[data-cid]'), spec = svg && CHARTS[+svg.dataset.cid];
+        const svg = ev.target.closest && ev.target.closest('svg[data-cid]');
         clearHover();
-        if (!spec) return;
+        hover = null;
+        if (!svg || !CHARTS[+svg.dataset.cid]) return;
         const r = svg.getBoundingClientRect(), f = Math.max(0, Math.min(1, (ev.clientX - r.left) / (r.width || 1)));
-        const h = hoverAt(spec, spec.from + f * (spec.to - spec.from));
-        if (!h) return;
-        const ch = svg.closest('.ch'), tip = ch.querySelector('.tip'), box = ch.getBoundingClientRect();
-        svg.querySelector('.gl').setAttribute('x1', f * CW); svg.querySelector('.gl').setAttribute('x2', f * CW);
-        tip.textContent = h.when + '\n' + h.pct + ' \u00b7 ' + h.rate;
-        ch.classList.add('hov');
-        tip.style.left = Math.max(0, Math.min(box.width - tip.offsetWidth, r.left - box.left + f * r.width - tip.offsetWidth / 2)) + 'px';
-        tip.style.top = Math.max(0, svg.offsetTop - tip.offsetHeight - 2) + 'px';
+        hover = { cid: svg.dataset.cid, f, key: chartKey(svg.dataset.cid) };
+        showHover(svg, f);
     });
-    root.addEventListener('pointerleave', clearHover);
+    root.addEventListener('pointerleave', () => { hover = null; clearHover(); });
     window.addEventListener('message', (ev) => {
         if (ev.data && ev.data.kind === 'busy') busy = ev.data.on === true;
         else if (ev.data && ev.data.kind === 'stats') stats = ev.data;
@@ -344,3 +366,6 @@ if (typeof acquireVsCodeApi === 'function') {
     vsc.postMessage({ wantHistory: viewOf(ui) === 'history', histRange: histRangeOf(ui) });
     vsc.postMessage('ready');
 }
+
+// The host (extension.js) downsamples the History series with this same function before it posts them. Not in the webview.
+if (typeof module === 'object' && module.exports) module.exports = { downsample, CW };

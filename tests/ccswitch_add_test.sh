@@ -40,11 +40,25 @@ if [[ "$FAKE_MODE" == "emptyacct" ]]; then
 elif [[ "$FAKE_MODE" == "noaccount" ]]; then
   echo '{"other":1}' >"$d/.claude.json"
 else
-  echo '{"other":1,"oauthAccount":{"emailAddress":"new@x.com","accountUuid":"uuid-new"}}' >"$d/.claude.json"
+  # FAKE_UUID picks the identity; the default is unique per login, so tests do not collide.
+  echo '{"other":1,"oauthAccount":{"emailAddress":"new@x.com","accountUuid":"'"${FAKE_UUID:-uuid-$$}"'"}}' >"$d/.claude.json"
 fi
 exit 0
 FAKE
 chmod +x "$BIN/claude"
+
+# jq shim: fails a call whose arguments include $FAKE_JQ_FAIL_ON (an interrupted write), else runs the real jq.
+JQBIN="$ROOT/jqbin"
+mkdir -p "$JQBIN"
+REAL_JQ="$(command -v jq)"
+cat >"$JQBIN/jq" <<FAKE
+#!/usr/bin/env bash
+if [[ -n "\${FAKE_JQ_FAIL_ON:-}" ]]; then
+  for a in "\$@"; do [[ "\$a" == "\$FAKE_JQ_FAIL_ON" ]] && exit 1; done
+fi
+exec "$REAL_JQ" "\$@"
+FAKE
+chmod +x "$JQBIN/jq"
 
 echo '{"oauthAccount":{"emailAddress":"live@x.com","accountUuid":"uuid-live"}}' >"$HOME_DIR/.claude.json"
 echo '{"claudeAiOauth":{"refreshToken":"LIVE_REFRESH"}}' >"$HOME_DIR/.claude/.credentials.json"
@@ -57,8 +71,10 @@ run_add() {
   local mode="$1" input="$2"
   shift 2
   rm -f "$ROOT/args" "$ROOT/dir" "$ROOT/dir.mode"
-  OUT="$(HOME="$HOME_DIR" PATH="$BIN:$PATH" TMPDIR="$SCRATCH" FAKE_MODE="$mode" \
-    FAKE_ARGS="$ROOT/args" FAKE_DIR="$ROOT/dir" bash "$TARGET" "$@" <<<"$input" 2>&1)"
+  OUT="$(HOME="$HOME_DIR" PATH="$JQBIN:$BIN:$PATH" TMPDIR="$SCRATCH" FAKE_MODE="$mode" \
+    FAKE_ARGS="$ROOT/args" FAKE_DIR="$ROOT/dir" FAKE_UUID="${FAKE_UUID:-}" FAKE_JQ_FAIL_ON="${FAKE_JQ_FAIL_ON:-}" \
+    CCSWITCH_SNAPSHOT_LOCK_WAIT_SECONDS="${CCSWITCH_SNAPSHOT_LOCK_WAIT_SECONDS:-60}" \
+    bash "$TARGET" "$@" <<<"$input" 2>&1)"
   EXIT_CODE=$?
 }
 no_temp_left() { [[ -z "$(ls -A "$SCRATCH")" ]] && [[ ! -d "$(cat "$ROOT/dir" 2>/dev/null)" ]]; }
@@ -147,6 +163,129 @@ if [[ $EXIT_CODE -ne 0 ]] && grep -q "login failed" <<<"$OUT" \
   && [[ "$(cat "$ACC/work/credentials.json" "$ACC/work/oauthAccount.json" | sha256sum)" == "$OLD_SUM" ]] && no_temp_left; then
   pass "overwrite 'y' + failed login keeps the old account unchanged"
 else fail "kept account (exit=$EXIT_CODE): $OUT"; fi
+
+# --- re-add over a label, duplicates, the refresh lock (review of #24) ---
+pair_sum() { cat "$ACC/$1/credentials.json" "$ACC/$1/oauthAccount.json" | sha256sum; }
+no_staging_left() { [[ -z "$(find "$ACC" -maxdepth 1 -name '.*' -type d ! -name '.refresh-lock' | head -n1)" ]]; }
+uuid_of() { jq -r .accountUuid "$ACC/$1/oauthAccount.json"; }
+rt_of() { jq -r .claudeAiOauth.refreshToken "$ACC/$1/credentials.json"; }
+
+# 14. the account just logged in is already saved under another label: warn, name it, default no
+WORK_UUID="$(uuid_of work)"
+FAKE_UUID="$WORK_UUID" run_add ok "" add twin
+# Non-zero, so the sidebar's Add account terminal (`&& exit`) stays open on "Aborted; nothing saved."
+if [[ $EXIT_CODE -eq 1 ]] && grep -q "already saved as 'work'" <<<"$OUT" && grep -q "Aborted" <<<"$OUT" \
+  && [[ ! -e "$ACC/twin" ]] && no_temp_left && no_staging_left; then
+  pass "a login already saved under another label warns, names it, and saves nothing by default"
+else fail "duplicate label (exit=$EXIT_CODE): $OUT"; fi
+FAKE_UUID="$WORK_UUID" run_add ok "y" add twin
+if [[ $EXIT_CODE -eq 0 ]] && [[ "$(uuid_of twin)" == "$WORK_UUID" ]]; then
+  pass "answering y saves the second copy"
+else fail "duplicate y (exit=$EXIT_CODE): $OUT"; fi
+rm -rf "$ACC/twin"
+
+# 15. the account just logged in is the live account (not saved anywhere): warn, default no
+FAKE_UUID=uuid-live run_add ok "" add livecopy
+if [[ $EXIT_CODE -eq 1 ]] && grep -q "logged in to now" <<<"$OUT" && grep -q "Aborted" <<<"$OUT" \
+  && [[ ! -e "$ACC/livecopy" ]] && no_temp_left && live_unchanged; then
+  pass "a login of the live account warns and saves nothing by default"
+else fail "duplicate live (exit=$EXIT_CODE): $OUT"; fi
+
+# 16. an interrupted write (the identity file write fails) leaves the old pair byte-identical
+OLD_SUM="$(pair_sum work)"
+FAKE_UUID=uuid-other FAKE_JQ_FAIL_ON='.oauthAccount // {}' run_add ok "y" add work
+if [[ $EXIT_CODE -ne 0 ]] && [[ "$(pair_sum work)" == "$OLD_SUM" ]] && no_temp_left && no_staging_left; then
+  pass "a failed identity write keeps the old credentials + oauthAccount pair intact"
+else fail "interrupted write (exit=$EXIT_CODE, sum same: $([[ "$(pair_sum work)" == "$OLD_SUM" ]] && echo y || echo n)): $OUT"; fi
+
+# 17. a new identity over a label: the old account's marker, usage cache and history go
+plant_dotfiles() {
+  : >"$ACC/work/.refresh-inflight"
+  echo '{"fetched_at":1}' >"$ACC/work/.usage-cache"
+  echo '{"t":1}' >"$ACC/work/.usage-history.jsonl"
+  "$REAL_JQ" ".claudeAiOauth.refreshToken = \"$1\"" "$ACC/work/credentials.json" >"$ROOT/c" && mv "$ROOT/c" "$ACC/work/credentials.json"
+}
+plant_dotfiles OLD_REFRESH
+FAKE_UUID=uuid-other run_add ok "y" add work
+if [[ $EXIT_CODE -eq 0 ]] && [[ "$(rt_of work)" == "NEW_REFRESH" ]] && [[ "$(uuid_of work)" == "uuid-other" ]] \
+  && [[ ! -e "$ACC/work/.refresh-inflight" ]] && [[ ! -e "$ACC/work/.usage-cache" ]] && [[ ! -e "$ACC/work/.usage-history.jsonl" ]] \
+  && [[ "$(file_mode "$ACC/work")" == "700" ]] && no_staging_left; then
+  pass "a new identity drops the old .refresh-inflight, .usage-cache and .usage-history.jsonl"
+else fail "identity change (exit=$EXIT_CODE): $(ls -A "$ACC/work") $OUT"; fi
+
+# 18. the same account re-saved keeps its usage cache and history; a stale marker never meets the new token
+plant_dotfiles OLD_REFRESH
+FAKE_UUID=uuid-other run_add ok "y" add work
+if [[ $EXIT_CODE -eq 0 ]] && [[ "$(rt_of work)" == "NEW_REFRESH" ]] && [[ ! -e "$ACC/work/.refresh-inflight" ]] \
+  && [[ -e "$ACC/work/.usage-cache" ]] && [[ -e "$ACC/work/.usage-history.jsonl" ]]; then
+  pass "same account re-saved: cache and history kept, the stale marker gone (it cannot blank the new token)"
+else fail "same identity (exit=$EXIT_CODE): $(ls -A "$ACC/work") $OUT"; fi
+plant_dotfiles NEW_REFRESH
+FAKE_UUID=uuid-other run_add ok "y" add work
+if [[ $EXIT_CODE -eq 0 ]] && [[ -e "$ACC/work/.refresh-inflight" ]]; then
+  pass "a marker for the very token that is saved again stays (that token's outcome is still unknown)"
+else fail "same token marker (exit=$EXIT_CODE): $(ls -A "$ACC/work") $OUT"; fi
+rm -f "$ACC/work/.refresh-inflight"
+
+# 19. a usage run holding the refresh lock: add waits for it, and its write-back does not win
+sleep 60 &
+HOLDER=$!
+mkdir "$ACC/.refresh-lock" && echo "$HOLDER" >"$ACC/.refresh-lock/pid"
+rm -f "$ROOT/dir.mode"
+HOME="$HOME_DIR" PATH="$BIN:$PATH" TMPDIR="$SCRATCH" FAKE_MODE=ok FAKE_UUID=uuid-lock \
+  FAKE_ARGS="$ROOT/args" FAKE_DIR="$ROOT/dir" CCSWITCH_SNAPSHOT_LOCK_WAIT_SECONDS=30 \
+  bash "$TARGET" add work <<<"y" >"$ROOT/lock.out" 2>&1 &
+ADD_PID=$!
+for _ in $(seq 1 100); do [[ -s "$ROOT/dir.mode" ]] && break; sleep 0.1; done
+sleep 1.5
+SWAPPED_EARLY=0
+[[ "$(uuid_of work)" == "uuid-lock" ]] && SWAPPED_EARLY=1
+echo '{"claudeAiOauth":{"accessToken":"USAGE_ACCESS","refreshToken":"USAGE_ROTATED"}}' >"$ACC/work/credentials.json"
+rm -rf "$ACC/.refresh-lock"
+wait "$ADD_PID"
+ADD_EXIT=$?
+kill "$HOLDER" 2>/dev/null; wait "$HOLDER" 2>/dev/null
+if [[ $SWAPPED_EARLY -eq 0 ]] && [[ $ADD_EXIT -eq 0 ]] && [[ "$(rt_of work)" == "NEW_REFRESH" ]] \
+  && [[ "$(uuid_of work)" == "uuid-lock" ]] && [[ ! -e "$ACC/.refresh-lock" ]] && no_staging_left; then
+  pass "add waits for the refresh lock; a usage write-back under the lock does not overwrite the new login"
+else fail "lock wait (early=$SWAPPED_EARLY exit=$ADD_EXIT): $(cat "$ROOT/lock.out")"; fi
+
+# 20. the lock is never freed: add fails clearly and writes nothing
+sleep 60 &
+HOLDER=$!
+mkdir "$ACC/.refresh-lock" && echo "$HOLDER" >"$ACC/.refresh-lock/pid"
+OLD_SUM="$(pair_sum work)"
+CCSWITCH_SNAPSHOT_LOCK_WAIT_SECONDS=1 FAKE_UUID=uuid-busy run_add ok "y" add work
+kill "$HOLDER" 2>/dev/null; wait "$HOLDER" 2>/dev/null
+if [[ $EXIT_CODE -ne 0 ]] && grep -q "another ccswitch" <<<"$OUT" && grep -q "log in again" <<<"$OUT" \
+  && grep -q "Waiting for another ccswitch to finish refreshing" <<<"$OUT" && [[ "$(pair_sum work)" == "$OLD_SUM" ]] \
+  && [[ -d "$ACC/.refresh-lock" ]] && no_temp_left && no_staging_left; then
+  pass "a busy refresh lock: add fails with a clear message, the old pair intact, the other run's lock kept"
+else fail "lock busy (exit=$EXIT_CODE): $OUT"; fi
+rm -rf "$ACC/.refresh-lock"
+
+# 21. a signal between the two renames (old snapshot moved aside, new one not yet in):
+# the trap puts the old snapshot back under the label. An mv shim sends INT to
+# ccswitch right after the first rename.
+MVBIN="$ROOT/mvbin"
+mkdir -p "$MVBIN"
+REAL_MV="$(command -v mv)"
+cat >"$MVBIN/mv" <<FAKE
+#!/usr/bin/env bash
+"$REAL_MV" "\$@"; rc=\$?
+[[ "\$1" == "$ACC/work" ]] && kill -INT "\$PPID"
+exit "\$rc"
+FAKE
+chmod +x "$MVBIN/mv"
+OLD_SUM="$(pair_sum work)"
+OLD_LS="$(ls -A "$ACC/work")"
+OUT="$(HOME="$HOME_DIR" PATH="$MVBIN:$BIN:$PATH" TMPDIR="$SCRATCH" FAKE_MODE=ok FAKE_UUID=uuid-mid \
+  FAKE_ARGS="$ROOT/args" FAKE_DIR="$ROOT/dir" bash "$TARGET" add work <<<"y" 2>&1)"
+EXIT_CODE=$?
+if [[ $EXIT_CODE -eq 130 ]] && [[ "$(pair_sum work 2>/dev/null)" == "$OLD_SUM" ]] && [[ "$(ls -A "$ACC/work" 2>/dev/null)" == "$OLD_LS" ]] \
+  && [[ ! -e "$ACC/.refresh-lock" ]] && no_temp_left && no_staging_left; then
+  pass "a signal between the two renames restores the old snapshot under its label"
+else fail "mid-swap signal (exit=$EXIT_CODE): $(ls -A "$ACC") $OUT"; fi
 
 # 13. Ctrl-C during the login deletes the temp dir and saves nothing.
 # A bare `&` job ignores SIGINT, so start in a new session with the default
