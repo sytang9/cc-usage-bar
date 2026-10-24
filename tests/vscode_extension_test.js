@@ -1,100 +1,15 @@
-// Unit tests for vscode/extension.js. Loads the extension with a stub `vscode` module in a sandboxed HOME
-// (set by vscode_extension_test.sh) and a stub ccswitch that only records its arguments. Never touches ~/.claude.
+// Unit tests for vscode/extension.js, moving section by section into tests/vscode/ (see tests/vscode/harness.js).
 'use strict';
-const assert = require('assert');
-const fs = require('fs');
-const path = require('path');
-const Module = require('module');
+const {
+    assert, fs, path, HOME, ACC, LOG, now, check, run, seat, ccswitch, usageReply,
+    usageDoc, cfg, said, saidOpts, updates, stub, terminals, inputOpts, vscode, fakeWebview, file, load,
+    e, memento, calls, ctxFor, capNow, acct, capOf, four, opts, pdFour, readWv, panel,
+    ui, rowOf, pt, withHist, rising,
+} = require('./vscode/harness');
 
-const HOME = process.env.HOME;
-// This file writes ~/.claude.json and ~/.claude/ccswitch: refuse unless vscode_extension_test.sh made a sandbox HOME.
-// It also writes ${CODEX_HOME}/.usage-cache, so CODEX_HOME must sit inside that sandbox HOME.
-if (process.env.CCUB_TEST_SANDBOX !== '1' || !path.resolve(HOME || '/').startsWith(path.resolve(require('os').tmpdir()) + path.sep)
-    || !path.resolve(process.env.CODEX_HOME || '/').startsWith(path.resolve(HOME || '/') + path.sep)) {
-    console.error('Refusing to run: this test writes into $HOME. Run it with: bash tests/vscode_extension_test.sh');
-    process.exit(2);
-}
-const ACC = path.join(HOME, '.claude', 'accounts');
-const LOG = path.join(HOME, 'ccswitch.log');
-const now = Math.floor(Date.now() / 1000);
-let passed = 0, failed = 0;
-const check = async (name, fn) => {
-    try { await fn(); passed++; console.log('PASS: ' + name); } catch (e) { failed++; console.log('FAIL: ' + name + ' -- ' + e.message); }
-};
-
-// --- sandbox: three saved accounts, live login = "work", stub ccswitch --------------------------
-function seat(label, email, cache) {
-    fs.mkdirSync(path.join(ACC, label), { recursive: true });
-    fs.writeFileSync(path.join(ACC, label, 'credentials.json'), '{}');
-    fs.writeFileSync(path.join(ACC, label, 'oauthAccount.json'), JSON.stringify({ emailAddress: email }));
-    if (cache) fs.writeFileSync(path.join(ACC, label, '.usage-cache'), JSON.stringify(cache));
-}
-seat('work', 'me@work.example', { fetched_at: now - 60, five_hour_pct: 100, seven_day_pct: 40, five_hour_reset_epoch: now + 3600, seven_day_reset_epoch: now + 86400 });
-seat('personal', 'me@home.example', { fetched_at: now - 30, five_hour_pct: 10, seven_day_pct: 5, five_hour_reset_epoch: now + 600, seven_day_reset_epoch: now + 3 * 86400 });
-seat('spare', 'spare@home.example', null);
-seat('dead', 'dead@x.example', { fetched_at: now - 13 * 86400, five_hour_pct: 5, seven_day_pct: 5, five_hour_reset_epoch: now - 86400, seven_day_reset_epoch: now - 86400 });
-seat('half', 'half@x.example', { fetched_at: now - 60, five_hour_pct: null, seven_day_pct: 30, five_hour_reset_epoch: null, seven_day_reset_epoch: now + 86400 });
-fs.writeFileSync(path.join(HOME, '.claude.json'), JSON.stringify({ oauthAccount: { emailAddress: 'me@work.example' } }));
-const ccswitch = path.join(HOME, '.claude', 'ccswitch');
-fs.writeFileSync(ccswitch, `#!/usr/bin/env bash\necho "$*" >> "${LOG}"\n[[ "$1" == version ]] && { cat "$HOME/version.out" 2>/dev/null || echo "ccswitch 1.2.0"; exit 0; }\n[[ "$1" == usage ]] && { cat "$HOME/usage.out"; exit "$(cat "$HOME/usage.rc" 2>/dev/null || echo 0)"; }\nexit "$(cat "$HOME/switch.rc" 2>/dev/null || echo 0)"\n`);
-// What the stub `ccswitch usage --json` prints: a doc (object) or a raw string, plus its exit code.
-const usageReply = (doc, rc = 0) => {
-    fs.writeFileSync(path.join(HOME, 'usage.out'), typeof doc === 'string' ? doc : JSON.stringify(doc));
-    fs.writeFileSync(path.join(HOME, 'usage.rc'), String(rc));
-};
-const usageDoc = (logins, health = 'known') => ({ schema: 1, generated_at: now, login_health: health, login_health_reason: null,
-    accounts: Object.entries(logins).map(([label, login]) => ({ label, login, state: login === 'ok' ? 'ok' : 'relogin' })) });
-const cfg = {};
-fs.chmodSync(ccswitch, 0o755);
-
-// --- stub vscode ----------------------------------------------------------------------------------
-const said = [];
-const saidOpts = [];
-const updates = [];
-let answer, inputAnswer, closeTerminal;
-const terminals = [], inputOpts = [];
-const vscode = {
-    window: {
-        showWarningMessage: async (m, o, ...b) => { said.push(m); saidOpts.push(o); return answer; },
-        showInformationMessage: async (m, o, ...b) => { said.push(m); return typeof o === 'object' ? answer : undefined; },
-        showErrorMessage: (m) => said.push('ERROR ' + m),
-        createTerminal: (name) => { const t = { name, show() {}, sendText(x) { said.push('TERMINAL ' + x); } }; terminals.push(t); return t; },
-        onDidCloseTerminal: (f) => { closeTerminal = f; return { dispose() {} }; },
-        // Like VS Code: an Error from validateInput blocks the Enter key (a string counts as an error), so nothing is returned.
-        showInputBox: async (o) => {
-            inputOpts.push(o);
-            const v = o.validateInput && inputAnswer !== undefined ? o.validateInput(inputAnswer) : null;
-            return v && (typeof v === 'string' || v.severity !== 2) ? undefined : inputAnswer;
-        },
-    },
-    InputBoxValidationSeverity: { Warning: 2 },
-    workspace: { getConfiguration: () => ({ get: (k) => cfg[k], update: async (k, v, t) => { updates.push([k, v, t]); } }) },
-    ConfigurationTarget: { Global: 1 },
-    commands: {},
-    Uri: { file: (p) => ({ fsPath: p, toString: () => 'file://' + p }), parse: (u) => ({ toString: () => u }) },
-};
-// A stand-in for the view's webview: the extension asks it for the CSP source and the resource URI of codicon.css.
-const fakeWebview = { cspSource: 'https://res.test', asWebviewUri: (u) => 'https://res.test' + u.fsPath };
-const orig = Module._load;
-Module._load = function (r, ...a) { return r === 'vscode' ? vscode : orig.call(this, r, ...a); };
-const file = path.join(__dirname, '..', 'vscode', 'extension.js');
-// Each load is one fresh extension instance, as in one VS Code window.
-function load() {
-    const m = new Module(file); m.filename = file; m.paths = Module._nodeModulePaths(path.dirname(file));
-    m._compile(fs.readFileSync(file, 'utf8') + '\n;Object.assign(module.exports, { isLabel, autoBlock, autoSwitch, deleteSeat, CONSENT, readSnapshot, isFresh, qualifies, capacity, parseUsageJson, mergeLogins, readAccounts, activeLabel, autoTarget, checkLogins, relogin, switchSeat, saveSeat, addAccount, runAdd, labelProblem, ccswitchHasAdd, esc, webviewHtml, panelData, ageText, setAutoSwitch, changeAutoSwitch, AUTO_DETAIL, statusText, statusTooltip, resetText, CODICONS, rolled, readHistory, forecast, statsFeed, STATS_EVERY_MS, STATS_RETRY_MS, withHistory, HISTORY_READ_BYTES });', file);
-    return m.exports;
-}
-const e = load();
-// context.globalState stand-in; consented = the user confirmed the auto-switch dialog on this machine.
-const memento = (consented) => { const s = consented ? { [e.CONSENT]: true } : {}; return { get: (k) => s[k], update: async (k, v) => { s[k] = v; } }; };
-const calls = () => (fs.existsSync(LOG) ? fs.readFileSync(LOG, 'utf8').trim().split('\n') : []);
-
-(async () => {
+run(async () => {
     await check('activeLabel maps the live email to its saved label (not the email local part)', () =>
         assert.strictEqual(e.activeLabel(), 'work'));
-
-    const ctxFor = (relogin = new Set(), you = 'work') => ({ you, isSaved: (l) => fs.existsSync(path.join(ACC, l, 'credentials.json')), relogin, now });
-    const capNow = (relogin) => e.capacity(e.readSnapshot(), ctxFor(relogin));
 
     await check('readAccounts reads ccswitch usage caches and emails, no team file needed', () => {
         const { accounts, cap } = e.readAccounts();
@@ -111,16 +26,6 @@ const calls = () => (fs.existsSync(LOG) ? fs.readFileSync(LOG, 'utf8').trim().sp
         assert.strictEqual(pd.active.label, 'work');
         assert.strictEqual(pd.next.label, 'personal');
     });
-
-    // --- panelData: hand-built accounts (001 full, 002 active, 003 re-login and 13 d old, 004 fresh) ---
-    const acct = (label, five, week, fetched, extra = {}) => ({ label, provider: 'claude', state: 'ok', fetched_at: fetched,
-        five_pct: five, week_pct: week, five_reset_epoch: now + 3600, week_reset_epoch: now + 86400, email: label + '@x.example', ...extra });
-    const capOf = (accounts, you, relogin = [], saved = accounts.map((a) => a.label)) => ({
-        ...e.capacity({ accounts }, { you, isSaved: (l) => saved.includes(l), relogin: new Set(relogin), now }),
-        relogin, saved, loginHealth: 'known' });
-    const four = () => [acct('001', 76, 100, now - 120), acct('002', 23, 64, now - 60), acct('003', 5, 5, now - 13 * 86400), acct('004', 46, 13, now - 60)];
-    const opts = { now, installed: true, auto: false };
-    const pdFour = () => { const a = four(); return e.panelData(a, capOf(a, '002', ['003']), opts); };
 
     await check('panelData: active hero, next-best, counts', () => {
         const d = pdFour();
@@ -350,7 +255,7 @@ const calls = () => (fs.existsSync(LOG) ? fs.readFileSync(LOG, 'utf8').trim().sp
     });
 
     await check('switchSeat on a saved, healthy seat runs `ccswitch <label>` after confirmation', async () => {
-        e.relogin.clear(); fs.rmSync(LOG, { force: true }); answer = 'Switch';
+        e.relogin.clear(); fs.rmSync(LOG, { force: true }); stub.answer = 'Switch';
         let refreshed = false;
         await e.switchSeat('personal', () => { refreshed = true; });
         assert.deepStrictEqual(calls(), ['personal']);
@@ -358,7 +263,7 @@ const calls = () => (fs.existsSync(LOG) ? fs.readFileSync(LOG, 'utf8').trim().sp
     });
 
     await check('switchSeat on an expired seat never switches: no fetch, no claude; runs `ccswitch add <label>` in an "Add account" terminal', async () => {
-        e.relogin.add('personal'); fs.rmSync(LOG, { force: true }); answer = 'Open terminal'; said.length = 0; terminals.length = 0;
+        e.relogin.add('personal'); fs.rmSync(LOG, { force: true }); stub.answer = 'Open terminal'; said.length = 0; terminals.length = 0;
         await e.switchSeat('personal', () => {});
         assert.ok(!calls().includes('usage --json'), 'enroll no longer syncs tokens: ccswitch add leaves the live login alone');
         assert.ok(!calls().includes('personal'), 'never switches');
@@ -378,19 +283,19 @@ const calls = () => (fs.existsSync(LOG) ? fs.readFileSync(LOG, 'utf8').trim().sp
     });
 
     await check('+ Add account: the box validates with labelProblem; a valid label opens the terminal and sends `<ccswitch> add <label>`', async () => {
-        fs.rmSync(LOG, { force: true }); said.length = 0; terminals.length = 0; inputOpts.length = 0; inputAnswer = 'newone';
+        fs.rmSync(LOG, { force: true }); said.length = 0; terminals.length = 0; inputOpts.length = 0; stub.inputAnswer = 'newone';
         await e.addAccount(() => {});
         assert.strictEqual(inputOpts[0].validateInput, e.labelProblem);
         assert.deepStrictEqual(said.filter((m) => m.startsWith('TERMINAL')), [`TERMINAL "${ccswitch}" add newone && exit`]);
         assert.strictEqual(terminals[0].name, 'Add account: newone');
-        inputAnswer = undefined; said.length = 0; terminals.length = 0;
+        stub.inputAnswer = undefined; said.length = 0; terminals.length = 0;
         await e.addAccount(() => {});
         assert.deepStrictEqual([said, terminals], [[], []], 'cancelling the box opens nothing');
     });
 
     await check('an unsafe label never reaches the terminal: validateInput stops it in the box, and runAdd checks again', async () => {
         said.length = 0; terminals.length = 0;
-        inputAnswer = 'a;rm -rf x';
+        stub.inputAnswer = 'a;rm -rf x';
         await e.addAccount(() => {});
         assert.deepStrictEqual([said, terminals], [[], []], 'the box rejects it (the stub runs validateInput like VS Code)');
         await e.runAdd('a;rm -rf x', () => {});
@@ -411,7 +316,7 @@ const calls = () => (fs.existsSync(LOG) ? fs.readFileSync(LOG, 'utf8').trim().sp
             load().activate(ctx);
             provider.resolveWebviewView({ visible: true, onDidChangeVisibility: () => {}, onDidDispose: () => {},
                 webview: { ...fakeWebview, postMessage: async () => {}, onDidReceiveMessage: (f) => { onMsg = f; } } });
-            inputAnswer = 'viaclick'; terminals.length = 0; inputOpts.length = 0;
+            stub.inputAnswer = 'viaclick'; terminals.length = 0; inputOpts.length = 0;
             onMsg({ add: 1 });
             for (let i = 0; i < 40 && !terminals.length; i++) await new Promise((r) => setTimeout(r, 50));
             assert.strictEqual(inputOpts.length, 1, 'the click asks for a label');
@@ -423,7 +328,7 @@ const calls = () => (fs.existsSync(LOG) ? fs.readFileSync(LOG, 'utf8').trim().sp
     });
 
     await check('the enroll dialog says to paste the code if prompted, and for an expired seat warns that ccswitch asks before overwriting', async () => {
-        const detail = async (expired) => { saidOpts.length = 0; answer = undefined;
+        const detail = async (expired) => { saidOpts.length = 0; stub.answer = undefined;
             const info = vscode.window.showInformationMessage;
             vscode.window.showInformationMessage = async (m, o) => { saidOpts.push(o); };
             try { await e.switchSeat(expired ? 'personal' : 'spare2', () => {}); } finally { vscode.window.showInformationMessage = info; }
@@ -439,7 +344,7 @@ const calls = () => (fs.existsSync(LOG) ? fs.readFileSync(LOG, 'utf8').trim().sp
         fs.writeFileSync(path.join(HOME, 'version.out'), 'ccswitch 1.1.0\n');
         try {
             assert.strictEqual(await e.ccswitchHasAdd(), false);
-            answer = 'Open terminal'; terminals.length = 0; said.length = 0; saidOpts.length = 0;
+            stub.answer = 'Open terminal'; terminals.length = 0; said.length = 0; saidOpts.length = 0;
             const install = vscode.window.showWarningMessage;
             vscode.window.showWarningMessage = async (m, o, ...b) => { said.push(m); saidOpts.push(o); return 'Install'; };
             await e.switchSeat('spare2', () => {});
@@ -469,14 +374,14 @@ const calls = () => (fs.existsSync(LOG) ? fs.readFileSync(LOG, 'utf8').trim().sp
         try {
             usageReply(usageDoc({ work: 'ok' }));
             const x = load(); x.activate(ctx);
-            inputAnswer = 'fresh'; terminals.length = 0; fs.rmSync(LOG, { force: true }); said.length = 0;
+            stub.inputAnswer = 'fresh'; terminals.length = 0; fs.rmSync(LOG, { force: true }); said.length = 0;
             await x.addAccount(() => {});
-            closeTerminal({ name: 'something else' });
+            stub.closeTerminal({ name: 'something else' });
             await new Promise((r) => setTimeout(r, 100));
             assert.deepStrictEqual(calls().filter((c) => c.startsWith('usage')), [], 'an unrelated terminal closing refreshes nothing');
             seat('fresh', 'fresh@x.example', null);  // what `ccswitch add fresh` wrote
             terminals[0].exitStatus = { code: 0 };
-            closeTerminal(terminals[0]);
+            stub.closeTerminal(terminals[0]);
             await settle(1);
             assert.strictEqual(fetches(), 1, 'closing the Add account terminal runs the guarded fetch, then repaints');
             assert.strictEqual(saidSaved().length, 1, 'success is shown: ' + said.join(' | '));
@@ -484,13 +389,13 @@ const calls = () => (fs.existsSync(LOG) ? fs.readFileSync(LOG, 'utf8').trim().sp
             terminals.length = 0; said.length = 0;
             await x.addAccount(() => {});
             terminals[0].exitStatus = { code: 0 };
-            closeTerminal(terminals[0]);
+            stub.closeTerminal(terminals[0]);
             await settle(2);
             assert.deepStrictEqual(saidSaved(), [], 'nothing new was saved: no "Saved" toast');
             terminals.length = 0;
             await x.addAccount(() => {});
             terminals[0].exitStatus = undefined;  // the user closed it mid-login
-            closeTerminal(terminals[0]);
+            stub.closeTerminal(terminals[0]);
             await settle(3);
             assert.deepStrictEqual(saidSaved(), [], 'a manual close is not a success');
             // A fetch already in flight when the terminal closes: the close runs its own fetch after it, not merged.
@@ -498,7 +403,7 @@ const calls = () => (fs.existsSync(LOG) ? fs.readFileSync(LOG, 'utf8').trim().sp
             await x.addAccount(() => {});
             cmds['claudeUsage.refresh']();
             terminals[0].exitStatus = { code: 0 };
-            closeTerminal(terminals[0]);
+            stub.closeTerminal(terminals[0]);
             await settle(2);
             assert.strictEqual(fetches(), 2, 'the close fetch runs after the one in flight');
         } finally {
@@ -510,7 +415,7 @@ const calls = () => (fs.existsSync(LOG) ? fs.readFileSync(LOG, 'utf8').trim().sp
     });
 
     await check('saveSeat only saves the seat you are on, answering ccswitch\'s own prompt', async () => {
-        fs.rmSync(LOG, { force: true }); said.length = 0; answer = 'Overwrite';
+        fs.rmSync(LOG, { force: true }); said.length = 0; stub.answer = 'Overwrite';
         await e.saveSeat('personal', () => {});
         assert.deepStrictEqual(calls(), []);
         await e.saveSeat('work', () => {});
@@ -598,13 +503,6 @@ const calls = () => (fs.existsSync(LOG) ? fs.readFileSync(LOG, 'utf8').trim().sp
     });
 
     // --- the native panel (vscode/webview/panel.*) ---------------------------------------------------
-    const WV = path.join(__dirname, '..', 'vscode', 'webview');
-    function readWv(f) { return fs.readFileSync(path.join(WV, f), 'utf8'); }
-    function panel() { const ctx = { esc: e.esc }; require('vm').runInNewContext(readWv('panel.js'), ctx); return ctx; }
-    function ui(over = {}) { return { accountsOpen: true, automationOpen: false, openRow: null, ...over }; }
-    // The markup of one account row (the row line, not its details).
-    const rowOf = (html, label) => (html.match(new RegExp('<div class="row[^"]*" data-a="row" data-l="' + label + '"[\\s\\S]*?</div>')) || [''])[0];
-
     await check('B4 no hard-coded colour in the panel', () => {
         const src = readWv('panel.css') + readWv('panel.js') + e.webviewHtml(fakeWebview);
         assert.ok(!/#[0-9a-fA-F]{3,8}\b/.test(src), 'hex colour: ' + (src.match(/#[0-9a-fA-F]{3,8}\b/) || [])[0]);
@@ -892,8 +790,6 @@ const calls = () => (fs.existsSync(LOG) ? fs.readFileSync(LOG, 'utf8').trim().sp
     });
 
     // --- History view and pace (ccswitch's .usage-history.jsonl) -------------------------------------
-    const pt = (dt, p5, p7, r5 = now + 3600, r7 = now + 3 * 86400) => ({ t: now - dt, p5, p7, r5, r7 });
-
     await check('readHistory: last 30 days, sorted; bad, future and old lines skipped; no file -> []', () => {
         const f = path.join(ACC, 'personal', '.usage-history.jsonl');
         try {
@@ -1023,12 +919,6 @@ const calls = () => (fs.existsSync(LOG) ? fs.readFileSync(LOG, 'utf8').trim().sp
         for (const pts of cases) assert.strictEqual(e.forecast(pts, 'p5', 'r5', now), null, JSON.stringify(pts));
         assert.ok(e.forecast(ok, 'p5', 'r5', now).full, 'a good pair still forecasts');
     });
-
-    const withHist = (h002, more = {}) => {
-        const a = four().map((x) => ({ ...x, history: x.label === '002' ? h002 : (more[x.label] || []) }));
-        return e.panelData(a, capOf(a, '002', ['003']), { ...opts, historyOn: true });
-    };
-    const rising = [pt(2400, 10, 50, now + 4 * 3600), pt(1200, 20, 51, now + 4 * 3600), pt(0, 30, 52, now + 4 * 3600)];
 
     await check('panelData: history blocks, active first; 24 h session and 7 d weekly series; pace lines', () => {
         const d = withHist([pt(2 * 86400, 70, 40, now - 86400), ...rising], { '004': [pt(60, 46, 13)] });
@@ -1414,7 +1304,7 @@ const calls = () => (fs.existsSync(LOG) ? fs.readFileSync(LOG, 'utf8').trim().sp
     // --- G7: turning auto-switch on asks once ----------------------------------------------------------
     await check('G7 turning auto-switch on asks once, in a modal', async () => {
         said.length = saidOpts.length = updates.length = 0;
-        answer = undefined;
+        stub.answer = undefined;
         const st = memento(false);
         assert.strictEqual(await e.setAutoSwitch(true, st), false);
         assert.strictEqual(st.get(e.CONSENT), undefined, 'no consent recorded on No');
@@ -1422,11 +1312,11 @@ const calls = () => (fs.existsSync(LOG) ? fs.readFileSync(LOG, 'utf8').trim().sp
         assert.strictEqual(said.length, 1);
         assert.strictEqual(saidOpts[0].modal, true);
         assert.strictEqual(said[0], 'Turn on auto-switch?');
-        answer = 'Turn on';
+        stub.answer = 'Turn on';
         assert.strictEqual(await e.setAutoSwitch(true, st), true);
         assert.deepStrictEqual(updates, [['autoSwitch', true, 1]]);
         assert.strictEqual(st.get(e.CONSENT), true, 'the confirmation is recorded on this machine');
-        answer = undefined;
+        stub.answer = undefined;
     });
 
     await check('G7 turning auto-switch off needs no dialog', async () => {
@@ -1457,7 +1347,7 @@ const calls = () => (fs.existsSync(LOG) ? fs.readFileSync(LOG, 'utf8').trim().sp
     // --- auto-switch: the path that moves the live login (work is active, fresh, 5h at 100%) ---------------
     const STAMP = path.join(ACC, '.autoswitch.json'), LOCK = path.join(ACC, '.autoswitch.lock');
     const SWITCH_RC = path.join(HOME, 'switch.rc');
-    const autoReset = () => { for (const f of [STAMP, LOCK, LOG, SWITCH_RC]) fs.rmSync(f, { recursive: true, force: true }); said.length = updates.length = 0; answer = undefined; };
+    const autoReset = () => { for (const f of [STAMP, LOCK, LOG, SWITCH_RC]) fs.rmSync(f, { recursive: true, force: true }); said.length = updates.length = 0; stub.answer = undefined; };
     // One VS Code window whose login check has run: a fresh instance plus one `usage --json` with this health.
     const win = async (health = 'known') => {
         const w = load();
@@ -1595,7 +1485,7 @@ const calls = () => (fs.existsSync(LOG) ? fs.readFileSync(LOG, 'utf8').trim().sp
             assert.deepStrictEqual(updates, [['autoSwitch', false, 1]]);
             assert.strictEqual(r1.skip, 'no consent'); assert.strictEqual(r2.skip, 'no consent');
             assert.deepStrictEqual(calls(), []);
-            autoReset(); answer = 'Turn on';
+            autoReset(); stub.answer = 'Turn on';
             await tryAuto(w, st);
             assert.strictEqual(st.get(e.CONSENT), true);
             assert.deepStrictEqual(calls(), ['personal'], 'confirmed: it switches');
@@ -1794,7 +1684,7 @@ const calls = () => (fs.existsSync(LOG) ? fs.readFileSync(LOG, 'utf8').trim().sp
             assert.deepStrictEqual(busyOf(), [true, false]);
             assert.strictEqual(fetches() - n0, 1, 'the command ran one real fetch');
             // #5: a seat switch to an expired seat (it syncs tokens first) while a fetch runs joins that fetch
-            x.relogin.add('personal'); answer = 'Open terminal'; posted.length = 0;
+            x.relogin.add('personal'); stub.answer = 'Open terminal'; posted.length = 0;
             const n1 = fetches();
             onMsg({ refresh: 1 });
             await x.switchSeat('personal', () => {});
@@ -1903,8 +1793,4 @@ const calls = () => (fs.existsSync(LOG) ? fs.readFileSync(LOG, 'utf8').trim().sp
         sent.length = 0; onClick({ target: { closest: () => ({ dataset: { a: 'add' } }) } });
         assert.deepStrictEqual(JSON.parse(JSON.stringify(sent)), [{ add: 1 }]);
     });
-
-    console.log('----------------------------------------');
-    console.log(`Passed: ${passed}  Failed: ${failed}`);
-    process.exit(failed ? 1 : 0);
-})();
+});
