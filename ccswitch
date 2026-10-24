@@ -55,8 +55,9 @@ fi
 # an early failure would otherwise die inside its own cleanup handler.
 HAVE_REFRESH_LOCK=0
 # Set by write_account_snapshot while it builds a new snapshot. Declared here
-# for the same reason as HAVE_REFRESH_LOCK: cleanup_tmpdir reads it.
+# for the same reason as HAVE_REFRESH_LOCK: cleanup_tmpdir reads them.
 SNAPSHOT_STAGING_DIR=""
+SNAPSHOT_LABEL_DIR=""
 
 cleanup_tmpdir() {
   # The lock release is inlined rather than calling release_refresh_lock: this
@@ -64,10 +65,13 @@ cleanup_tmpdir() {
   # below it, so an early exit would reach a name that does not exist yet. The
   # flag is 0 until the lock is actually taken, and && short-circuits, so
   # $REFRESH_LOCK_DIR is never expanded before it is defined either.
-  [[ "$HAVE_REFRESH_LOCK" == "1" ]] && rm -rf "$REFRESH_LOCK_DIR"
-  # Only the staging dir: once the swap has started, the old snapshot sits in
-  # "$SNAPSHOT_STAGING_DIR.old", and deleting that here could lose the account.
+  # A signal between the two renames of the swap leaves the label missing and
+  # the old snapshot in "$SNAPSHOT_STAGING_DIR.old": move it back first. Then
+  # remove only the staging dir; .old is never deleted here.
+  [[ -n "$SNAPSHOT_STAGING_DIR" ]] && [[ ! -d "$SNAPSHOT_LABEL_DIR" ]] && [[ -d "$SNAPSHOT_STAGING_DIR.old" ]] \
+    && mv "$SNAPSHOT_STAGING_DIR.old" "$SNAPSHOT_LABEL_DIR"
   [[ -n "$SNAPSHOT_STAGING_DIR" ]] && rm -rf "$SNAPSHOT_STAGING_DIR"
+  [[ "$HAVE_REFRESH_LOCK" == "1" ]] && rm -rf "$REFRESH_LOCK_DIR"
   rm -rf "$CCSWITCH_TMPDIR"
 }
 trap 'cleanup_tmpdir' EXIT
@@ -536,9 +540,11 @@ confirm_new_identity() {
   fi
   [[ -n "$where" ]] || return 0
   echo "Warning: this account is $where." >&2
+  # Exit 1, not 0: the sidebar's Add account terminal runs `ccswitch add ... && exit`,
+  # so a non-zero exit keeps it open and this line stays readable after the login.
   if ! confirm "Save a second copy as '$label'?"; then
     echo "Aborted; nothing saved."
-    exit 0
+    exit 1
   fi
 }
 
@@ -547,8 +553,10 @@ confirm_new_identity() {
 # $ACCOUNTS_DIR/<label>/. Shared by `save` (live files) and `add` (temp login
 # dir). The caller has validated the label and settled any overwrite prompt.
 #
-# The pair is built in a staging dir beside the label (same filesystem) and
-# swapped in by rename, under the refresh lock. Three failures this closes:
+# The refresh lock is taken first; then the pair is built in a staging dir
+# beside the label (same filesystem) and swapped in by two renames (label ->
+# staging.old, staging -> label). A signal between them runs the trap, which
+# moves staging.old back to the label. Three failures this closes:
 #  - a write that dies half-way (cp done, identity not) used to leave the NEW
 #    credentials next to the OLD identity file: a confidently wrong pair. Now a
 #    failure leaves the old pair untouched.
@@ -563,11 +571,21 @@ confirm_new_identity() {
 write_account_snapshot() {
   local label="$1" src_claude_json="$2" src_credentials="$3"
   local label_dir="$ACCOUNTS_DIR/$label" staging
+  # Lock before the source files are copied: a token rotated during the wait
+  # is then read after it, never swapped in over a newer one.
+  if ! acquire_refresh_lock 0; then
+    echo "Waiting for another ccswitch to finish refreshing..." >&2
+    if ! acquire_refresh_lock "$SNAPSHOT_LOCK_WAIT_SECONDS"; then
+      echo "Error: another ccswitch is refreshing tokens; account '$label' not saved. Run the command again when it finishes (for add, log in again)." >&2
+      exit 1
+    fi
+  fi
   staging="$(mktemp -d "$ACCOUNTS_DIR/.staging.XXXXXX")" || {
     echo "Error: failed to create a staging directory in $ACCOUNTS_DIR; account '$label' not saved." >&2
     exit 1
   }
   SNAPSHOT_STAGING_DIR="$staging"
+  SNAPSHOT_LABEL_DIR="$label_dir"
   chmod 700 "$staging"
 
   if ! secure_copy "$src_credentials" "$staging/credentials.json"; then
@@ -576,11 +594,6 @@ write_account_snapshot() {
   fi
   if ! jq_write "$staging/oauthAccount.json" '.oauthAccount // {}' "$src_claude_json"; then
     echo "Error: failed to write $label_dir/oauthAccount.json; account '$label' not saved." >&2
-    exit 1
-  fi
-
-  if ! acquire_refresh_lock "$SNAPSHOT_LOCK_WAIT_SECONDS"; then
-    echo "Error: another ccswitch is refreshing tokens; account '$label' not saved. Re-run when it finishes." >&2
     exit 1
   fi
 

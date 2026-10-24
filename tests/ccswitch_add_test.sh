@@ -166,14 +166,15 @@ else fail "kept account (exit=$EXIT_CODE): $OUT"; fi
 
 # --- re-add over a label, duplicates, the refresh lock (review of #24) ---
 pair_sum() { cat "$ACC/$1/credentials.json" "$ACC/$1/oauthAccount.json" | sha256sum; }
-no_staging_left() { [[ -z "$(find "$ACC" -maxdepth 1 -name '.*' -type d ! -name '.refresh-lock' -print -quit)" ]]; }
+no_staging_left() { [[ -z "$(find "$ACC" -maxdepth 1 -name '.*' -type d ! -name '.refresh-lock' | head -n1)" ]]; }
 uuid_of() { jq -r .accountUuid "$ACC/$1/oauthAccount.json"; }
 rt_of() { jq -r .claudeAiOauth.refreshToken "$ACC/$1/credentials.json"; }
 
 # 14. the account just logged in is already saved under another label: warn, name it, default no
 WORK_UUID="$(uuid_of work)"
 FAKE_UUID="$WORK_UUID" run_add ok "" add twin
-if [[ $EXIT_CODE -eq 0 ]] && grep -q "already saved as 'work'" <<<"$OUT" && grep -q "Aborted" <<<"$OUT" \
+# Non-zero, so the sidebar's Add account terminal (`&& exit`) stays open on "Aborted; nothing saved."
+if [[ $EXIT_CODE -eq 1 ]] && grep -q "already saved as 'work'" <<<"$OUT" && grep -q "Aborted" <<<"$OUT" \
   && [[ ! -e "$ACC/twin" ]] && no_temp_left && no_staging_left; then
   pass "a login already saved under another label warns, names it, and saves nothing by default"
 else fail "duplicate label (exit=$EXIT_CODE): $OUT"; fi
@@ -185,7 +186,7 @@ rm -rf "$ACC/twin"
 
 # 15. the account just logged in is the live account (not saved anywhere): warn, default no
 FAKE_UUID=uuid-live run_add ok "" add livecopy
-if [[ $EXIT_CODE -eq 0 ]] && grep -q "logged in to now" <<<"$OUT" && grep -q "Aborted" <<<"$OUT" \
+if [[ $EXIT_CODE -eq 1 ]] && grep -q "logged in to now" <<<"$OUT" && grep -q "Aborted" <<<"$OUT" \
   && [[ ! -e "$ACC/livecopy" ]] && no_temp_left && live_unchanged; then
   pass "a login of the live account warns and saves nothing by default"
 else fail "duplicate live (exit=$EXIT_CODE): $OUT"; fi
@@ -256,11 +257,35 @@ mkdir "$ACC/.refresh-lock" && echo "$HOLDER" >"$ACC/.refresh-lock/pid"
 OLD_SUM="$(pair_sum work)"
 CCSWITCH_SNAPSHOT_LOCK_WAIT_SECONDS=1 FAKE_UUID=uuid-busy run_add ok "y" add work
 kill "$HOLDER" 2>/dev/null; wait "$HOLDER" 2>/dev/null
-if [[ $EXIT_CODE -ne 0 ]] && grep -q "another ccswitch" <<<"$OUT" && [[ "$(pair_sum work)" == "$OLD_SUM" ]] \
+if [[ $EXIT_CODE -ne 0 ]] && grep -q "another ccswitch" <<<"$OUT" && grep -q "log in again" <<<"$OUT" \
+  && grep -q "Waiting for another ccswitch to finish refreshing" <<<"$OUT" && [[ "$(pair_sum work)" == "$OLD_SUM" ]] \
   && [[ -d "$ACC/.refresh-lock" ]] && no_temp_left && no_staging_left; then
   pass "a busy refresh lock: add fails with a clear message, the old pair intact, the other run's lock kept"
 else fail "lock busy (exit=$EXIT_CODE): $OUT"; fi
 rm -rf "$ACC/.refresh-lock"
+
+# 21. a signal between the two renames (old snapshot moved aside, new one not yet in):
+# the trap puts the old snapshot back under the label. An mv shim sends INT to
+# ccswitch right after the first rename.
+MVBIN="$ROOT/mvbin"
+mkdir -p "$MVBIN"
+REAL_MV="$(command -v mv)"
+cat >"$MVBIN/mv" <<FAKE
+#!/usr/bin/env bash
+"$REAL_MV" "\$@"; rc=\$?
+[[ "\$1" == "$ACC/work" ]] && kill -INT "\$PPID"
+exit "\$rc"
+FAKE
+chmod +x "$MVBIN/mv"
+OLD_SUM="$(pair_sum work)"
+OLD_LS="$(ls -A "$ACC/work")"
+OUT="$(HOME="$HOME_DIR" PATH="$MVBIN:$BIN:$PATH" TMPDIR="$SCRATCH" FAKE_MODE=ok FAKE_UUID=uuid-mid \
+  FAKE_ARGS="$ROOT/args" FAKE_DIR="$ROOT/dir" bash "$TARGET" add work <<<"y" 2>&1)"
+EXIT_CODE=$?
+if [[ $EXIT_CODE -eq 130 ]] && [[ "$(pair_sum work 2>/dev/null)" == "$OLD_SUM" ]] && [[ "$(ls -A "$ACC/work" 2>/dev/null)" == "$OLD_LS" ]] \
+  && [[ ! -e "$ACC/.refresh-lock" ]] && no_temp_left && no_staging_left; then
+  pass "a signal between the two renames restores the old snapshot under its label"
+else fail "mid-swap signal (exit=$EXIT_CODE): $(ls -A "$ACC") $OUT"; fi
 
 # 13. Ctrl-C during the login deletes the temp dir and saves nothing.
 # A bare `&` job ignores SIGINT, so start in a new session with the default
