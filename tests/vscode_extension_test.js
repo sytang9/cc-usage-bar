@@ -455,28 +455,56 @@ const calls = () => (fs.existsSync(LOG) ? fs.readFileSync(LOG, 'utf8').trim().sp
         } finally { fs.rmSync(path.join(HOME, 'version.out'), { force: true }); }
     });
 
-    await check('the sidebar refreshes when the Add account terminal closes (and not for other terminals)', async () => {
-        const ctx = { subscriptions: [], globalStorageUri: { fsPath: path.join(HOME, 'gs') }, globalState: memento(false) };
+    await check('Add account terminal: success says so and shows the row at once (a fetch chained after one in flight); a cancel or a manual close stays quiet (review finding)', async () => {
+        const cmds = {}, ctx = { subscriptions: [], globalStorageUri: { fsPath: path.join(HOME, 'gs') }, globalState: memento(false) };
         const keep = { win: { ...vscode.window }, commands: vscode.commands, ws: vscode.workspace.onDidChangeConfiguration };
         Object.assign(vscode.window, { createStatusBarItem: () => ({ show() {}, dispose() {} }), registerWebviewViewProvider: () => ({ dispose() {} }) });
         vscode.StatusBarAlignment = { Right: 2 };
-        vscode.commands = { registerCommand: () => ({ dispose() {} }), executeCommand: async () => {} };
+        vscode.commands = { registerCommand: (id, f) => { cmds[id] = f; return { dispose() {} }; }, executeCommand: async () => {} };
         vscode.extensions = { getExtension: () => undefined };
         vscode.workspace.onDidChangeConfiguration = () => ({ dispose() {} });
+        const fetches = () => calls().filter((c) => c.startsWith('usage --json')).length;
+        const settle = async (n) => { for (let i = 0; i < 60 && fetches() < n; i++) await new Promise((r) => setTimeout(r, 50)); await new Promise((r) => setTimeout(r, 100)); };
+        const saidSaved = () => said.filter((m) => /^Saved account fresh\./.test(m));
         try {
             usageReply(usageDoc({ work: 'ok' }));
             const x = load(); x.activate(ctx);
-            inputAnswer = 'fresh'; terminals.length = 0; fs.rmSync(LOG, { force: true });
+            inputAnswer = 'fresh'; terminals.length = 0; fs.rmSync(LOG, { force: true }); said.length = 0;
             await x.addAccount(() => {});
             closeTerminal({ name: 'something else' });
             await new Promise((r) => setTimeout(r, 100));
-            assert.deepStrictEqual(calls().filter((c) => c === 'usage --json'), [], 'an unrelated terminal closing refreshes nothing');
+            assert.deepStrictEqual(calls().filter((c) => c.startsWith('usage')), [], 'an unrelated terminal closing refreshes nothing');
+            seat('fresh', 'fresh@x.example', null);  // what `ccswitch add fresh` wrote
+            terminals[0].exitStatus = { code: 0 };
             closeTerminal(terminals[0]);
-            for (let i = 0; i < 40 && !calls().includes('usage --json'); i++) await new Promise((r) => setTimeout(r, 50));
-            assert.ok(calls().includes('usage --json'), 'closing the Add account terminal runs the guarded fetch, then repaints');
+            await settle(1);
+            assert.strictEqual(fetches(), 1, 'closing the Add account terminal runs the guarded fetch, then repaints');
+            assert.strictEqual(saidSaved().length, 1, 'success is shown: ' + said.join(' | '));
+            // Again for the same label, but ccswitch saved nothing (the user answered no): exit 0, no toast.
+            terminals.length = 0; said.length = 0;
+            await x.addAccount(() => {});
+            terminals[0].exitStatus = { code: 0 };
+            closeTerminal(terminals[0]);
+            await settle(2);
+            assert.deepStrictEqual(saidSaved(), [], 'nothing new was saved: no "Saved" toast');
+            terminals.length = 0;
+            await x.addAccount(() => {});
+            terminals[0].exitStatus = undefined;  // the user closed it mid-login
+            closeTerminal(terminals[0]);
+            await settle(3);
+            assert.deepStrictEqual(saidSaved(), [], 'a manual close is not a success');
+            // A fetch already in flight when the terminal closes: the close runs its own fetch after it, not merged.
+            terminals.length = 0; fs.rmSync(LOG, { force: true });
+            await x.addAccount(() => {});
+            cmds['claudeUsage.refresh']();
+            terminals[0].exitStatus = { code: 0 };
+            closeTerminal(terminals[0]);
+            await settle(2);
+            assert.strictEqual(fetches(), 2, 'the close fetch runs after the one in flight');
         } finally {
             Object.assign(vscode.window, keep.win); vscode.commands = keep.commands; vscode.workspace.onDidChangeConfiguration = keep.ws;
             usageReply('');
+            fs.rmSync(path.join(ACC, 'fresh'), { recursive: true, force: true });
             for (const d of ctx.subscriptions) if (d && d.dispose) d.dispose();
         }
     });
@@ -1681,7 +1709,7 @@ const calls = () => (fs.existsSync(LOG) ? fs.readFileSync(LOG, 'utf8').trim().sp
         vscode.workspace.onDidChangeConfiguration = () => ({ dispose() {} });
         global.setTimeout = (f, ms, ...a) => (ms === 30000 || ms === 600000 ? (timers.push([ms, f]), 0) : keep.st(f, ms, ...a));  // capture the app's timers, keep the rest real
         global.setInterval = (f, ms) => { timers.push([ms, f]); return 0; };
-        const fetches = () => (fs.existsSync(LOG) ? fs.readFileSync(LOG, 'utf8') : '').split('\n').filter((l) => l === 'usage --json').length;
+        const fetches = () => (fs.existsSync(LOG) ? fs.readFileSync(LOG, 'utf8') : '').split('\n').filter((l) => l.startsWith('usage --json')).length;
         const busyOf = () => posted.filter((m) => m.kind === 'busy').map((m) => m.on);
         const idle = async () => { for (let i = 0; i < 200 && busyOf().length % 2; i++) await new Promise((r) => keep.st(r, 25)); };
         try {
@@ -1732,7 +1760,7 @@ const calls = () => (fs.existsSync(LOG) ? fs.readFileSync(LOG, 'utf8').trim().sp
         vscode.commands = { registerCommand: (id, f) => { cmds[id] = f; return { dispose() {} }; }, executeCommand: async () => {} };
         vscode.extensions = { getExtension: () => undefined };
         vscode.workspace.onDidChangeConfiguration = () => ({ dispose() {} });
-        const fetches = () => (fs.existsSync(LOG) ? fs.readFileSync(LOG, 'utf8') : '').split('\n').filter((l) => l === 'usage --json').length;
+        const fetches = () => (fs.existsSync(LOG) ? fs.readFileSync(LOG, 'utf8') : '').split('\n').filter((l) => l.startsWith('usage --json')).length;
         const busyOf = () => posted.filter((m) => m.kind === 'busy').map((m) => m.on);
         const idle = async () => { for (let i = 0; i < 200 && busyOf().length % 2; i++) await new Promise((r) => setTimeout(r, 25)); };
         try {
@@ -1770,6 +1798,47 @@ const calls = () => (fs.existsSync(LOG) ? fs.readFileSync(LOG, 'utf8').trim().sp
             Object.assign(vscode.window, keep.win);
             vscode.commands = keep.commands;
             vscode.workspace.onDidChangeConfiguration = keep.ws;
+            usageReply('');
+            for (const d of ctx.subscriptions) if (d && d.dispose) d.dispose();
+        }
+    });
+
+    await check('reload: a click or the Refresh command runs `usage --json --refresh` at most once per 60 s; timers and other fetches never bypass the cache (review finding)', async () => {
+        const posted = [], timers = [], cmds = {}, ctx = { subscriptions: [], globalStorageUri: { fsPath: path.join(HOME, 'gs') }, globalState: memento(false) };
+        let provider, onMsg;
+        const keep = { win: { ...vscode.window }, commands: vscode.commands, ws: vscode.workspace.onDidChangeConfiguration, st: global.setTimeout, si: global.setInterval, now: Date.now };
+        Object.assign(vscode.window, { createStatusBarItem: () => ({ show() {}, dispose() {} }), registerWebviewViewProvider: (id, pr) => { provider = pr; return { dispose() {} }; } });
+        vscode.StatusBarAlignment = { Right: 2 };
+        vscode.commands = { registerCommand: (id, f) => { cmds[id] = f; return { dispose() {} }; }, executeCommand: async () => {} };
+        vscode.extensions = { getExtension: () => undefined };
+        vscode.workspace.onDidChangeConfiguration = () => ({ dispose() {} });
+        global.setTimeout = (f, ms, ...a) => (ms === 30000 || ms === 600000 ? (timers.push([ms, f]), 0) : keep.st(f, ms, ...a));
+        global.setInterval = (f, ms) => { timers.push([ms, f]); return 0; };
+        const busyOf = () => posted.filter((m) => m.kind === 'busy').map((m) => m.on);
+        const idle = async () => { for (let i = 0; i < 200 && busyOf().length % 2; i++) await new Promise((r) => keep.st(r, 25)); };
+        const lastFetch = () => calls().filter((c) => c.startsWith('usage')).pop();
+        try {
+            usageReply(usageDoc({ work: 'ok' }));
+            load().activate(ctx);
+            global.setTimeout = keep.st; global.setInterval = keep.si;
+            provider.resolveWebviewView({ visible: true, onDidChangeVisibility: () => {}, onDidDispose: () => {},
+                webview: { ...fakeWebview, postMessage: async (m) => { posted.push(m); }, onDidReceiveMessage: (f) => { onMsg = f; } } });
+            const timed = timers.filter(([ms]) => ms === 600000).map(([, f]) => f)[0];
+            onMsg({ refresh: 1 }); await idle();
+            assert.strictEqual(lastFetch(), 'usage --json --refresh', 'a click asks ccswitch for live numbers');
+            onMsg({ refresh: 1 }); await idle();
+            assert.strictEqual(lastFetch(), 'usage --json', 'a second click within 60 s reads the cache');
+            cmds['claudeUsage.refresh'](); await idle();
+            assert.strictEqual(lastFetch(), 'usage --json', 'the command shares the same 60 s limit');
+            Date.now = () => keep.now() + 61 * 1000;
+            timed(); await idle();
+            assert.strictEqual(lastFetch(), 'usage --json', 'the 10-min timer never bypasses the cache');
+            cmds['claudeUsage.refresh'](); await idle();
+            assert.strictEqual(lastFetch(), 'usage --json --refresh', 'after 60 s a manual refresh is live again');
+        } finally {
+            Date.now = keep.now;
+            global.setTimeout = keep.st; global.setInterval = keep.si;
+            Object.assign(vscode.window, keep.win); vscode.commands = keep.commands; vscode.workspace.onDidChangeConfiguration = keep.ws;
             usageReply('');
             for (const d of ctx.subscriptions) if (d && d.dispose) d.dispose();
         }

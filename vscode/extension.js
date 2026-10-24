@@ -359,7 +359,7 @@ async function switchSeat(label, onDone) {
     if (!isLabel(label)) return;  // ccswitch's own label rule - never anything else
     if (!fs.existsSync(CCSWITCH)) return installCcswitch();
     if (label === activeLabel()) { vscode.window.showInformationMessage(`You are already on ${label}.`); return; }
-    if (relogin.has(label) || !saved(label)) return enroll(label, relogin.has(label), onDone);
+    if (relogin.has(label) || !saved(label)) return enroll(label, relogin.has(label));
 
     const ok = await vscode.window.showWarningMessage(`Switch Claude Code to ${label}?`,
         { modal: true, detail: 'Instant, using your saved login (ccswitch). New Claude Code sessions use it; restart open Claude Code tabs to move them over.' },
@@ -388,30 +388,34 @@ async function ccswitchHasAdd() {
     return r.ok && !!m && (+m[1] > 1 || (+m[1] === 1 && +m[2] >= 2));
 }
 
-// Add terminal -> the refresh to run when it closes (the accounts-dir watcher can fire before ccswitch has written the login).
+// Add terminal -> { label, before }: before = the label folder's inode when the terminal opened (null: none). ccswitch
+// swaps a new snapshot in as a new folder, so a different inode after a clean exit means it saved (a "no" at its
+// prompt also exits 0, and a token refresh rewrites files inside the folder, not the folder).
 const addTerminals = new Map();
+const snapshotId = (label) => { try { return fs.statSync(path.join(ACCOUNTS, label)).ino; } catch { return null; } };
 // Log in to a label and save it with `ccswitch add <label>`, in a terminal the user can see: it prints a URL, the user
 // logs in and pastes the code back there. The live login is never touched. `&& exit` closes the terminal after a
-// successful save, so the close hook refreshes (and clears a stale "Re-login needed"); on failure it stays open to read the error.
-async function runAdd(label, onDone) {
+// successful run, so the close hook says "Saved", shows the row and fetches (and clears a stale "Re-login needed");
+// on failure it stays open to read the error.
+async function runAdd(label) {
     if (!isLabel(label)) return;
     if (!fs.existsSync(CCSWITCH)) return installCcswitch();
     if (!(await ccswitchHasAdd())) return installCcswitch('Adding an account needs ccswitch 1.2.0 or newer (`ccswitch add`). The installed one is older, and this installer updates it.');
     const t = vscode.window.createTerminal(`Add account: ${label}`);
-    addTerminals.set(t, onDone);
+    addTerminals.set(t, { label, before: snapshotId(label) });
     t.show();
     t.sendText(`"${CCSWITCH}" add ${label} && exit`);
 }
 
 // The "+ Add account" row: ask for a label, then runAdd.
-async function addAccount(onDone) {
+async function addAccount() {
     const label = await vscode.window.showInputBox({ title: 'Add account', prompt: 'A short name for the account (letters, digits, _ and -)',
         placeHolder: 'work', validateInput: labelProblem });
-    if (label) return runAdd(label.trim(), onDone);
+    if (label) return runAdd(label.trim());
 }
 
 // One-time enrolment of a seat ccswitch can't switch to yet (not saved, or its login expired): `ccswitch add`.
-async function enroll(label, expired, onDone) {
+async function enroll(label, expired) {
     const ok = await vscode.window.showInformationMessage(
         expired ? `The saved login for ${label} has expired (ccswitch: re-login).` : `${label} isn't saved in ccswitch yet.`,
         { modal: true, detail: `Log in to ${label} once: a terminal opens and runs ccswitch add ${label}. Open the URL it prints, sign in as ${label} `
@@ -419,7 +423,7 @@ async function enroll(label, expired, onDone) {
             + (expired ? `ccswitch asks before it overwrites the saved login for ${label}: answer y. ` : '') + `Your current Claude Code login is not touched. After that, switching to ${label} is instant.` },
         'Open terminal');
     if (ok !== 'Open terminal') return;
-    await runAdd(label, onDone);
+    await runAdd(label);
 }
 
 // cc-usage-bar (sytang9) provides ccswitch; run its own installer where the user can see and answer it.
@@ -463,16 +467,21 @@ function mergeLogins(prev, doc, isSaved) {
 
 // The one guarded fetch: every `ccswitch usage --json` run goes through here, so two never overlap. A caller that
 // arrives while one runs gets that run's promise. onBusy (set by activate) tells the panel to spin; it never rejects.
-let inflight = null, onBusy = () => {};
-function fetchLogins() {
+// A manual fetch (the reload button, the Refresh command) adds --refresh, past ccswitch's 10-min usage cache, at most
+// once per MANUAL_LIVE_MS; ccswitch still keeps its 429 backoff and its refresh lock. Timers always read the cache.
+const MANUAL_LIVE_MS = 60 * 1000;
+let inflight = null, onBusy = () => {}, lastLive = -Infinity;
+function fetchLogins(manual = false) {
     if (inflight) return inflight;
+    const live = manual === true && Date.now() - lastLive >= MANUAL_LIVE_MS;
+    if (live) lastLive = Date.now();
     onBusy(true);
-    return (inflight = checkLogins().catch(() => {}).finally(() => { inflight = null; onBusy(false); }));
+    return (inflight = checkLogins(live).catch(() => {}).finally(() => { inflight = null; onBusy(false); }));
 }
 
-async function checkLogins() {
+async function checkLogins(live = false) {
     if (!fs.existsSync(CCSWITCH)) return;
-    const r = await run(CCSWITCH, ['usage', '--json']);
+    const r = await run(CCSWITCH, ['usage', '--json', ...(live ? ['--refresh'] : [])]);
     const doc = r.ok ? parseUsageJson(r.out) : null;  // old ccswitch (no --json) or stray output: trust nothing
     const next = mergeLogins(relogin, doc, saved);
     relogin.clear();  // same Set object, so saveSeat's relogin.delete keeps working
@@ -636,7 +645,21 @@ function activate(context) {
     // The fetch (timed, from the button or the command). The panel spins from start to end; a request while one runs is dropped.
     const post = (m) => view && view.webview.postMessage(m);
     onBusy = (on) => post({ kind: 'busy', on });
-    const health = () => { if (!inflight) fetchLogins().then(poll); };
+    const health = (manual) => { if (!inflight) fetchLogins(manual === true).then(poll); };
+    const manualHealth = () => health(true);
+    // An Add account terminal closed: say so when ccswitch saved a new snapshot, show the row now, then fetch its
+    // numbers (after a fetch already in flight, which started before the save and would not see it).
+    const addClosed = (t) => {
+        const add = addTerminals.get(t);
+        if (!add) return;
+        addTerminals.delete(t);
+        const id = snapshotId(add.label);
+        if (t.exitStatus && t.exitStatus.code === 0 && id !== null && id !== add.before) {
+            vscode.window.showInformationMessage(`Saved account ${add.label}. It is in the Accounts list now.`);
+        }
+        poll();
+        (inflight || Promise.resolve()).then(() => fetchLogins()).then(poll);
+    };
 
     context.subscriptions.push(status,
         vscode.commands.registerCommand('claudeUsage.toggleAutoSwitch', toggleAuto),
@@ -644,8 +667,8 @@ function activate(context) {
             if (e.affectsConfiguration('claudeUsage.usageFile')) { fs.unwatchFile(watched); watched = usageFile() || ACCOUNTS; fs.watchFile(watched, { interval: 5000 }, poll); }
             if (e.affectsConfiguration('claudeUsage')) poll();
         }),
-        vscode.commands.registerCommand('claudeUsage.refresh', health),
-        vscode.window.onDidCloseTerminal((t) => { if (addTerminals.has(t)) { addTerminals.delete(t); health(); } }),
+        vscode.commands.registerCommand('claudeUsage.refresh', manualHealth),
+        vscode.window.onDidCloseTerminal(addClosed),
         vscode.window.registerWebviewViewProvider('claudeUsage.view', {
             resolveWebviewView(v) {
                 view = v;
@@ -654,9 +677,9 @@ function activate(context) {
                 v.webview.onDidReceiveMessage((m) => {
                     if (!m) return;
                     if (m === 'ready') { push(); if (inflight) post({ kind: 'busy', on: true }); }
-                    else if (m.refresh) health();
+                    else if (m.refresh) manualHealth();
                     else if (m.seat) switchSeat(m.seat, poll);
-                    else if (m.add) addAccount(health);
+                    else if (m.add) addAccount();
                     else if (m.save) saveSeat(m.save, poll);
                     else if (m.del) deleteSeat(m.del, poll);
                     else if (m.toggleAuto) toggleAuto();
