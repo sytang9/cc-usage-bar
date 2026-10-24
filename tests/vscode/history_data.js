@@ -1,7 +1,7 @@
 // VS Code sidebar tests: reading ccswitch's .usage-history.jsonl, when history is read, and the forecast.
 'use strict';
 const {
-    assert, fs, path, HOME, ACC, now, check, run, cfg, vscode, fakeWebview, load, e, memento, pt, rising,
+    assert, fs, path, HOME, ACC, now, check, run, cfg, vscode, fakeWebview, load, e, memento, pt,
 } = require('./harness');
 
 run(async () => {

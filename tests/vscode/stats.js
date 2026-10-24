@@ -1,7 +1,7 @@
 // VS Code sidebar tests: the Stats view (statsFeed and the Stats tab render).
 'use strict';
 const {
-    assert, fs, path, now, check, run, file, e, pdFour, readWv, panel, ui, withHist, rising,
+    assert, fs, now, check, run, file, e, pdFour, readWv, panel, ui, withHist, rising,
 } = require('./harness');
 
 run(async () => {

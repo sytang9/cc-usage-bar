@@ -1,8 +1,8 @@
 // VS Code sidebar tests: the webview page (esc, CSP, codicons), reset display, and the native panel render.
 'use strict';
 const {
-    assert, fs, path, ACC, now, check, run, vscode, fakeWebview, file, e, acct, capOf, four, opts, pdFour, readWv,
-    panel, ui, rowOf,
+    assert, fs, path, ACC, now, check, run, fakeWebview, file, e, acct, capOf, four, opts, pdFour, readWv, panel,
+    ui, rowOf,
 } = require('./harness');
 
 run(async () => {

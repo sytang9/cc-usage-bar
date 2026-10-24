@@ -1,7 +1,7 @@
 // VS Code sidebar tests: the reload button, the Refresh command and the refresh rate limit.
 'use strict';
 const {
-    assert, fs, path, HOME, LOG, now, check, run, usageReply, usageDoc, stub, vscode, fakeWebview, load, e, memento,
+    assert, fs, path, HOME, LOG, check, run, usageReply, usageDoc, stub, vscode, fakeWebview, load, e, memento,
     calls, pdFour, readWv, panel, ui,
 } = require('./harness');
 

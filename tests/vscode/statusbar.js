@@ -1,7 +1,7 @@
 // VS Code sidebar tests: the status bar text and tooltip, and the dialog and switch texts.
 'use strict';
 const {
-    assert, fs, path, now, check, run, seat, ccswitch, cfg, said, vscode, file, e, acct, capOf,
+    assert, fs, path, now, check, run, cfg, said, vscode, file, e, acct, capOf,
 } = require('./harness');
 
 run(async () => {

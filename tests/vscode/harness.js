@@ -129,6 +129,6 @@ const run = (fn) => (async () => {
 module.exports = {
     assert, fs, path, HOME, ACC, LOG, now, check, run, seat, ccswitch, usageReply,
     usageDoc, cfg, said, saidOpts, updates, stub, terminals, inputOpts, vscode, fakeWebview, file, load,
-    e, memento, calls, ctxFor, capNow, acct, capOf, four, opts, pdFour, WV, readWv,
+    e, memento, calls, ctxFor, capNow, acct, capOf, four, opts, pdFour, readWv,
     panel, ui, rowOf, pt, withHist, rising,
 };
