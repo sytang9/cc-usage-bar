@@ -7,6 +7,7 @@ const fs = require('fs');
 const path = require('path');
 const { execFile } = require('child_process');
 const { buildStats } = require('./stats');
+const { downsample, CW } = require('./webview/panel');  // the History chart's own downsample and width
 
 const usageFile = () => vscode.workspace.getConfiguration('claudeUsage').get('usageFile') || '';  // '' = ccswitch's cache
 const POLL_MS = 60 * 1000;  // keeps reset times and the per-account data age current
@@ -68,7 +69,7 @@ function codexRows() {
 const HISTORY_SECS = 30 * 86400;
 // The History range selector: how far back the charts reach. 'auto' keeps the original look (5h chart 24h, weekly chart 7d).
 const HIST_RANGES = { '24h': 86400, '7d': 7 * 86400, '30d': 30 * 86400 };
-// minimize: a fixed tail, not a scan back to the 7-day cutoff. A line is about 70 bytes and ccswitch adds one per
+// minimize: a fixed tail, not a scan back to the 30-day cutoff. A line is about 70 bytes and ccswitch adds one per
 // live fetch (about every 10 min), so 512 KB holds about 52 days (30 days is about 300 KB). If fetches get much more frequent, scan back instead.
 const HISTORY_READ_BYTES = 512 * 1024;
 const fin = Number.isFinite;
@@ -101,7 +102,8 @@ function readHistory(label, now) {
 }
 
 // History costs a file read per account, so push() asks for it only while the sidebar is visible: every saved account
-// while the History tab is shown, else the active one (its pace line); want(label) says which. Never with a team
+// while the History tab is shown, else the active one (its pace line, computed in the host; no series are posted then);
+// want(label) says which. Never with a team
 // file: those rows are not this machine's ccswitch accounts, so a matching local label must not lend its history.
 function withHistory(accounts, want, now) {
     if (usageFile()) return accounts;
@@ -245,7 +247,7 @@ function readAccounts() {
 // An active account with no row (not saved, no data) gets one. A Codex row is read-only: a lock (or 'full'), no actions.
 const TIPS = { active: 'Active account', relogin: 'Needs re-login', full: 'A limit is at 100%', switch: 'You can switch here',
     readonly: 'Codex (read-only)', '': '' };
-function panelData(accounts, cap, { now, installed, auto, team = false, histRange = 'auto' }) {
+function panelData(accounts, cap, { now, installed, auto, team = false, histRange = 'auto', historyOn = false }) {
     const savedSet = new Set(cap.saved || []), dead = new Set(cap.relogin || []);
     const ctx = { you: cap.you, isSaved: (l) => savedSet.has(l), relogin: dead, now };
     const pct = (v) => (v == null ? null : Math.round(v));
@@ -274,12 +276,15 @@ function panelData(accounts, cap, { now, installed, auto, team = false, histRang
             fiveReset: reset(a.five_reset_epoch), weekReset: reset(a.week_reset_epoch), age: age(a), email: a.email || null, actions };
     });
     const mine = list.find((a) => isClaude(a) && a.label === cap.you);
-    // History view: one block per Claude account with points, the active account first. Each chart is [t, %, reset].
+    // History view (only while its tab is shown): one block per Claude account with points, the active account first.
+    // Each chart is [t, %, reset], downsampled here to the chart's width (window starts and peaks kept), so a 30-day
+    // range posts about CW points per chart, not every sample.
     const fullAt = (f) => 'Full ' + resetText(f.full) + ' at this pace';
     const pace = (h, p, r) => { const f = forecast(h, p, r, now); return !f ? null : f.lasts ? 'Lasts until reset' : fullAt(f); };
     const activePace = (p, r) => { const f = mine && forecast(mine.history || [], p, r, now); return f && f.full ? fullAt(f) : null; };
-    const series = (h, p, r, secs) => h.filter((x) => x.t >= now - secs && x[p] != null).map((x) => [x.t, Math.round(x[p] * 10) / 10, x[r] ?? null]);
-    const history = list.filter((a) => isClaude(a) && a.history && a.history.length)
+    const series = (h, p, r, secs) => downsample(h.filter((x) => x.t >= now - secs && x[p] != null)
+        .map((x) => [x.t, Math.round(x[p] * 10) / 10, x[r] ?? null]), now - secs, now, CW);
+    const history = !historyOn ? [] : list.filter((a) => isClaude(a) && a.history && a.history.length)
         .sort((a, b) => (b.label === cap.you) - (a.label === cap.you))
         .map((a) => {
             const r = rows.find((x) => x.provider === 'claude' && x.label === a.label);
@@ -615,7 +620,7 @@ function activate(context) {
         if (!view || !cap) return;
         const now = Date.now() / 1000, want = (l) => historyOn || l === cap.you;
         view.webview.postMessage(panelData(view.visible ? withHistory(accounts, want, now) : accounts, cap,
-            { now, installed: fs.existsSync(CCSWITCH), auto: !!cap.auto, team: !!usageFile(), histRange }));
+            { now, installed: fs.existsSync(CCSWITCH), auto: !!cap.auto, team: !!usageFile(), histRange, historyOn }));
     };
     const autoOn = () => vscode.workspace.getConfiguration('claudeUsage').get('autoSwitch');
     const toggleAuto = () => changeAutoSwitch(!autoOn(), context.globalState);
