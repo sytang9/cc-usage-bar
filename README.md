@@ -27,8 +27,8 @@ block above is the plain-text equivalent.
   It replaces each subagent's row in the agent panel with its type, label,
   model, session size (`ctx`), tokens read with the cached share (`tok`),
   cache misses, running time or done, and worktree.
-- **`ccswitch`** — save the currently logged-in Claude account under a
-  label, list saved accounts, switch between them, or delete one.
+- **`ccswitch`** — log in to a Claude account and save it under a
+  label (or save the current login), list saved accounts, switch between them, or delete one.
 - **`ccswitch usage`** — an all-account monitor: polls the 5h/weekly usage
   for every saved account so you can see at a glance which one has the most
   headroom, then optionally switch straight to it.
@@ -151,14 +151,21 @@ the `5H` and `WK` meters of the main bar show what they cost the account.
 
 ## Usage — ccswitch
 
-**Enrollment model:** `ccswitch save <label>` snapshots whichever account is
-*currently logged in* to Claude Code. To manage multiple accounts, log into
-each one in turn and run `ccswitch save <label>` right after — there's no
-way to save an account you aren't currently logged into.
+**Enrollment model:** `ccswitch add <label>` runs the official
+`claude auth login` in a private temporary config dir and saves the new
+account as `<label>`. It prints an authorize URL; open it in any browser and
+paste the code back. Your live login is never touched, and nothing is switched.
+Extra options go to `claude auth login` (for example `--email you@example.com`
+or `--sso`). ccswitch is for subscription accounts: `--console` logs in to a
+Console (API billing) account, which has no subscription usage to show.
+`ccswitch save <label>` still snapshots whichever account is
+*currently logged in*.
 
 ```
 ccswitch                     list saved accounts (same as `list`)
 ccswitch list                list saved accounts; '*' marks the active one
+ccswitch add <label> [opts]  log in to an account and save it as <label>
+                              (subscription accounts only; see above)
 ccswitch save <label>        snapshot the currently active account
 ccswitch <label>             switch to a saved account
 ccswitch <label> --relaunch  switch, then exec the `claude` CLI (override

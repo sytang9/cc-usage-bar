@@ -12,7 +12,7 @@
 # Bumped by hand. ccswitch is copied into ~/.claude by install.sh, so an
 # installed copy cannot be traced back to the checkout it came from -- this is
 # the only way to ask one what it is.
-CCSWITCH_VERSION="1.1.0"
+CCSWITCH_VERSION="1.2.0"
 
 set -uo pipefail
 
@@ -139,7 +139,7 @@ REFRESH_LOCK_WAIT_SECONDS="${CCSWITCH_LOCK_WAIT_SECONDS:-5}"
 # future caller that reaches fetch_row_usage without going through cmd_usage.
 USAGE_BYPASS_CACHE=0
 
-RESERVED_WORDS=(save delete list usage help version refresh-pause refresh-resume)
+RESERVED_WORDS=(save add delete list usage help version refresh-pause refresh-resume)
 # Whitelist charset for labels. Deliberately strict: this is what stands
 # between a label and a raw filesystem path ($ACCOUNTS_DIR/$label), so it
 # must reject '/' and '.' outright rather than trying to blocklist "..".
@@ -427,16 +427,86 @@ cmd_save() {
 
   secure_dir "$ACCOUNTS_DIR"
 
-  local label_dir="$ACCOUNTS_DIR/$label"
-  if [[ -d "$label_dir" ]]; then
+  confirm_overwrite "$label"
+  write_account_snapshot "$label" "$CLAUDE_JSON" "$CREDENTIALS_FILE"
+
+  echo "Saved account '$label'."
+}
+
+# confirm_overwrite <label>: if the label is already saved, ask; exit 0 on no.
+confirm_overwrite() {
+  local label="$1"
+  if [[ -d "$ACCOUNTS_DIR/$label" ]]; then
     if ! confirm "Account '$label' already exists. Overwrite?"; then
       echo "Aborted."
       exit 0
     fi
   fi
+}
+
+# cmd_add <label> [claude auth login options]: log in to an account with the
+# official `claude auth login` inside a private temp config dir, then save
+# from that dir. The live ~/.claude.json and credentials are never touched.
+cmd_add() {
+  local label="${1:-}"
+  [[ $# -gt 0 ]] && shift
+
+  validate_label "$label"
+
+  if ! command -v claude >/dev/null 2>&1; then
+    echo "Error: 'claude' is not on PATH; install Claude Code first." >&2
+    exit 1
+  fi
+
+  secure_dir "$ACCOUNTS_DIR"
+  confirm_overwrite "$label"
+
+  # Lives inside $CCSWITCH_TMPDIR, which the EXIT/INT/TERM traps delete.
+  local login_dir
+  login_dir="$(mktemp -d "$CCSWITCH_TMPDIR/login.XXXXXX")" || {
+    echo "Error: failed to create a temporary login directory." >&2
+    exit 1
+  }
+  chmod 700 "$login_dir" || {
+    echo "Error: failed to secure the temporary login directory." >&2
+    exit 1
+  }
+
+  # Drop auth env vars: they would override or confuse an interactive login.
+  if ! env -u CLAUDE_CODE_OAUTH_TOKEN -u ANTHROPIC_API_KEY -u ANTHROPIC_AUTH_TOKEN \
+    CLAUDE_CONFIG_DIR="$login_dir" claude auth login "$@"; then
+    echo "Error: login failed; nothing saved." >&2
+    exit 1
+  fi
+
+  local creds="$login_dir/.credentials.json" cjson="$login_dir/.claude.json"
+  if ! jq -e '.claudeAiOauth.refreshToken | strings | length > 0' "$creds" >/dev/null 2>&1; then
+    echo "Error: login finished but no Claude credentials were found; nothing saved." >&2
+    exit 1
+  fi
+  if ! jq -e '.oauthAccount | objects | length > 0' "$cjson" >/dev/null 2>&1; then
+    # Saved like `ccswitch save` does for a login with no identity block:
+    # credentials plus an empty oauthAccount.json. Warn so the user knows.
+    echo "Warning: login did not record account details (oauthAccount); saving credentials only." >&2
+    jq -n '{}' >"$login_dir/.claude.json" || exit 1
+    cjson="$login_dir/.claude.json"
+  fi
+
+  write_account_snapshot "$label" "$cjson" "$creds"
+
+  echo "Saved account '$label'. Switch with: ccswitch $label"
+}
+
+# write_account_snapshot <label> <src_claude_json> <src_credentials>: copy the
+# credentials and the .oauthAccount block of the given files into
+# $ACCOUNTS_DIR/<label>/. Shared by `save` (live files) and `add` (temp login
+# dir). The caller has validated the label and settled any overwrite prompt.
+write_account_snapshot() {
+  local label="$1" src_claude_json="$2" src_credentials="$3"
+  local label_dir="$ACCOUNTS_DIR/$label"
   secure_dir "$label_dir"
 
-  if ! secure_copy "$CREDENTIALS_FILE" "$label_dir/credentials.json"; then
+  if ! secure_copy "$src_credentials" "$label_dir/credentials.json"; then
     # Do not leave a partial/stale credentials.json behind: on an OVERWRITE
     # save, a failed cp can leave the PREVIOUS account's credentials (or a
     # truncated file) sitting where the switch pre-flight looks for the NEW
@@ -447,7 +517,7 @@ cmd_save() {
     exit 1
   fi
 
-  if ! jq_write "$label_dir/oauthAccount.json" '.oauthAccount // {}' "$CLAUDE_JSON"; then
+  if ! jq_write "$label_dir/oauthAccount.json" '.oauthAccount // {}' "$src_claude_json"; then
     # Do not leave a stale oauthAccount.json behind: on an OVERWRITE save,
     # jq_write's failure leaves the PREVIOUS account's identity file sitting
     # next to the NEW account's just-copied credentials.json. That mismatched
@@ -459,8 +529,6 @@ cmd_save() {
     echo "Error: failed to write $label_dir/oauthAccount.json; account '$label' not saved cleanly." >&2
     exit 1
   fi
-
-  echo "Saved account '$label'."
 }
 
 cmd_list() {
@@ -1840,6 +1908,10 @@ ccswitch - save, list, switch between, and monitor Claude Code accounts.
 COMMANDS
   ccswitch                     list saved accounts ('*' marks the active one)
   ccswitch list                same as above
+  ccswitch add <label> [opts]  log in to an account and save it as <label>
+                                (subscription accounts only: --console gives
+                                an API-billing login with no usage data)
+                               (opts go to `claude auth login`, e.g. --email, --sso)
   ccswitch save <label>        snapshot the CURRENTLY active account as <label>
   ccswitch <label>             switch to a saved account (then restart Claude Code)
   ccswitch <label> --relaunch  switch, then exec the claude CLI right away
@@ -1862,8 +1934,9 @@ LABELS
   Any name of letters, digits, '_' or '-' (e.g. work, personal, claude001).
 
 GETTING STARTED (enroll each account once)
-  1. Log into an account normally in Claude Code, then:  ccswitch save work
-  2. Log into another account (claude -> /login), then:  ccswitch save personal
+  1. Log in and save in one step:  ccswitch add work
+  2. Again for the next account:   ccswitch add personal
+     (or, if already logged in:    ccswitch save work)
   3. From then on:  ccswitch            (see them + who is active)
                     ccswitch personal   (switch; restart Claude Code to apply)
                     ccswitch usage       (compare headroom, pick where to go)
@@ -1883,6 +1956,10 @@ main() {
     save)
       shift
       cmd_save "${1:-}"
+      ;;
+    add)
+      shift
+      cmd_add "$@"
       ;;
     delete)
       shift

@@ -64,6 +64,8 @@ button { font: inherit; cursor: pointer; }
 .row.open { background: var(--vscode-list-inactiveSelectionBackground); outline: 1px solid var(--vscode-contrastActiveBorder, transparent); outline-offset: -1px; }
 .row > .codicon { width: 14px; flex: none; }
 .row .nm { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 110px; }
+.row.add { color: var(--vscode-textLink-foreground); }
+.row.add .nm { font-weight: 400; max-width: none; }
 .row .d { margin-left: auto; text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .i-active { color: var(--vscode-charts-orange); }
 .i-switch { color: var(--vscode-charts-blue); }
@@ -93,11 +95,31 @@ button { font: inherit; cursor: pointer; }
 .sg.on { color: var(--vscode-foreground); background: var(--vscode-list-inactiveSelectionBackground); outline: 1px solid var(--vscode-contrastActiveBorder, transparent); outline-offset: -1px; }
 .sg:hover { color: var(--vscode-foreground); }
 
+/* Reload button: at the end of the switcher row; spins while a fetch runs, still (dimmed) if the user prefers reduced motion. */
+.vbar { display: flex; align-items: center; padding-right: 12px; }
+.vbar .seg { flex: 1; min-width: 0; margin-right: 6px; }
+.rl { flex: none; display: flex; padding: 3px; border: 0; border-radius: 4px; background: none; color: var(--vscode-descriptionForeground); }
+.rl:hover { color: var(--vscode-foreground); background: var(--vscode-toolbar-hoverBackground); outline: 1px dashed var(--vscode-contrastActiveBorder, transparent); outline-offset: -1px; }
+@keyframes rl-spin { to { transform: rotate(360deg); } }
+.rl.spin .codicon { animation: rl-spin 1s linear infinite; }
+@media (prefers-reduced-motion: reduce) { .rl.spin .codicon { animation: none; opacity: .4; } }
+
 /* History charts: one line per window, a dashed 80% guide, faint ticks where a window starts. */
-.ch { padding: 6px 16px 4px 38px; }
+.ch { position: relative; padding: 6px 16px 4px 38px; }
 .ch .top { display: flex; justify-content: space-between; }
 .ch .p { font-variant-numeric: tabular-nums; }
 .ch svg { display: block; width: 100%; height: 56px; margin: 4px 0 2px; overflow: visible; }
+.ch svg { touch-action: pan-y; }
+/* Hover: a guide line at the pointer and a tooltip kept inside the chart box (the script clamps it). */
+.ch .gl { display: none; stroke: var(--vscode-foreground); opacity: .5; vector-effect: non-scaling-stroke; }
+.ch.hov .gl { display: block; }
+.ch .tip {
+    display: none; position: absolute; z-index: 1; padding: 2px 6px; white-space: pre; pointer-events: none; font-size: 11px;
+    color: var(--vscode-editorHoverWidget-foreground, var(--vscode-foreground));
+    background: var(--vscode-editorHoverWidget-background, var(--vscode-sideBar-background));
+    border: 1px solid var(--vscode-editorHoverWidget-border, var(--vscode-contrastBorder, var(--vscode-panel-border)));
+}
+.ch.hov .tip { display: block; }
 .ch .ln { fill: none; stroke: var(--vscode-progressBar-background); stroke-width: 1.5; vector-effect: non-scaling-stroke; }
 .ch.hi .ln { stroke: var(--vscode-charts-orange); }
 .ch .g80, .ch .rz, .ch .base { stroke: var(--vscode-descriptionForeground); vector-effect: non-scaling-stroke; }
@@ -121,3 +143,18 @@ button { font: inherit; cursor: pointer; }
 .lgd { display: flex; flex-wrap: wrap; gap: 4px 12px; font-size: 11px; margin-top: 2px; }
 .sw { display: inline-block; width: 10px; height: 3px; margin-right: 4px; vertical-align: middle; }
 .fun { margin: 6px 16px 2px; padding: 6px 8px; border-left: 2px solid var(--vscode-charts-orange); font-style: italic; }
+
+/* History controls (range | layout) and the Grid layout: one card per account, columns by panel width. */
+.hctl { display: flex; align-items: center; gap: 6px; margin: 8px 16px 6px; }
+.hctl .seg { margin: 0; }
+.hctl .seg:first-child { flex: 1; min-width: 0; }
+.itg { flex: none; display: flex; gap: 2px; }
+.ib { display: flex; padding: 3px; border: 0; border-radius: 4px; background: none; color: var(--vscode-descriptionForeground); }
+.ib:hover { color: var(--vscode-foreground); background: var(--vscode-toolbar-hoverBackground); }
+.ib.on { color: var(--vscode-foreground); background: var(--vscode-toolbar-activeBackground, var(--vscode-toolbar-hoverBackground)); outline: 1px solid var(--vscode-contrastActiveBorder, transparent); outline-offset: -1px; }
+.hgrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 8px; padding: 0 16px 6px; }
+.card { min-width: 0; background: var(--vscode-list-inactiveSelectionBackground); border: 1px solid var(--vscode-widget-border, var(--vscode-panel-border)); border-radius: 4px; padding-bottom: 4px; }
+.card .ch-h { display: flex; align-items: center; gap: 8px; padding: 4px 8px; font-size: 12px; }
+.card .ch-h .nm { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.card .ch-h .d { margin-left: auto; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.card .ch { padding: 2px 8px; }

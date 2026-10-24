@@ -63,12 +63,14 @@ function codexRows() {
 }
 
 // History: ccswitch appends one line per live fetch to <label>/.usage-history.jsonl ({t, p5, p7, r5, r7}). The panel
-// reads the last 7 days (the weekly chart's span); a bad line is skipped. Only the file's last HISTORY_READ_BYTES are
+// reads the last 30 days (the longest History range; ccswitch keeps 30 days); a bad line is skipped. Only the file's last HISTORY_READ_BYTES are
 // read, and the parsed points are reused while the file's size and mtime are unchanged.
-const HISTORY_SECS = 7 * 86400;
+const HISTORY_SECS = 30 * 86400;
+// The History range selector: how far back the charts reach. 'auto' keeps the original look (5h chart 24h, weekly chart 7d).
+const HIST_RANGES = { '24h': 86400, '7d': 7 * 86400, '30d': 30 * 86400 };
 // minimize: a fixed tail, not a scan back to the 7-day cutoff. A line is about 70 bytes and ccswitch adds one per
-// live fetch (about every 10 min), so 128 KB holds about 13 days. If fetches get much more frequent, scan back instead.
-const HISTORY_READ_BYTES = 128 * 1024;
+// live fetch (about every 10 min), so 512 KB holds about 52 days (30 days is about 300 KB). If fetches get much more frequent, scan back instead.
+const HISTORY_READ_BYTES = 512 * 1024;
 const fin = Number.isFinite;
 // A usable line: a finite t, and each percent and reset a finite number or null (ccswitch writes null for no data).
 const isPoint = (o) => !!o && fin(o.t) && ['p5', 'p7', 'r5', 'r7'].every((k) => o[k] === null || fin(o[k]));
@@ -243,7 +245,7 @@ function readAccounts() {
 // An active account with no row (not saved, no data) gets one. A Codex row is read-only: a lock (or 'full'), no actions.
 const TIPS = { active: 'Active account', relogin: 'Needs re-login', full: 'A limit is at 100%', switch: 'You can switch here',
     readonly: 'Codex (read-only)', '': '' };
-function panelData(accounts, cap, { now, installed, auto, team = false }) {
+function panelData(accounts, cap, { now, installed, auto, team = false, histRange = 'auto' }) {
     const savedSet = new Set(cap.saved || []), dead = new Set(cap.relogin || []);
     const ctx = { you: cap.you, isSaved: (l) => savedSet.has(l), relogin: dead, now };
     const pct = (v) => (v == null ? null : Math.round(v));
@@ -282,7 +284,7 @@ function panelData(accounts, cap, { now, installed, auto, team = false }) {
         .map((a) => {
             const r = rows.find((x) => x.provider === 'claude' && x.label === a.label);
             return { label: a.label, icon: r.icon, tip: r.tip, five: pct(a.five_pct), week: pct(a.week_pct),
-                fiveSeries: series(a.history, 'p5', 'r5', 86400), weekSeries: series(a.history, 'p7', 'r7', HISTORY_SECS),
+                fiveSeries: series(a.history, 'p5', 'r5', (Object.hasOwn(HIST_RANGES, histRange) ? HIST_RANGES[histRange] : 86400)), weekSeries: series(a.history, 'p7', 'r7', (Object.hasOwn(HIST_RANGES, histRange) ? HIST_RANGES[histRange] : 7 * 86400)),
                 fivePace: pace(a.history, 'p5', 'r5'), weekPace: pace(a.history, 'p7', 'r7') };
         });
     return {
@@ -293,7 +295,7 @@ function panelData(accounts, cap, { now, installed, auto, team = false }) {
         next: cap.best ? { label: cap.best.label, five: pct(cap.best.five), week: pct(cap.best.week) } : null,
         counts: { total: rows.length, saved: rows.filter((r) => r.provider === 'claude' && savedSet.has(r.label)).length,
             relogin: rows.filter((r) => r.icon === 'relogin').length, full: rows.filter((r) => r.icon === 'full').length },
-        rows, history, now,
+        rows, history, now, histRange: Object.hasOwn(HIST_RANGES, histRange) ? histRange : 'auto',
     };
 }
 
@@ -347,7 +349,7 @@ async function ccswitch(args, input) {
 }
 
 // Click a seat: saved -> `ccswitch <label>` (instant). Everything goes through ccswitch; a seat that isn't
-// saved yet (or whose saved login expired) is enrolled once with Claude's own /login, then Save login.
+// saved yet (or whose saved login expired) is enrolled once with `ccswitch add <label>`.
 async function switchSeat(label, onDone) {
     if (!isLabel(label)) return;  // ccswitch's own label rule - never anything else
     if (!fs.existsSync(CCSWITCH)) return installCcswitch();
@@ -364,25 +366,61 @@ async function switchSeat(label, onDone) {
     vscode.window.showInformationMessage(`Switched Claude Code to ${label}. Restart open Claude Code tabs to use it.`);
 }
 
-// One-time enrolment of a seat ccswitch can't switch to yet: log in to it with Claude's /login, then Save login.
+// ccswitch's reserved words (RESERVED_WORDS in the ccswitch script): a label may not be one of them.
+const RESERVED = ['save', 'delete', 'list', 'usage', 'help', 'version', 'refresh-pause', 'refresh-resume', 'add'];
+// The input box's check of a new label: null when fine, else the text (or a warning) to show under the box.
+function labelProblem(v) {
+    if (!isLabel(v)) return 'Use letters, digits, _ and - only, and do not start with -.';
+    if (RESERVED.includes(v)) return `"${v}" is a ccswitch command: pick another label.`;
+    if (saved(v)) return { message: `${v} is already saved: ccswitch will ask before it overwrites it.`, severity: vscode.InputBoxValidationSeverity.Warning };
+    return null;
+}
+
+// `ccswitch add` arrived in 1.2.0. An older ccswitch prints its version (`ccswitch 1.1.0`) but fails on `add`.
+async function ccswitchHasAdd() {
+    const r = await run(CCSWITCH, ['version']);
+    const m = /(\d+)\.(\d+)\.(\d+)/.exec(r.out);
+    return r.ok && !!m && (+m[1] > 1 || (+m[1] === 1 && +m[2] >= 2));
+}
+
+// Add terminal -> the refresh to run when it closes (the accounts-dir watcher can fire before ccswitch has written the login).
+const addTerminals = new Map();
+// Log in to a label and save it with `ccswitch add <label>`, in a terminal the user can see: it prints a URL, the user
+// logs in and pastes the code back there. The live login is never touched. `&& exit` closes the terminal after a
+// successful save, so the close hook refreshes (and clears a stale "Re-login needed"); on failure it stays open to read the error.
+async function runAdd(label, onDone) {
+    if (!isLabel(label)) return;
+    if (!fs.existsSync(CCSWITCH)) return installCcswitch();
+    if (!(await ccswitchHasAdd())) return installCcswitch('Adding an account needs ccswitch 1.2.0 or newer (`ccswitch add`). The installed one is older, and this installer updates it.');
+    const t = vscode.window.createTerminal(`Add account: ${label}`);
+    addTerminals.set(t, onDone);
+    t.show();
+    t.sendText(`"${CCSWITCH}" add ${label} && exit`);
+}
+
+// The "+ Add account" row: ask for a label, then runAdd.
+async function addAccount(onDone) {
+    const label = await vscode.window.showInputBox({ title: 'Add account', prompt: 'A short name for the account (letters, digits, _ and -)',
+        placeHolder: 'work', validateInput: labelProblem });
+    if (label) return runAdd(label.trim(), onDone);
+}
+
+// One-time enrolment of a seat ccswitch can't switch to yet (not saved, or its login expired): `ccswitch add`.
 async function enroll(label, expired, onDone) {
     const ok = await vscode.window.showInformationMessage(
         expired ? `The saved login for ${label} has expired (ccswitch: re-login).` : `${label} isn't saved in ccswitch yet.`,
-        { modal: true, detail: `Log in to ${label} once: a terminal opens with Claude Code - type /login and sign in as ${label}. `
-            + `Then click the ${label} row in the sidebar and choose Save login. After that, switching to it is instant.` },
+        { modal: true, detail: `Log in to ${label} once: a terminal opens and runs ccswitch add ${label}. Open the URL it prints, sign in as ${label} `
+            + `and paste the code if it asks for one. `
+            + (expired ? `ccswitch asks before it overwrites the saved login for ${label}: answer y. ` : '') + `Your current Claude Code login is not touched. After that, switching to ${label} is instant.` },
         'Open terminal');
     if (ok !== 'Open terminal') return;
-    await checkLogins();  // ccswitch copies your current seat's newest tokens into its saved copy before /login replaces them
-    onDone();
-    const t = vscode.window.createTerminal(`Claude login: ${label}`);
-    t.show();
-    t.sendText('claude');
+    await runAdd(label, onDone);
 }
 
 // cc-usage-bar (sytang9) provides ccswitch; run its own installer where the user can see and answer it.
-async function installCcswitch() {
+async function installCcswitch(why = 'Seat switching needs ccswitch from github.com/sytang9/cc-usage-bar.') {
     const ok = await vscode.window.showWarningMessage('Install ccswitch (cc-usage-bar)?',
-        { modal: true, detail: 'Seat switching needs ccswitch from github.com/sytang9/cc-usage-bar. Its installer copies three scripts into ~/.claude, '
+        { modal: true, detail: why + ' Its installer copies three scripts into ~/.claude, '
             + 'links ccswitch into ~/.local/bin and sets the Claude Code status line (your settings.json is backed up first). It runs in a terminal you can watch.' },
         'Install');
     if (ok !== 'Install') return;
@@ -418,6 +456,15 @@ function mergeLogins(prev, doc, isSaved) {
     return new Set([...next].filter(isSaved));
 }
 
+// The one guarded fetch: every `ccswitch usage --json` run goes through here, so two never overlap. A caller that
+// arrives while one runs gets that run's promise. onBusy (set by activate) tells the panel to spin; it never rejects.
+let inflight = null, onBusy = () => {};
+function fetchLogins() {
+    if (inflight) return inflight;
+    onBusy(true);
+    return (inflight = checkLogins().catch(() => {}).finally(() => { inflight = null; onBusy(false); }));
+}
+
 async function checkLogins() {
     if (!fs.existsSync(CCSWITCH)) return;
     const r = await run(CCSWITCH, ['usage', '--json']);
@@ -447,7 +494,7 @@ async function saveSeat(label, onDone) {
 async function deleteSeat(label, onDone) {
     if (!isLabel(label)) return;
     const ok = await vscode.window.showWarningMessage(`Delete the saved login for ${label}?`,
-        { modal: true, detail: 'Your current Claude Code login is not affected. To switch to this seat again you will need to log in to it once and choose Save login in its row.' }, 'Delete');
+        { modal: true, detail: 'Your current Claude Code login is not affected. To switch to this seat again you will need to log in to it once (+ Add account).' }, 'Delete');
     if (ok !== 'Delete') return;
     const r = await ccswitch(['delete', label], 'y\n');
     if (r.ok && !saved(label)) vscode.window.showInformationMessage(`Deleted the saved login for ${label}.`);
@@ -562,12 +609,13 @@ function activate(context) {
     status.show();
 
     const wantStats = statsFeed(path.join(context.globalStorageUri.fsPath, 'stats-cache.json'), (m) => view && view.webview.postMessage(m));
+    let histRange = 'auto';  // the History range the webview shows (it says so at start and on every change)
     let historyOn = false;  // the webview shows its History tab (it says so on every view change)
     const push = () => {
         if (!view || !cap) return;
         const now = Date.now() / 1000, want = (l) => historyOn || l === cap.you;
         view.webview.postMessage(panelData(view.visible ? withHistory(accounts, want, now) : accounts, cap,
-            { now, installed: fs.existsSync(CCSWITCH), auto: !!cap.auto, team: !!usageFile() }));
+            { now, installed: fs.existsSync(CCSWITCH), auto: !!cap.auto, team: !!usageFile(), histRange }));
     };
     const autoOn = () => vscode.workspace.getConfiguration('claudeUsage').get('autoSwitch');
     const toggleAuto = () => changeAutoSwitch(!autoOn(), context.globalState);
@@ -580,13 +628,19 @@ function activate(context) {
         autoSwitch(cap, context.globalState, poll);
     };
 
+    // The fetch (timed, from the button or the command). The panel spins from start to end; a request while one runs is dropped.
+    const post = (m) => view && view.webview.postMessage(m);
+    onBusy = (on) => post({ kind: 'busy', on });
+    const health = () => { if (!inflight) fetchLogins().then(poll); };
+
     context.subscriptions.push(status,
         vscode.commands.registerCommand('claudeUsage.toggleAutoSwitch', toggleAuto),
         vscode.workspace.onDidChangeConfiguration((e) => {
             if (e.affectsConfiguration('claudeUsage.usageFile')) { fs.unwatchFile(watched); watched = usageFile() || ACCOUNTS; fs.watchFile(watched, { interval: 5000 }, poll); }
             if (e.affectsConfiguration('claudeUsage')) poll();
         }),
-        vscode.commands.registerCommand('claudeUsage.refresh', poll),
+        vscode.commands.registerCommand('claudeUsage.refresh', health),
+        vscode.window.onDidCloseTerminal((t) => { if (addTerminals.has(t)) { addTerminals.delete(t); health(); } }),
         vscode.window.registerWebviewViewProvider('claudeUsage.view', {
             resolveWebviewView(v) {
                 view = v;
@@ -594,14 +648,20 @@ function activate(context) {
                 v.webview.html = webviewHtml(v.webview);
                 v.webview.onDidReceiveMessage((m) => {
                     if (!m) return;
-                    if (m === 'ready') push();
+                    if (m === 'ready') { push(); if (inflight) post({ kind: 'busy', on: true }); }
+                    else if (m.refresh) health();
                     else if (m.seat) switchSeat(m.seat, poll);
+                    else if (m.add) addAccount(health);
                     else if (m.save) saveSeat(m.save, poll);
                     else if (m.del) deleteSeat(m.del, poll);
                     else if (m.toggleAuto) toggleAuto();
                     else if (m.installCc) installCcswitch();
                     else if (m.wantStats) { if (v.visible) wantStats(); }  // a hidden, retained Stats tab never rebuilds
-                    else if (m.wantHistory !== undefined) { historyOn = m.wantHistory === true; push(); }
+                    else if (m.wantHistory !== undefined || m.histRange !== undefined) {
+                        if (m.wantHistory !== undefined) historyOn = m.wantHistory === true;
+                        if (m.histRange !== undefined) histRange = Object.hasOwn(HIST_RANGES, m.histRange) ? m.histRange : 'auto';
+                        push();
+                    }
                 });
                 v.onDidChangeVisibility(() => { if (v.visible) push(); });  // shown again: Stats asks for a rebuild if it is due
                 v.onDidDispose(() => { view = null; });
@@ -610,7 +670,6 @@ function activate(context) {
 
     poll();
     const timer = setInterval(poll, POLL_MS);
-    const health = () => checkLogins().then(poll, () => {});
     const firstCheck = setTimeout(health, 30 * 1000);
     // ccswitch's own cache: refresh at its 10-min TTL; with a team file, hourly is enough to keep tokens alive
     const healthTimer = setInterval(health, (usageFile() ? 60 : 10) * 60 * 1000);

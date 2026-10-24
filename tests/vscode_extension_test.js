@@ -36,7 +36,7 @@ seat('dead', 'dead@x.example', { fetched_at: now - 13 * 86400, five_hour_pct: 5,
 seat('half', 'half@x.example', { fetched_at: now - 60, five_hour_pct: null, seven_day_pct: 30, five_hour_reset_epoch: null, seven_day_reset_epoch: now + 86400 });
 fs.writeFileSync(path.join(HOME, '.claude.json'), JSON.stringify({ oauthAccount: { emailAddress: 'me@work.example' } }));
 const ccswitch = path.join(HOME, '.claude', 'ccswitch');
-fs.writeFileSync(ccswitch, `#!/usr/bin/env bash\necho "$*" >> "${LOG}"\n[[ "$1" == usage ]] && { cat "$HOME/usage.out"; exit "$(cat "$HOME/usage.rc" 2>/dev/null || echo 0)"; }\nexit "$(cat "$HOME/switch.rc" 2>/dev/null || echo 0)"\n`);
+fs.writeFileSync(ccswitch, `#!/usr/bin/env bash\necho "$*" >> "${LOG}"\n[[ "$1" == version ]] && { cat "$HOME/version.out" 2>/dev/null || echo "ccswitch 1.2.0"; exit 0; }\n[[ "$1" == usage ]] && { cat "$HOME/usage.out"; exit "$(cat "$HOME/usage.rc" 2>/dev/null || echo 0)"; }\nexit "$(cat "$HOME/switch.rc" 2>/dev/null || echo 0)"\n`);
 // What the stub `ccswitch usage --json` prints: a doc (object) or a raw string, plus its exit code.
 const usageReply = (doc, rc = 0) => {
     fs.writeFileSync(path.join(HOME, 'usage.out'), typeof doc === 'string' ? doc : JSON.stringify(doc));
@@ -51,14 +51,23 @@ fs.chmodSync(ccswitch, 0o755);
 const said = [];
 const saidOpts = [];
 const updates = [];
-let answer;
+let answer, inputAnswer, closeTerminal;
+const terminals = [], inputOpts = [];
 const vscode = {
     window: {
         showWarningMessage: async (m, o, ...b) => { said.push(m); saidOpts.push(o); return answer; },
         showInformationMessage: async (m, o, ...b) => { said.push(m); return typeof o === 'object' ? answer : undefined; },
         showErrorMessage: (m) => said.push('ERROR ' + m),
-        createTerminal: () => ({ show() {}, sendText(t) { said.push('TERMINAL ' + t); } }),
+        createTerminal: (name) => { const t = { name, show() {}, sendText(x) { said.push('TERMINAL ' + x); } }; terminals.push(t); return t; },
+        onDidCloseTerminal: (f) => { closeTerminal = f; return { dispose() {} }; },
+        // Like VS Code: an Error from validateInput blocks the Enter key (a string counts as an error), so nothing is returned.
+        showInputBox: async (o) => {
+            inputOpts.push(o);
+            const v = o.validateInput && inputAnswer !== undefined ? o.validateInput(inputAnswer) : null;
+            return v && (typeof v === 'string' || v.severity !== 2) ? undefined : inputAnswer;
+        },
     },
+    InputBoxValidationSeverity: { Warning: 2 },
     workspace: { getConfiguration: () => ({ get: (k) => cfg[k], update: async (k, v, t) => { updates.push([k, v, t]); } }) },
     ConfigurationTarget: { Global: 1 },
     commands: {},
@@ -72,7 +81,7 @@ const file = path.join(__dirname, '..', 'vscode', 'extension.js');
 // Each load is one fresh extension instance, as in one VS Code window.
 function load() {
     const m = new Module(file); m.filename = file; m.paths = Module._nodeModulePaths(path.dirname(file));
-    m._compile(fs.readFileSync(file, 'utf8') + '\n;Object.assign(module.exports, { isLabel, autoBlock, autoSwitch, deleteSeat, CONSENT, readSnapshot, isFresh, qualifies, capacity, parseUsageJson, mergeLogins, readAccounts, activeLabel, autoTarget, checkLogins, relogin, switchSeat, saveSeat, esc, webviewHtml, panelData, ageText, setAutoSwitch, changeAutoSwitch, AUTO_DETAIL, statusText, statusTooltip, resetText, CODICONS, rolled, readHistory, forecast, statsFeed, STATS_EVERY_MS, STATS_RETRY_MS, withHistory, HISTORY_READ_BYTES });', file);
+    m._compile(fs.readFileSync(file, 'utf8') + '\n;Object.assign(module.exports, { isLabel, autoBlock, autoSwitch, deleteSeat, CONSENT, readSnapshot, isFresh, qualifies, capacity, parseUsageJson, mergeLogins, readAccounts, activeLabel, autoTarget, checkLogins, relogin, switchSeat, saveSeat, addAccount, runAdd, labelProblem, ccswitchHasAdd, esc, webviewHtml, panelData, ageText, setAutoSwitch, changeAutoSwitch, AUTO_DETAIL, statusText, statusTooltip, resetText, CODICONS, rolled, readHistory, forecast, statsFeed, STATS_EVERY_MS, STATS_RETRY_MS, withHistory, HISTORY_READ_BYTES });', file);
     return m.exports;
 }
 const e = load();
@@ -348,11 +357,128 @@ const calls = () => (fs.existsSync(LOG) ? fs.readFileSync(LOG, 'utf8').trim().sp
         assert.ok(refreshed);
     });
 
-    await check('switchSeat on an expired seat never switches: syncs tokens, then opens claude for /login', async () => {
-        e.relogin.add('personal'); fs.rmSync(LOG, { force: true }); answer = 'Open terminal'; said.length = 0; usageReply(usageDoc({ personal: 're-login' }));
+    await check('switchSeat on an expired seat never switches: no fetch, no claude; runs `ccswitch add <label>` in an "Add account" terminal', async () => {
+        e.relogin.add('personal'); fs.rmSync(LOG, { force: true }); answer = 'Open terminal'; said.length = 0; terminals.length = 0;
         await e.switchSeat('personal', () => {});
-        assert.deepStrictEqual(calls(), ['usage --json']);
-        assert.ok(said.includes('TERMINAL claude'));
+        assert.ok(!calls().includes('usage --json'), 'enroll no longer syncs tokens: ccswitch add leaves the live login alone');
+        assert.ok(!calls().includes('personal'), 'never switches');
+        assert.ok(!said.includes('TERMINAL claude'), 'no claude /login any more');
+        assert.deepStrictEqual(said.filter((m) => m.startsWith('TERMINAL')), [`TERMINAL "${ccswitch}" add personal && exit`]);
+        assert.strictEqual(terminals[0].name, 'Add account: personal');
+    });
+
+    await check('label prompt: a bad label and a reserved word are rejected; a saved one warns about overwrite; a fresh one passes', () => {
+        for (const bad of ['', '-x', 'a b', 'a/b', '../x', 'a;rm']) assert.strictEqual(typeof e.labelProblem(bad), 'string', JSON.stringify(bad));
+        for (const w of ['save', 'delete', 'list', 'usage', 'help', 'version', 'refresh-pause', 'refresh-resume', 'add']) {
+            assert.ok(/ccswitch command/.test(e.labelProblem(w)), w);
+        }
+        const w = e.labelProblem('personal');
+        assert.strictEqual(w.severity, 2); assert.ok(/will ask before it overwrites/.test(w.message));
+        assert.strictEqual(e.labelProblem('brand-new_1'), null);
+    });
+
+    await check('+ Add account: the box validates with labelProblem; a valid label opens the terminal and sends `<ccswitch> add <label>`', async () => {
+        fs.rmSync(LOG, { force: true }); said.length = 0; terminals.length = 0; inputOpts.length = 0; inputAnswer = 'newone';
+        await e.addAccount(() => {});
+        assert.strictEqual(inputOpts[0].validateInput, e.labelProblem);
+        assert.deepStrictEqual(said.filter((m) => m.startsWith('TERMINAL')), [`TERMINAL "${ccswitch}" add newone && exit`]);
+        assert.strictEqual(terminals[0].name, 'Add account: newone');
+        inputAnswer = undefined; said.length = 0; terminals.length = 0;
+        await e.addAccount(() => {});
+        assert.deepStrictEqual([said, terminals], [[], []], 'cancelling the box opens nothing');
+    });
+
+    await check('an unsafe label never reaches the terminal: validateInput stops it in the box, and runAdd checks again', async () => {
+        said.length = 0; terminals.length = 0;
+        inputAnswer = 'a;rm -rf x';
+        await e.addAccount(() => {});
+        assert.deepStrictEqual([said, terminals], [[], []], 'the box rejects it (the stub runs validateInput like VS Code)');
+        await e.runAdd('a;rm -rf x', () => {});
+        await e.runAdd('--help', () => {});
+        assert.deepStrictEqual([said, terminals], [[], []], 'runAdd refuses it even if the box did not');
+    });
+
+    await check('the sidebar "+ Add account" click ({add:1}) reaches addAccount through the host route', async () => {
+        const cmds = {}, ctx = { subscriptions: [], globalStorageUri: { fsPath: path.join(HOME, 'gs') }, globalState: memento(false) };
+        let provider, onMsg;
+        const keep = { win: { ...vscode.window }, commands: vscode.commands, ws: vscode.workspace.onDidChangeConfiguration };
+        Object.assign(vscode.window, { createStatusBarItem: () => ({ show() {}, dispose() {} }), registerWebviewViewProvider: (id, p) => { provider = p; return { dispose() {} }; } });
+        vscode.StatusBarAlignment = { Right: 2 };
+        vscode.commands = { registerCommand: (id, f) => { cmds[id] = f; return { dispose() {} }; }, executeCommand: async () => {} };
+        vscode.extensions = { getExtension: () => undefined };
+        vscode.workspace.onDidChangeConfiguration = () => ({ dispose() {} });
+        try {
+            load().activate(ctx);
+            provider.resolveWebviewView({ visible: true, onDidChangeVisibility: () => {}, onDidDispose: () => {},
+                webview: { ...fakeWebview, postMessage: async () => {}, onDidReceiveMessage: (f) => { onMsg = f; } } });
+            inputAnswer = 'viaclick'; terminals.length = 0; inputOpts.length = 0;
+            onMsg({ add: 1 });
+            for (let i = 0; i < 40 && !terminals.length; i++) await new Promise((r) => setTimeout(r, 50));
+            assert.strictEqual(inputOpts.length, 1, 'the click asks for a label');
+            assert.strictEqual(terminals[0].name, 'Add account: viaclick');
+        } finally {
+            Object.assign(vscode.window, keep.win); vscode.commands = keep.commands; vscode.workspace.onDidChangeConfiguration = keep.ws;
+            for (const d of ctx.subscriptions) if (d && d.dispose) d.dispose();
+        }
+    });
+
+    await check('the enroll dialog says to paste the code if prompted, and for an expired seat warns that ccswitch asks before overwriting', async () => {
+        const detail = async (expired) => { saidOpts.length = 0; answer = undefined;
+            const info = vscode.window.showInformationMessage;
+            vscode.window.showInformationMessage = async (m, o) => { saidOpts.push(o); };
+            try { await e.switchSeat(expired ? 'personal' : 'spare2', () => {}); } finally { vscode.window.showInformationMessage = info; }
+            return saidOpts[0].detail; };
+        e.relogin.add('personal');
+        const d1 = await detail(true), d2 = await detail(false);
+        assert.ok(/paste the code if it asks/.test(d1) && /ccswitch asks before it overwrites/.test(d1), d1);
+        assert.ok(/paste the code if it asks/.test(d2) && !/overwrites/.test(d2), d2);
+        e.relogin.delete('personal');
+    });
+
+    await check('an old ccswitch without `add` gets the install/update offer, not a failing command', async () => {
+        fs.writeFileSync(path.join(HOME, 'version.out'), 'ccswitch 1.1.0\n');
+        try {
+            assert.strictEqual(await e.ccswitchHasAdd(), false);
+            answer = 'Open terminal'; terminals.length = 0; said.length = 0; saidOpts.length = 0;
+            const install = vscode.window.showWarningMessage;
+            vscode.window.showWarningMessage = async (m, o, ...b) => { said.push(m); saidOpts.push(o); return 'Install'; };
+            await e.switchSeat('spare2', () => {});
+            vscode.window.showWarningMessage = install;
+            assert.ok(said.includes('Install ccswitch (cc-usage-bar)?'), 'offers the installer');
+            assert.ok(/1\.2\.0/.test(saidOpts.find((o) => o && o.detail && /installer/.test(o.detail)).detail), 'says why');
+            assert.deepStrictEqual(terminals.map((t) => t.name), ['Install ccswitch'], 'only the installer terminal opens');
+            assert.ok(!said.some((m) => /add spare2/.test(m)), 'no `add` is sent');
+            fs.writeFileSync(path.join(HOME, 'version.out'), 'garbage');
+            assert.strictEqual(await e.ccswitchHasAdd(), false, 'no readable version: treated as old');
+            fs.writeFileSync(path.join(HOME, 'version.out'), 'ccswitch 2.0.0\n');
+            assert.strictEqual(await e.ccswitchHasAdd(), true);
+        } finally { fs.rmSync(path.join(HOME, 'version.out'), { force: true }); }
+    });
+
+    await check('the sidebar refreshes when the Add account terminal closes (and not for other terminals)', async () => {
+        const ctx = { subscriptions: [], globalStorageUri: { fsPath: path.join(HOME, 'gs') }, globalState: memento(false) };
+        const keep = { win: { ...vscode.window }, commands: vscode.commands, ws: vscode.workspace.onDidChangeConfiguration };
+        Object.assign(vscode.window, { createStatusBarItem: () => ({ show() {}, dispose() {} }), registerWebviewViewProvider: () => ({ dispose() {} }) });
+        vscode.StatusBarAlignment = { Right: 2 };
+        vscode.commands = { registerCommand: () => ({ dispose() {} }), executeCommand: async () => {} };
+        vscode.extensions = { getExtension: () => undefined };
+        vscode.workspace.onDidChangeConfiguration = () => ({ dispose() {} });
+        try {
+            usageReply(usageDoc({ work: 'ok' }));
+            const x = load(); x.activate(ctx);
+            inputAnswer = 'fresh'; terminals.length = 0; fs.rmSync(LOG, { force: true });
+            await x.addAccount(() => {});
+            closeTerminal({ name: 'something else' });
+            await new Promise((r) => setTimeout(r, 100));
+            assert.deepStrictEqual(calls().filter((c) => c === 'usage --json'), [], 'an unrelated terminal closing refreshes nothing');
+            closeTerminal(terminals[0]);
+            for (let i = 0; i < 40 && !calls().includes('usage --json'); i++) await new Promise((r) => setTimeout(r, 50));
+            assert.ok(calls().includes('usage --json'), 'closing the Add account terminal runs the guarded fetch, then repaints');
+        } finally {
+            Object.assign(vscode.window, keep.win); vscode.commands = keep.commands; vscode.workspace.onDidChangeConfiguration = keep.ws;
+            usageReply('');
+            for (const d of ctx.subscriptions) if (d && d.dispose) d.dispose();
+        }
     });
 
     await check('saveSeat only saves the seat you are on, answering ccswitch\'s own prompt', async () => {
@@ -740,17 +866,17 @@ const calls = () => (fs.existsSync(LOG) ? fs.readFileSync(LOG, 'utf8').trim().sp
     // --- History view and pace (ccswitch's .usage-history.jsonl) -------------------------------------
     const pt = (dt, p5, p7, r5 = now + 3600, r7 = now + 3 * 86400) => ({ t: now - dt, p5, p7, r5, r7 });
 
-    await check('readHistory: last 7 days, sorted; bad, future and old lines skipped; no file -> []', () => {
+    await check('readHistory: last 30 days, sorted; bad, future and old lines skipped; no file -> []', () => {
         const f = path.join(ACC, 'personal', '.usage-history.jsonl');
         try {
-            fs.writeFileSync(f, [JSON.stringify(pt(60, 5, 5)), 'not json', '', JSON.stringify(pt(8 * 86400, 1, 1)),
+            fs.writeFileSync(f, [JSON.stringify(pt(60, 5, 5)), 'not json', '', JSON.stringify(pt(31 * 86400, 1, 1)), JSON.stringify(pt(8 * 86400, 7, 7)),
                 JSON.stringify({ t: now + 3600, p5: 1 }), JSON.stringify(pt(1200, 2, 4)), JSON.stringify({ p5: 3 })].join('\n'));
-            assert.deepStrictEqual(e.readHistory('personal', now).map((x) => x.p5), [2, 5]);
+            assert.deepStrictEqual(e.readHistory('personal', now).map((x) => x.p5), [7, 2, 5], 'an 8-day-old point is kept (30-day range), a 31-day-old one is not');
             assert.deepStrictEqual(e.readHistory('spare', now), []);
             const accounts = e.readAccounts().accounts;
             assert.ok(accounts.every((a) => !('history' in a)), 'a poll reads no history (review finding: cost on every poll)');
             const p = e.withHistory(accounts, () => true, now).find((a) => a.label === 'personal');
-            assert.strictEqual(p.history.length, 2, 'withHistory carries it');
+            assert.strictEqual(p.history.length, 3, 'withHistory carries it');
         } finally { fs.rmSync(f, { force: true }); }
     });
 
@@ -769,7 +895,7 @@ const calls = () => (fs.existsSync(LOG) ? fs.readFileSync(LOG, 'utf8').trim().sp
         } finally { fs.rmSync(f, { force: true }); }
     });
 
-    await check('readHistory reads only the file\'s tail (the last 7 days), not the whole 30-day file (review finding)', () => {
+    await check('readHistory reads only the file\'s tail (the last 30 days), not the whole 30-day file (review finding)', () => {
         const f = path.join(ACC, 'personal', '.usage-history.jsonl');
         try {
             const pad = (JSON.stringify(pt(3 * 86400, 5, 5)) + '\n').repeat(Math.ceil(e.HISTORY_READ_BYTES / 60));
@@ -801,7 +927,7 @@ const calls = () => (fs.existsSync(LOG) ? fs.readFileSync(LOG, 'utf8').trim().sp
             const v = { visible: false, onDidChangeVisibility: (f) => { onVis = f; }, onDidDispose: () => {},
                 webview: { ...fakeWebview, postMessage: async (m) => { posted.push(m); }, onDidReceiveMessage: (f) => { onMsg = f; } } };
             provider.resolveWebviewView(v);
-            const last = () => posted.filter((m) => m.kind !== 'stats').pop();
+            const last = () => posted.filter((m) => m.kind !== 'stats' && m.kind !== 'busy').pop();
             const step = (f) => { seen.length = 0; f(); return [...new Set(seen)].sort(); };
             assert.deepStrictEqual(step(() => onMsg('ready')), [], 'hidden sidebar: no history read');
             assert.deepStrictEqual(last().history, []);
@@ -813,7 +939,9 @@ const calls = () => (fs.existsSync(LOG) ? fs.readFileSync(LOG, 'utf8').trim().sp
             assert.deepStrictEqual(step(() => onMsg({ wantHistory: false })), ['work']);
             fs.writeFileSync(tf, JSON.stringify({ generated_at: now, accounts: [{ label: 'personal', provider: 'claude', state: 'ok', five_pct: 1, week_pct: 1 }] }));
             cfg.usageFile = tf;
-            assert.deepStrictEqual(step(() => { onMsg({ wantHistory: true }); cmds['claudeUsage.refresh'](); }), [], 'team file: local history is never read');
+            seen.length = 0; onMsg({ wantHistory: true }); cmds['claudeUsage.refresh']();  // the command fetches, then re-reads
+            await new Promise((r) => setTimeout(r, 400));
+            assert.deepStrictEqual([...new Set(seen)], [], 'team file: local history is never read');
             assert.deepStrictEqual([last().history, last().team], [[], true]);
         } finally {
             delete cfg.usageFile;
@@ -891,7 +1019,7 @@ const calls = () => (fs.existsSync(LOG) ? fs.readFileSync(LOG, 'utf8').trim().sp
     await check('render: Accounts | History switcher; Accounts by default; the choice is a tab', () => {
         const p = panel(), d = withHist(rising);
         const acc = p.render(d, ui());
-        assert.match(acc, /^<div class="seg" role="tablist"><button class="sg on" role="tab" aria-selected="true" data-a="view" data-l="accounts">Accounts<\/button><button class="sg" role="tab" aria-selected="false" data-a="view" data-l="history">History<\/button><button class="sg" role="tab" aria-selected="false" data-a="view" data-l="stats">Stats<\/button><\/div>/);
+        assert.match(acc, /^<div class="vbar"><div class="seg" role="tablist"><button class="sg on" role="tab" aria-selected="true" data-a="view" data-l="accounts">Accounts<\/button><button class="sg" role="tab" aria-selected="false" data-a="view" data-l="history">History<\/button><button class="sg" role="tab" aria-selected="false" data-a="view" data-l="stats">Stats<\/button><\/div>/);
         assert.ok(acc.includes('Active account') && !acc.includes('last 24h'));
         assert.match(acc, /Resets [^<]+<\/div><div class="rs">Full in 2h (19|20)m at this pace</, 'the pace line under the session bar');
         const hist = p.render(d, ui({ view: 'history' }));
@@ -922,6 +1050,151 @@ const calls = () => (fs.existsSync(LOG) ? fs.readFileSync(LOG, 'utf8').trim().sp
         assert.strictEqual(js.slice(0, js.indexOf('Weekly (7 day)')).split('<polyline').length - 1, 1, 'reset times a second apart: one line');
     });
 
+    await check('hover: tooltip text from a known series: time ago + clock, usage %, rate in %/h (5h) and %/day (weekly), reset, no data', () => {
+        const p = panel(), t0 = now - 3 * 3600, R = now + 3600, R2 = now + 9000;
+        const five = { kind: 'five', from: now - 86400, to: now, pts: [[t0, 10, R], [t0 + 600, 12, R], [t0 + 1200, 15, R], [t0 + 1800, 3, R2], [t0 + 5400, 10, R2], [t0 + 6000, 13, R2]] };
+        const z = (n) => String(n).padStart(2, '0'), clock = (t) => z(new Date(t * 1000).getHours()) + ':' + z(new Date(t * 1000).getMinutes());
+        assert.deepStrictEqual({ ...p.hoverAt(five, t0 + 250) }, { when: '2h 55m ago \u00b7 ' + clock(t0 + 250), pct: '10%', rate: '+12.0%/h' }, '2 points in 10 min = +12.0%/h');
+        assert.strictEqual(p.hoverAt(five, t0 + 900).rate, '+18.0%/h', '12 -> 15 in 10 min');
+        assert.strictEqual(p.hoverAt(five, t0 + 1500).rate, 'reset', 'usage falls 15 -> 3: a reset, not a negative rate');
+        assert.strictEqual(p.hoverAt(five, t0 + 3000).rate, 'no data', 'the 1 h gap is longer than 3x the 10 min spacing');
+        assert.strictEqual(p.hoverAt(five, now).rate, 'no data', 'after the last sample');
+        assert.strictEqual(p.hoverAt(five, now).pct, '\u2013', 'and no % either: the nearest sample is too far');
+        assert.strictEqual(p.hoverAt(five, now - 30).when.split(' \u00b7 ')[0], 'just now');
+        assert.strictEqual(p.hoverAt({ ...five, pts: [] }, t0), null);
+        const d2 = now - 2 * 86400;
+        const week = { kind: 'week', from: now - 7 * 86400, to: now, pts: [[d2, 40, R], [d2 + 3600, 41, R], [d2 + 7200, 41.5, R]] };
+        const w = p.hoverAt(week, d2 + 1800);
+        assert.strictEqual(w.rate, '+24.0%/day', '1% in 1 h on the weekly chart is 24.0%/day');
+        assert.strictEqual(p.hoverAt(week, d2 + 5400).rate, '+12.0%/day');
+        assert.ok(/^1d 23h ago \u00b7 (Sun|Mon|Tue|Wed|Thu|Fri|Sat) \d\d:\d\d$/.test(w.when), w.when + ': a day or more back adds the weekday');
+        assert.strictEqual(w.pct, '40%');
+    });
+
+    await check('hover: each chart carries a guide line and a tooltip box, the wiring uses listeners (no inline handlers), and text goes in as text', () => {
+        const p = panel(), html = p.render(withHist(rising), ui({ view: 'history' }));
+        assert.strictEqual(html.split('class="gl"').length - 1, 2, 'a guide line in each of the two charts');
+        assert.strictEqual(html.split('class="tip"').length - 1, 2);
+        assert.ok(!/ on[a-z]+=/.test(html), 'no inline handlers: the CSP');
+        const src = readWv('panel.js');
+        assert.match(src, /root\.addEventListener\('pointermove'/);
+        assert.match(src, /tip\.textContent = /);
+        assert.ok(!/tip\.innerHTML/.test(src));
+        assert.match(src, /Math\.min\(box\.width - tip\.offsetWidth/, 'the tooltip is clamped inside the chart box');
+        assert.ok(/script-src 'unsafe-inline'/.test(e.webviewHtml(fakeWebview)) && /default-src 'none'/.test(e.webviewHtml(fakeWebview)), 'CSP unchanged');
+    });
+
+    await check('range: the selector (Auto | 24h | 7d | 30d) sets both charts\' span; Auto keeps 24h + 7d; a click persists and tells the host', () => {
+        const p = panel(), d = withHist(rising);
+        const seg = (u) => p.render(d, ui({ view: 'history', ...u }));
+        const det = (h) => h.slice(h.indexOf('<div class="det">'));
+        const auto = seg({});
+        assert.ok(auto.includes('aria-selected="true" data-a="hrange" data-l="auto"'), 'default is Auto');
+        for (const k of ['24h', '7d', '30d']) assert.ok(auto.includes('data-a="hrange" data-l="' + k + '"'), k);
+        assert.ok(det(auto).includes('Session (5hr) \u00b7 last 24h') && det(auto).includes('Weekly (7 day) \u00b7 last 7d'), 'Auto = today\'s look');
+        const m = det(seg({ histRange: '30d' }));
+        assert.ok(m.includes('Session (5hr) \u00b7 last 30d') && m.includes('Weekly (7 day) \u00b7 last 30d') && m.split('30d ago').length - 1 === 2, 'both charts reach 30d');
+        assert.ok(seg({ histRange: '30d' }).includes('aria-selected="true" data-a="hrange" data-l="30d"'));
+        const d24 = det(seg({ histRange: '24h' }));
+        assert.ok(d24.includes('Weekly (7 day) \u00b7 last 24h') && d24.includes('24h ago'));
+        assert.ok(det(seg({ histRange: 'bogus' })).includes('last 24h'), 'an unknown range falls back to Auto');
+        const src = readWv('panel.js');
+        assert.match(src, /else if \(a === 'hrange'\) \{ ui\.histRange = l; vsc\.postMessage\(\{ histRange: l \}\);/, 'the click stores the range in ui (vsc.setState below it, as statsRange) and asks the host');
+        assert.match(src, /vsc\.setState\(ui\);\s*paint\(\);/);
+    });
+
+    await check('range: the host sends the series for the range (Auto 24h + 7d, else both), keeps 30 days, and the forecast does not change', async () => {
+        const hist = [pt(20 * 86400, 5, 5, now - 19 * 86400), pt(2 * 86400, 70, 40, now - 86400), ...rising];
+        const mk = (histRange) => { const a = four().map((x) => ({ ...x, history: x.label === '002' ? hist : [] })); return e.panelData(a, capOf(a, '002', ['003']), { ...opts, histRange }); };
+        const h = (r) => mk(r).history[0];
+        assert.deepStrictEqual([h('auto').fiveSeries.length, h('auto').weekSeries.length], [3, 4], 'Auto = 24h session, 7d weekly');
+        assert.deepStrictEqual([h('24h').fiveSeries.length, h('24h').weekSeries.length], [3, 3]);
+        assert.deepStrictEqual([h('7d').fiveSeries.length, h('7d').weekSeries.length], [4, 4]);
+        assert.deepStrictEqual([h('30d').fiveSeries.length, h('30d').weekSeries.length], [5, 5], 'the 20-day-old point shows at 30d');
+        assert.strictEqual(mk('30d').histRange, '30d'); assert.strictEqual(mk('nope').histRange, 'auto');
+        assert.strictEqual(mk('constructor').histRange, 'auto');
+        for (const r of ['24h', '7d', '30d']) assert.deepStrictEqual([h(r).fivePace, h(r).weekPace], [h('auto').fivePace, h('auto').weekPace], 'Full in X at this pace is the same for ' + r);
+        assert.match(h('30d').fivePace, /^Full in 2h (19|20)m at this pace$/);
+        assert.strictEqual(e.readHistory('x', now).length, 0);
+    });
+
+    await check('range: the host remembers the range from {histRange} (and {wantHistory, histRange}) and ignores a bad one', async () => {
+        const f = path.join(ACC, 'work', '.usage-history.jsonl');
+        fs.writeFileSync(f, [pt(15 * 86400, 5, 5), pt(60, 50, 40)].map((x) => JSON.stringify(x)).join('\n') + '\n');
+        const posted = [], ctx = { subscriptions: [], globalStorageUri: { fsPath: path.join(HOME, 'gs') }, globalState: memento(false) };
+        let provider, onMsg;
+        const keep = { win: { ...vscode.window }, commands: vscode.commands, ws: vscode.workspace.onDidChangeConfiguration };
+        Object.assign(vscode.window, { createStatusBarItem: () => ({ show() {}, dispose() {} }), registerWebviewViewProvider: (id, p) => { provider = p; return { dispose() {} }; } });
+        vscode.StatusBarAlignment = { Right: 2 };
+        vscode.commands = { registerCommand: () => ({ dispose() {} }), executeCommand: async () => {} };
+        vscode.extensions = { getExtension: () => undefined };
+        vscode.workspace.onDidChangeConfiguration = () => ({ dispose() {} });
+        try {
+            load().activate(ctx);
+            provider.resolveWebviewView({ visible: true, onDidChangeVisibility: () => {}, onDidDispose: () => {},
+                webview: { ...fakeWebview, postMessage: async (m) => { posted.push(m); }, onDidReceiveMessage: (f) => { onMsg = f; } } });
+            const last = () => posted.filter((m) => m.kind !== 'stats' && m.kind !== 'busy').pop();
+            onMsg({ wantHistory: true, histRange: '30d' });
+            assert.deepStrictEqual([last().histRange, last().history[0].weekSeries.length], ['30d', 2]);
+            onMsg({ histRange: '24h' });
+            assert.deepStrictEqual([last().histRange, last().history[0].weekSeries.length], ['24h', 1]);
+            onMsg({ wantHistory: true });
+            assert.strictEqual(last().histRange, '24h', 'a view change alone keeps the range');
+            onMsg({ histRange: '__proto__' });
+            assert.strictEqual(last().histRange, 'auto');
+        } finally {
+            fs.rmSync(f, { force: true });
+            for (const d of ctx.subscriptions) if (d && d.dispose) d.dispose();
+            Object.assign(vscode.window, keep.win); vscode.commands = keep.commands; vscode.workspace.onDidChangeConfiguration = keep.ws;
+        }
+    });
+
+    await check('downsample: 30 days of samples are capped near one point per pixel column; resets and the line shape survive', () => {
+        const p = panel(), N = 30 * 144, from = now - 30 * 86400;
+        const raw = Array.from({ length: N }, (_, i) => [from + i * 600, (i % 30) * 3, now + 3600 + Math.floor(i / 30) * 18000]);  // a reset every 30 samples
+        const out = p.downsample(raw, from, now, 300);
+        const resets = raw.filter((q, i) => i && newW(q, raw[i - 1])).length;
+        function newW(q, b) { return q[1] < b[1]; }
+        assert.ok(out.length <= 300 + 2 * resets, out.length + ' points');
+        assert.ok(out.length < N / 3, 'much fewer than the ' + N + ' samples');
+        assert.ok(raw.filter((q, i) => i && newW(q, raw[i - 1])).every((q) => out.includes(q)), 'every window start is kept');
+        assert.strictEqual(out[out.length - 1], raw[N - 1], 'the newest point is kept');
+        assert.ok(out.every((q, i) => !i || q[0] > out[i - 1][0]), 'time order kept');
+        const few = raw.slice(0, 100);
+        assert.strictEqual(p.downsample(few, from, now, 300), few, 'a short series is untouched');
+    });
+
+    await check('downsample: the drawn chart carries the capped points (render on a 30d series)', () => {
+        const p = panel(), d = withHist(rising), N = 4320, from = now - 30 * 86400;
+        const series = Array.from({ length: N }, (_, i) => [from + i * 600, 10 + (i % 50) / 2, now + 4 * 3600]);
+        const big = { ...d, history: [{ ...d.history[0], fiveSeries: series, weekSeries: series }] };
+        const html = p.render(big, ui({ view: 'history', histRange: '30d' }));
+        const total = (html.match(/points="[^"]*"/g) || []).join(' ').split(' ').length;
+        assert.ok(total < 2 * N / 5, 'drawn points: ' + total + ' (raw ' + 2 * N + ')');
+    });
+
+    await check('layout: List is the default (rows that expand); Grid shows every account\'s two charts at once, with hover and range', () => {
+        const p = panel(), d = withHist(rising, { '004': [pt(60, 46, 13)] });
+        const list = p.render(d, ui({ view: 'history' })), grid = p.render(d, ui({ view: 'history', histLayout: 'grid' }));
+        assert.ok(list.includes('aria-pressed="true" title="List view" aria-label="List view" data-a="hlay" data-l="list"') && list.includes('aria-pressed="false" title="Grid view" aria-label="Grid view" data-a="hlay" data-l="grid"') && list.includes('codicon-list-flat') && list.includes('codicon-table') && !list.includes('>List<') && !list.includes('class="hgrid"'), 'default = List');
+        assert.strictEqual(list.split('<svg').length - 1, 2, 'List: only the open row\'s two charts');
+        assert.ok(grid.includes('aria-pressed="true" title="Grid view" aria-label="Grid view" data-a="hlay" data-l="grid"') && grid.includes('aria-pressed="false" title="List view" aria-label="List view" data-a="hlay" data-l="list"') && grid.includes('class="hgrid"'));
+        assert.ok(!grid.includes('data-a="hrow"'), 'Grid has no expanding rows');
+        assert.strictEqual(grid.split('class="card"').length - 1, 2, 'one card per account with history');
+        assert.strictEqual(grid.split('<svg').length - 1, 4, 'Grid: both charts of both accounts');
+        assert.strictEqual(grid.split('class="gl"').length - 1, 4, 'hover works in Grid: each chart has its guide line');
+        assert.ok(grid.includes('data-l="002"') === false && grid.includes('>002<') && grid.includes('>004<'), 'cards are titled by account');
+        const g30 = p.render(d, ui({ view: 'history', histLayout: 'grid', histRange: '30d' }));
+        assert.strictEqual(g30.split('last 30d').length - 1, 8, 'range applies to every card: title and aria-label of 4 charts');
+        assert.ok(p.render(d, ui({ view: 'history', histLayout: 'bogus' })).includes('class="rows"'), 'unknown layout = List');
+        assert.ok(p.render({ ...d, history: [] }, ui({ view: 'history', histLayout: 'grid' })).includes('No history yet'));
+        const css = readWv('panel.css');
+        assert.match(css, /\.hgrid \{ display: grid; grid-template-columns: repeat\(auto-fill, minmax\(240px, 1fr\)\)/, 'columns follow the panel width');
+        assert.ok(!/animation|transition/.test(css.slice(css.indexOf('.hctl'))), 'nothing animated in the new styles (reduced motion)');
+        const src = readWv('panel.js');
+        assert.match(src, /else if \(a === 'hlay'\) ui\.histLayout = l;/, 'the click stores the layout in ui, which is saved with vsc.setState(ui) like statsRange');
+    });
+
     await check('render: History empty state, escaping, an 80%+ chart is orange', () => {
         const p = panel();
         assert.ok(p.render(withHist([]), ui({ view: 'history' })).includes('No history yet'));
@@ -929,7 +1202,7 @@ const calls = () => (fs.existsSync(LOG) ? fs.readFileSync(LOG, 'utf8').trim().sp
         assert.ok(team.includes('not shown for a team usage file') && !team.includes('<svg'), 'team file: a short note, no local charts');
         const src = readWv('panel.js');
         assert.match(src, /vsc\.postMessage\(\{ wantHistory: l === 'history' \}\)/, 'switching views tells the host whether History is shown');
-        assert.match(src, /vsc\.postMessage\(\{ wantHistory: viewOf\(ui\) === 'history' \}\);\s*vsc\.postMessage\('ready'\)/, 'and so does a reload on the History tab');
+        assert.match(src, /vsc\.postMessage\(\{ wantHistory: viewOf\(ui\) === 'history', histRange: histRangeOf\(ui\) \}\);\s*vsc\.postMessage\('ready'\)/, 'and so does a reload on the History tab');
         const bad = '<img src=x onerror="a()">';
         const d = { ...withHist(rising), history: [{ label: bad, icon: 'switch', tip: 't', five: 85, week: 10,
             fiveSeries: [[now, 85, null]], weekSeries: [], fivePace: '<b>', weekPace: null }] };
@@ -1327,11 +1600,12 @@ const calls = () => (fs.existsSync(LOG) ? fs.readFileSync(LOG, 'utf8').trim().sp
         assert.ok(!fs.existsSync(path.join(__dirname, '..', 'vscode', 'ui')));
     });
 
-    await check('dialog texts name the panel\'s own control: Save login, no SAVE card', () => {
+    await check('dialog texts name what the terminal runs: ccswitch add, no SAVE card', () => {
         const src = fs.readFileSync(file, 'utf8');
         assert.ok(!/\bSAVE\b/.test(src), 'no SAVE button any more');
         assert.ok(!/\bcard\b/.test(src), 'no cards any more');
-        assert.match(src, /click the \$\{label\} row in the sidebar and choose Save login/);
+        assert.match(src, /runs ccswitch add \$\{label\}/);
+        assert.ok(!/type \/login/.test(src), 'enroll no longer asks for /login');
     });
 
     await check('switch texts agree with ccswitch: open Claude Code tabs need a restart', () => {
@@ -1346,6 +1620,163 @@ const calls = () => (fs.existsSync(LOG) ? fs.readFileSync(LOG, 'utf8').trim().sp
         said.length = 0;
         try { await e.changeAutoSwitch(false); } finally { vscode.workspace.getConfiguration = realUpdate; }
         assert.deepStrictEqual(said, ['ERROR Could not change auto-switch: settings.json is read-only']);
+    });
+
+    await check('reload button: the codicon refresh icon is in the panel; it spins only when busy; reduced motion stops the rotation', () => {
+        const p = panel(), idle = p.render(pdFour(), ui()), busy = p.render(pdFour(), ui(), null, true);
+        assert.match(idle, /<button class="rl" data-a="reload"[^>]*aria-busy="false"><span class="codicon codicon-refresh"/);
+        assert.match(busy, /<button class="rl spin" data-a="reload"[^>]*aria-busy="true"/);
+        const css = readWv('panel.css');
+        assert.match(css, /\.rl\.spin \.codicon \{ animation: rl-spin/);
+        assert.match(css, /@media \(prefers-reduced-motion: reduce\) \{ \.rl\.spin \.codicon \{ animation: none/);
+    });
+
+    await check('reload button: spin is set by a click and by the timed fetch, not by the 60 s poll; it clears on success and on failure; a second click runs no second fetch', async () => {
+        const posted = [], timers = [], ctx = { subscriptions: [], globalStorageUri: { fsPath: path.join(HOME, 'gs') }, globalState: memento(false) };
+        let provider, onMsg;
+        const keep = { win: { ...vscode.window }, commands: vscode.commands, ws: vscode.workspace.onDidChangeConfiguration, st: global.setTimeout, si: global.setInterval };
+        Object.assign(vscode.window, { createStatusBarItem: () => ({ show() {}, dispose() {} }), registerWebviewViewProvider: (id, pr) => { provider = pr; return { dispose() {} }; } });
+        vscode.StatusBarAlignment = { Right: 2 };
+        vscode.commands = { registerCommand: () => ({ dispose() {} }), executeCommand: async () => {} };
+        vscode.extensions = { getExtension: () => undefined };
+        vscode.workspace.onDidChangeConfiguration = () => ({ dispose() {} });
+        global.setTimeout = (f, ms, ...a) => (ms === 30000 || ms === 600000 ? (timers.push([ms, f]), 0) : keep.st(f, ms, ...a));  // capture the app's timers, keep the rest real
+        global.setInterval = (f, ms) => { timers.push([ms, f]); return 0; };
+        const fetches = () => (fs.existsSync(LOG) ? fs.readFileSync(LOG, 'utf8') : '').split('\n').filter((l) => l === 'usage --json').length;
+        const busyOf = () => posted.filter((m) => m.kind === 'busy').map((m) => m.on);
+        const idle = async () => { for (let i = 0; i < 200 && busyOf().length % 2; i++) await new Promise((r) => keep.st(r, 25)); };
+        try {
+            usageReply(usageDoc({ work: 'ok' }));
+            load().activate(ctx);
+            global.setTimeout = keep.st; global.setInterval = keep.si;
+            const v = { visible: true, onDidChangeVisibility: () => {}, onDidDispose: () => {},
+                webview: { ...fakeWebview, postMessage: async (m) => { posted.push(m); }, onDidReceiveMessage: (f) => { onMsg = f; } } };
+            provider.resolveWebviewView(v);
+            const poll = timers.find(([ms]) => ms === 60000)[1], timed = timers.filter(([ms]) => ms === 600000 || ms === 30000).map(([, f]) => f);
+            assert.strictEqual(timed.length, 2, 'the 30 s first check and the 10 min check');
+            poll(); await idle();
+            assert.deepStrictEqual(busyOf(), [], 'the 60 s cache re-read never spins');
+            const n0 = fetches();
+            onMsg({ refresh: 1 }); onMsg({ refresh: 1 });  // a second click while the first fetch runs
+            assert.deepStrictEqual(busyOf(), [true], 'a click sets the spin at once');
+            await idle();
+            assert.deepStrictEqual(busyOf(), [true, false], 'success clears the spin');
+            assert.strictEqual(fetches() - n0, 1, 'the second click ran no second fetch');
+            posted.length = 0;
+            timed[1](); assert.deepStrictEqual(busyOf(), [true], 'the 10 min fetch spins');
+            await idle(); assert.deepStrictEqual(busyOf(), [true, false]);
+            posted.length = 0;
+            timed[0](); assert.deepStrictEqual(busyOf(), [true], 'the 30 s first check spins');
+            await idle();
+            posted.length = 0;
+            usageReply('not json', 1);  // a failed fetch
+            onMsg({ refresh: 1 }); assert.deepStrictEqual(busyOf(), [true]);
+            await idle(); assert.deepStrictEqual(busyOf(), [true, false], 'failure clears the spin');
+            onMsg({ refresh: 1 }); await idle();
+            assert.strictEqual(fetches() - n0, 5, 'after the fetch ends, a click fetches again');
+        } finally {
+            global.setTimeout = keep.st; global.setInterval = keep.si;
+            Object.assign(vscode.window, keep.win);
+            vscode.commands = keep.commands;
+            vscode.workspace.onDidChangeConfiguration = keep.ws;
+            usageReply('');
+            for (const d of ctx.subscriptions) if (d && d.dispose) d.dispose();
+        }
+    });
+
+    await check('reload: the Refresh command runs the guarded fetch with the spin; a rejecting fetch clears it; a seat switch runs no second fetch', async () => {
+        const posted = [], cmds = {}, ctx = { subscriptions: [], globalStorageUri: { fsPath: path.join(HOME, 'gs') }, globalState: memento(false) };
+        let provider, onMsg;
+        const keep = { win: { ...vscode.window }, commands: vscode.commands, ws: vscode.workspace.onDidChangeConfiguration, exists: fs.existsSync };
+        Object.assign(vscode.window, { createStatusBarItem: () => ({ show() {}, dispose() {} }), registerWebviewViewProvider: (id, pr) => { provider = pr; return { dispose() {} }; } });
+        vscode.StatusBarAlignment = { Right: 2 };
+        vscode.commands = { registerCommand: (id, f) => { cmds[id] = f; return { dispose() {} }; }, executeCommand: async () => {} };
+        vscode.extensions = { getExtension: () => undefined };
+        vscode.workspace.onDidChangeConfiguration = () => ({ dispose() {} });
+        const fetches = () => (fs.existsSync(LOG) ? fs.readFileSync(LOG, 'utf8') : '').split('\n').filter((l) => l === 'usage --json').length;
+        const busyOf = () => posted.filter((m) => m.kind === 'busy').map((m) => m.on);
+        const idle = async () => { for (let i = 0; i < 200 && busyOf().length % 2; i++) await new Promise((r) => setTimeout(r, 25)); };
+        try {
+            usageReply(usageDoc({ work: 'ok' }));
+            const x = load();  // the instance that is activated is the one whose guard the switch must share
+            x.activate(ctx);
+            provider.resolveWebviewView({ visible: true, onDidChangeVisibility: () => {}, onDidDispose: () => {},
+                webview: { ...fakeWebview, postMessage: async (m) => { posted.push(m); }, onDidReceiveMessage: (f) => { onMsg = f; } } });
+            await idle();
+            const n0 = fetches();
+            cmds['claudeUsage.refresh'](); cmds['claudeUsage.refresh']();
+            assert.deepStrictEqual(busyOf(), [true], 'the command spins at once, once');
+            await idle();
+            assert.deepStrictEqual(busyOf(), [true, false]);
+            assert.strictEqual(fetches() - n0, 1, 'the command ran one real fetch');
+            // #5: a seat switch to an expired seat (it syncs tokens first) while a fetch runs joins that fetch
+            x.relogin.add('personal'); answer = 'Open terminal'; posted.length = 0;
+            const n1 = fetches();
+            onMsg({ refresh: 1 });
+            await x.switchSeat('personal', () => {});
+            await idle();
+            assert.strictEqual(fetches() - n1, 1, 'the switch ran no second `ccswitch usage --json`');
+            // #2: checkLogins rejects (not just a bad reply): the spin still clears
+            posted.length = 0;
+            fs.existsSync = (f) => { if (f === path.join(HOME, '.claude', 'ccswitch')) throw new Error('boom'); return keep.exists(f); };
+            onMsg({ refresh: 1 });
+            assert.deepStrictEqual(busyOf(), [true]);
+            await idle();
+            assert.deepStrictEqual(busyOf(), [true, false], 'a rejecting fetch clears the spin');
+            fs.existsSync = keep.exists;
+            onMsg({ refresh: 1 }); await idle();
+            assert.deepStrictEqual(busyOf(), [true, false, true, false], 'after a rejection, the next click fetches again');
+        } finally {
+            fs.existsSync = keep.exists;
+            Object.assign(vscode.window, keep.win);
+            vscode.commands = keep.commands;
+            vscode.workspace.onDidChangeConfiguration = keep.ws;
+            usageReply('');
+            for (const d of ctx.subscriptions) if (d && d.dispose) d.dispose();
+        }
+    });
+
+    await check('reload (webview): idle click posts {refresh:1}; busy click posts nothing; busy toggles the spin; the spin survives a repaint and keeps its phase', () => {
+        let T = 5250, onMessage, onClick;
+        const sent = [], icon = { style: {} };
+        const root = { innerHTML: '', addEventListener: (t, f) => { if (t === 'click') onClick = f; },
+            querySelector: () => (/class="rl spin"/.test(root.innerHTML) ? icon : null), querySelectorAll: () => [] };
+        const ctx = { esc: e.esc, document: { getElementById: () => root, activeElement: null },
+            window: { addEventListener: (t, f) => { if (t === 'message') onMessage = f; } },
+            acquireVsCodeApi: () => ({ getState: () => null, setState() {}, postMessage: (m) => sent.push(m) }), Date: { now: () => T } };
+        require('vm').runInNewContext(readWv('panel.js'), ctx);
+        const data = pdFour(), msg = (m) => onMessage({ data: m }), spinning = () => /class="rl spin"/.test(root.innerHTML);
+        const click = () => onClick({ target: { closest: () => ({ dataset: { a: 'reload' } }) } });
+        msg(data);
+        sent.length = 0; click();
+        assert.deepStrictEqual(JSON.parse(JSON.stringify(sent)), [{ refresh: 1 }], 'an idle click asks the host to fetch');
+        assert.ok(!spinning());
+        msg({ kind: 'busy', on: true });
+        assert.ok(spinning(), 'busy:true starts the spin');
+        assert.strictEqual(icon.style.animationDelay, '-250ms');
+        sent.length = 0; click();
+        assert.deepStrictEqual(sent, [], 'a click while busy posts nothing');
+        T = 5750; msg(data);
+        assert.ok(spinning(), 'a data repaint keeps the spin');
+        assert.strictEqual(icon.style.animationDelay, '-750ms', 'the repainted icon starts at the phase the old one reached');
+        msg({ kind: 'busy', on: false });
+        assert.ok(!spinning(), 'busy:false stops the spin');
+    });
+
+    await check('Accounts list ends with a "+ Add account" row; a click posts {add:1}; hidden without ccswitch', () => {
+        const html = panel().render(pdFour(), ui());
+        const rows = html.slice(html.indexOf('class="rows"'));
+        assert.ok(/codicon-add/.test(rows) && /data-a="add"[^>]*>[\s\S]*Add account/.test(rows), 'the row is rendered');
+        assert.ok(rows.lastIndexOf('data-a="add"') > rows.lastIndexOf('data-a="row"'), 'at the end of the list');
+        assert.ok(!panel().render({ ...pdFour(), installed: false }, ui()).includes('data-a="add"'), 'no ccswitch: install button instead');
+        let onClick;
+        const sent = [], root = { innerHTML: '', addEventListener: (t, f) => { if (t === 'click') onClick = f; }, querySelector: () => null, querySelectorAll: () => [] };
+        const ctx = { esc: e.esc, document: { getElementById: () => root, activeElement: null },
+            window: { addEventListener() {} },
+            acquireVsCodeApi: () => ({ getState: () => null, setState() {}, postMessage: (m) => sent.push(m) }), Date };
+        require('vm').runInNewContext(readWv('panel.js'), ctx);
+        sent.length = 0; onClick({ target: { closest: () => ({ dataset: { a: 'add' } }) } });
+        assert.deepStrictEqual(JSON.parse(JSON.stringify(sent)), [{ add: 1 }]);
     });
 
     console.log('----------------------------------------');
