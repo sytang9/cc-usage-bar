@@ -10,6 +10,11 @@ TEST_FILES=()
 for f in "$SCRIPT_DIR"/vscode/*.js; do
   [[ "$(basename "$f")" == harness.js ]] || TEST_FILES+=("$f")
 done
+# Without a glob match bash keeps the literal pattern: a missing file is a lost test file, not a pass.
+if [[ ! -f "${TEST_FILES[0]:-}" ]]; then
+  echo "FAIL: no test files in $SCRIPT_DIR/vscode"
+  exit 1
+fi
 
 if ! command -v node >/dev/null 2>&1; then
   echo "FAIL: node not found (needed to test the VS Code extension)"
@@ -52,6 +57,7 @@ for f in "${TEST_FILES[@]}"; do
   echo "--- $name"
   out="$(HOME="$home" CODEX_HOME="$home/.codex" CCUB_TEST_SANDBOX=1 node "$f" 2>&1)" || rc=1
   printf '%s\n' "$out"
+  grep -q '^PASS: ' <<<"$out" || { echo "FAIL: $name ran no checks"; rc=1; }
   total_pass=$((total_pass + $(grep -c '^PASS: ' <<<"$out")))
   total_fail=$((total_fail + $(grep -c '^FAIL: ' <<<"$out")))
 done
