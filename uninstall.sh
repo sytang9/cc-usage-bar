@@ -16,6 +16,9 @@ CLAUDE_DIR="$HOME/.claude"
 SETTINGS_FILE="$CLAUDE_DIR/settings.json"
 BIN_DIR="$HOME/.local/bin"
 ACCOUNTS_DIR="$CLAUDE_DIR/accounts"
+# What install.sh copies into $CLAUDE_DIR: the remove path and --print-only
+# both read this one list.
+INSTALLED_SCRIPTS=("$CLAUDE_DIR/statusline-usage.sh" "$CLAUDE_DIR/subagent-statusline.sh" "$CLAUDE_DIR/ccswitch")
 
 # Literal value that Claude Code expands at statusline-run time. Must match
 # the literal tilde that install.sh wrote to settings.json; using $HOME would
@@ -65,7 +68,7 @@ confirm() {
 
 remove_scripts() {
   local f
-  for f in "$CLAUDE_DIR/statusline-usage.sh" "$CLAUDE_DIR/subagent-statusline.sh" "$CLAUDE_DIR/ccswitch"; do
+  for f in "${INSTALLED_SCRIPTS[@]}"; do
     if [[ -e "$f" ]]; then
       if rm -f "$f"; then
         echo "Removed: $f"
@@ -187,9 +190,7 @@ remove_vscode_extension() {
 main() {
   if [[ "$PRINT_ONLY" == "1" ]]; then
     echo "Would remove:"
-    echo "  $CLAUDE_DIR/statusline-usage.sh"
-    echo "  $CLAUDE_DIR/subagent-statusline.sh"
-    echo "  $CLAUDE_DIR/ccswitch"
+    printf '  %s\n' "${INSTALLED_SCRIPTS[@]}"
     echo "  $BIN_DIR/ccswitch (only if it symlinks to the above)"
     echo "  the .statusLine key in $SETTINGS_FILE (only if it points at cc-usage-bar)"
     echo "  the .subagentStatusLine key in $SETTINGS_FILE (only if it points at cc-usage-bar)"
