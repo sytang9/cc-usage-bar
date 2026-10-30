@@ -1,6 +1,6 @@
 // VS Code sidebar tests: the Automation toggle "Keep history when VS Code is closed" (ccswitch schedule).
 'use strict';
-const { assert, fs, path, HOME, LOG, check, run, said, stub, cfg, e, calls, four, capOf, opts, panel, ui } = require('./harness');
+const { assert, fs, path, HOME, LOG, check, run, said, saidOpts, stub, cfg, e, calls, four, capOf, opts, panel, ui } = require('./harness');
 
 const ccswitch = path.join(HOME, '.claude', 'ccswitch');
 const STATE = path.join(HOME, 'sched.state');
@@ -21,7 +21,7 @@ fi
 exit 0
 `);
 fs.chmodSync(ccswitch, 0o755);
-const reset = () => { for (const f of ['sched.rc', 'sched.nocron', 'version.out']) fs.rmSync(path.join(HOME, f), { force: true }); fs.writeFileSync(STATE, ''); fs.rmSync(LOG, { force: true }); said.length = 0; delete cfg.usageFile; };
+const reset = () => { for (const f of ['sched.rc', 'sched.nocron', 'version.out']) fs.rmSync(path.join(HOME, f), { force: true }); fs.writeFileSync(STATE, ''); fs.rmSync(LOG, { force: true }); said.length = saidOpts.length = 0; stub.answer = undefined; delete cfg.usageFile; };
 const html = (schedule) => panel().render({ ...e.panelData(four(), capOf(four(), '002'), opts), schedule }, ui({ automationOpen: true }));
 
 run(async () => {
@@ -53,22 +53,42 @@ run(async () => {
         assert.deepStrictEqual(calls(), ['version']);
     });
 
+    await check('scheduleChange: turning on asks once in a modal; No or a closed dialog runs nothing; off asks nothing', async () => {
+        reset();
+        await e.scheduleChange(true);  // the dialog is closed
+        assert.deepStrictEqual(said, ['Keep history when VS Code is closed?']);
+        assert.strictEqual(saidOpts[0].modal, true);
+        assert.strictEqual(saidOpts[0].detail, 'This adds a cron job that fetches usage for all accounts every 10 minutes, even with VS Code closed.');
+        assert.ok(!calls().some((c) => c.startsWith('schedule')), 'nothing ran without a yes');
+        stub.answer = 'Turn on';
+        await e.scheduleChange(true);
+        assert.strictEqual(said.length, 2, 'asked again on the next turn-on');
+        assert.strictEqual(fs.readFileSync(STATE, 'utf8').trim(), '10');
+        said.length = 0; stub.answer = undefined;
+        await e.scheduleChange(false);
+        assert.deepStrictEqual(said, [], 'turning off asks nothing');
+        assert.strictEqual(fs.readFileSync(STATE, 'utf8').trim(), '');
+    });
+
     await check('scheduleChange: on and off run `schedule on|off`, no shell', async () => {
         reset();
+        stub.answer = 'Turn on';
         await e.scheduleChange(true);
         assert.strictEqual(fs.readFileSync(STATE, 'utf8').trim(), '10');
         await e.scheduleChange(false);
         assert.strictEqual(fs.readFileSync(STATE, 'utf8').trim(), '');
         assert.deepStrictEqual(calls().filter((c) => c.startsWith('schedule')), ['schedule on', 'schedule off']);
-        assert.deepStrictEqual(said, []);
+        assert.deepStrictEqual(said, ['Keep history when VS Code is closed?'], 'only the turn-on question');
     });
 
     await check('scheduleChange: a failure shows an error message with the reason', async () => {
         reset();
         fs.writeFileSync(path.join(HOME, 'sched.rc'), '');
+        stub.answer = 'Turn on';
         await e.scheduleChange(true);
-        assert.strictEqual(said.length, 1);
-        assert.match(said[0], /^ERROR Could not turn background history on: crontab refused/);
+        stub.answer = undefined;
+        assert.strictEqual(said.length, 2);
+        assert.match(said[1], /^ERROR Could not turn background history on: crontab refused/);
     });
 
     await check('scheduleChange: an old ccswitch gets the install/update offer, not a failed command', async () => {

@@ -402,7 +402,7 @@ async function switchSeat(label, onDone) {
 }
 
 // ccswitch's reserved words (RESERVED_WORDS in the ccswitch script): a label may not be one of them.
-const RESERVED = ['save', 'delete', 'list', 'usage', 'help', 'version', 'refresh-pause', 'refresh-resume', 'add'];
+const RESERVED = ['save', 'delete', 'list', 'usage', 'help', 'version', 'refresh-pause', 'refresh-resume', 'add', 'schedule'];
 // The input box's check of a new label: null when fine, else the text (or a warning) to show under the box.
 function labelProblem(v) {
     if (!isLabel(v)) return 'Use letters, digits, _ and - only, and do not start with -.';
@@ -658,8 +658,11 @@ async function scheduleRead() {
     if (!r.ok) return null;
     try { const j = JSON.parse(r.out); return { on: j.on === true, every: Number.isInteger(j.every) ? j.every : null }; } catch { return null; }
 }
+// Turning it ON adds a cron job that runs with nobody watching, so it asks in a modal, every time. OFF needs no dialog.
+const SCHEDULE_DETAIL = 'This adds a cron job that fetches usage for all accounts every 10 minutes, even with VS Code closed.';
 async function scheduleChange(on) {
     if (!(await ccswitchHasSchedule())) return installCcswitch('Keeping history while VS Code is closed needs ccswitch 1.3.0 or newer (`ccswitch schedule`). The installed one is older, and this installer updates it.');
+    if (on && await vscode.window.showWarningMessage('Keep history when VS Code is closed?', { modal: true, detail: SCHEDULE_DETAIL }, 'Turn on') !== 'Turn on') return;
     const r = await run(CCSWITCH, ['schedule', on ? 'on' : 'off']);
     if (!r.ok) vscode.window.showErrorMessage('Could not turn background history ' + (on ? 'on' : 'off') + ': ' + (r.err.trim() || r.msg));
 }
@@ -779,4 +782,4 @@ ${esc.toString()}
 ${read('panel.js')}</script></body></html>`;
 }
 
-module.exports = { activate, scheduleRead, scheduleChange };
+module.exports = { activate, scheduleRead, scheduleChange, SCHEDULE_DETAIL };

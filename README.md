@@ -209,7 +209,7 @@ on, and it is not a daemon.
 - Exit codes: 0 ok (`status` exits 0 whether on or off); 1 bad arguments;
   2 no `crontab` command, `crontab -l` failed (your crontab is left alone), or crontab refused the write.
 - `status --json` prints `{"on":true,"every":10}`; the VS Code Automation section
-  uses it for the "Keep history when VS Code is closed" toggle.
+  uses it for the "Keep history when VS Code is closed" toggle, which asks once in a dialog each time you turn it on.
 
 ## Usage — the monitor
 
