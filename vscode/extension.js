@@ -227,17 +227,24 @@ function statusText(cap, accounts, auto) {
     return `${lead}● ${cap.you} ${pctOr(me.five_pct)}/${pctOr(me.week_pct)}${cap.activeFresh ? '' : ' ◷'} · ⇄ ${cap.best ? cap.best.label : 'none'}`;
 }
 
-// Tooltip: the auto-switch state, then one line per account (an active account with no row gets one too).
+// Tooltip (a MarkdownString, shown on hover): the active account (a blue pill when auto-switch is on), its 5h and weekly
+// percent with reset times, and the next-best account only when one qualifies. Stale data keeps its age ('data 45m old').
+// VS Code allows only color and background-color in a span, hence the inline style.
+const PILL = '<span style="color:#fff;background-color:#0e639c;">&nbsp;$(sync) Auto-switch ON&nbsp;</span>';
 function statusTooltip(cap, accounts, auto, now = Date.now() / 1000) {
-    const list = cap.you && !accounts.some((a) => isClaude(a) && a.label === cap.you) ? [...accounts, { label: cap.you, fetched_at: null, state: 'no data yet' }] : accounts;
-    const dead = new Set(cap.relogin || []);
-    const lines = list.map((a) => {
-        const age = isFresh(a, now) ? null : ageText(a.fetched_at, now), claude = isClaude(a);
-        return `${a.label}: 5h ${pctOr(a.five_pct)}, wk ${pctOr(a.week_pct)}` + (claude && dead.has(a.label) ? ' · re-login' : '')
-            + (age === 'no data' ? ' · no data' : age ? ` · data ${age}` : !isFresh(a, now) ? ` · ${a.state}` : '')
-            + (!claude ? ' · ' + TIPS.readonly : a.label === cap.you ? ' · active' : '');
-    });
-    return [`Auto-switch: ${auto ? 'ON' : 'off'}`, ...lines].join('\n');
+    const me = cap.you && accounts.find((a) => isClaude(a) && a.label === cap.you);
+    const lines = [cap.you ? `**${cap.you}** · active` + (auto ? ' ' + PILL : '') : 'No active account' + (auto ? ' ' + PILL : '')];
+    if (cap.you) {
+        const age = me && !isFresh(me, now) ? ageText(me.fetched_at, now) || me.state : me ? null : 'no data';
+        const live = (epoch) => epoch && epoch > now - 60;
+        const line = (name, pct, epoch) => name + ' ' + pctOr(pct) + (live(epoch) ? ' · resets ' + resetText(epoch) : '');
+        const mark = (new Set(cap.relogin || [])).has(cap.you) ? ' · re-login' : age === 'no data' ? ' · no data' : age ? ` · data ${age}` : '';
+        lines.push(line('5h', me && me.five_pct, me && me.five_reset_epoch) + mark, line('Weekly', me && me.week_pct, me && me.week_reset_epoch));
+    }
+    if (cap.best) lines.push(`Next: ${cap.best.label} (5h ${pctOr(cap.best.five)}, weekly ${pctOr(cap.best.week)})`);
+    const md = new vscode.MarkdownString(lines.join('\n\n'), true);
+    md.supportHtml = true;
+    return md;
 }
 
 // Data age as shown on a row: null while fresh by time, 'no data' when there never was any, 'in the future' past the
