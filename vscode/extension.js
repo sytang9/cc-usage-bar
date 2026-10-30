@@ -248,9 +248,11 @@ function statusTooltip(cap, accounts, auto, now = Date.now() / 1000) {
     if (cap.you) {
         const age = me && !isFresh(me, now) ? ageText(me.fetched_at, now) || me.state : me ? null : 'no data';
         const live = (epoch) => epoch && epoch > now - 60;
-        const row = (name, pct, epoch) => name + NB.repeat(name === '5h' ? 6 : 2) + (pct == null ? '–' : bar(pct) + NB + NB + pctOr(pct)) + (live(epoch) ? NB + '· resets ' + resetText(epoch) : '');
+        // One table, so both bars start at the same x: the hover font is proportional, so padding with spaces cannot align them.
+        const row = (name, pct, epoch, extra) => `<tr><td>${name}</td><td>${pct == null ? '' : bar(pct)}</td><td>${pctOr(pct)}</td>`
+            + `<td>${(live(epoch) ? '· resets ' + resetText(epoch) : '') + extra}</td></tr>`;
         const mark = (new Set(cap.relogin || [])).has(cap.you) ? ' · re-login' : age === 'no data' ? ' · no data' : age ? ` · data ${age}` : '';
-        lines.push(row('5h', me && me.five_pct, me && me.five_reset_epoch) + mark, row('Weekly', me && me.week_pct, me && me.week_reset_epoch));
+        lines.push('<table>' + row('5h', me && me.five_pct, me && me.five_reset_epoch, mark) + row('Weekly', me && me.week_pct, me && me.week_reset_epoch, '') + '</table>');
     }
     const next = cap.best ? mdSafe(cap.best.label) : null;
     lines.push(auto

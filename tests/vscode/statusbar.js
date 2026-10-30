@@ -50,37 +50,41 @@ run(async () => {
 
     const cells = (md) => ({ full: (md.match(/█/g) || []).length, empty: (md.match(/░/g) || []).length });
     const AUTO_TOGGLE = ['claudeUsage.refresh', 'claudeUsage.toggleAutoSwitch'];
+    // The tooltip's paragraphs; the bar table becomes one row per limit, each row its cells [name, bar, pct, reset+mark].
+    const parts = (v) => v.split('\n\n').flatMap((p) => (!p.startsWith('<table>') ? [p]
+        : p.slice(7, -8).split('</tr>').filter(Boolean).map((r) => r.replace(/^<tr>/, '').split('</td>').filter(Boolean).map((c) => c.replace(/^<td>/, '')))));
 
     await check('statusTooltip: label + refresh link, 5h and Weekly bars with percent and reset, auto-switch line; trusted for exactly two commands', () => {
         const a = [...sbAcc(), acct('old', 5, 5, now - 7200), acct('dead', 5, 5, now - 13 * 86400)];
         const tip = e.statusTooltip(sb(a, 'work', ['dead']), a, false);
         assert.ok(tip instanceof vscode.MarkdownString && tip.supportThemeIcons && tip.supportHtml, 'a MarkdownString with theme icons and html');
         assert.deepStrictEqual(tip.isTrusted, { enabledCommands: AUTO_TOGGLE }, 'trusted for exactly the two commands');
-        const lines = tip.value.split('\n\n');
+        const lines = parts(tip.value);
         const nb = '&nbsp;';
+        assert.ok(/^<table><tr><td>5h<\/td>/.test(tip.value.split('\n\n')[1]), 'both bars sit in one table, so they start at the same x');
         assert.strictEqual(lines[0], '**work**' + nb + nb + '[$(refresh)](command:claudeUsage.refresh "Refresh usage now")');
-        assert.ok(lines[1].startsWith('5h' + nb.repeat(6)) && lines[1].endsWith(nb + nb + '100%' + nb + '· resets ' + e.resetText(now + 3600)), lines[1]);
-        assert.ok(lines[2].startsWith('Weekly' + nb + nb) && lines[2].endsWith(nb + nb + '40%' + nb + '· resets ' + e.resetText(now + 86400)), lines[2]);
-        assert.deepStrictEqual(cells(lines[1]), { full: 10, empty: 0 });
-        assert.deepStrictEqual(cells(lines[2]), { full: 4, empty: 6 });
+        assert.deepStrictEqual([lines[1][0], lines[1][2], lines[1][3]], ['5h', '100%', '· resets ' + e.resetText(now + 3600)]);
+        assert.deepStrictEqual([lines[2][0], lines[2][2], lines[2][3]], ['Weekly', '40%', '· resets ' + e.resetText(now + 86400)]);
+        assert.deepStrictEqual(cells(lines[1][1]), { full: 10, empty: 0 });
+        assert.deepStrictEqual(cells(lines[2][1]), { full: 4, empty: 6 });
         assert.strictEqual(lines[3], '$(circle-slash) Auto-switch off · next personal' + nb + nb + '[$(play)](command:claudeUsage.toggleAutoSwitch "Turn auto-switch on")');
         assert.ok(!tip.value.includes('dead') && !tip.value.includes('old'), 'no other account is listed');
     });
 
     await check('statusTooltip: bar colours (blue below 80, orange from 80), rounding to the nearest cell, 0% all empty, unknown % no bar', () => {
-        const mk = (five, week) => { const a = [acct('work', five, week, now - 60)]; return e.statusTooltip(sb(a, 'work'), a, false).value.split('\n\n'); };
-        const [, r5, rw] = mk(79, 80);
+        const mk = (five, week) => { const a = [acct('work', five, week, now - 60)]; return parts(e.statusTooltip(sb(a, 'work'), a, false).value).map((x) => (Array.isArray(x) ? x : [x])); };
+        const [, r5a, rwa] = mk(79, 80), r5 = r5a.join(''), rw = rwa.join('');
         assert.ok(r5.includes('<span style="color:#3794ff;">') && !r5.includes('#e8590c'), r5);
         assert.ok(rw.includes('<span style="color:#e8590c;">') && !rw.includes('#3794ff'), rw);
         assert.deepStrictEqual(cells(r5), { full: 8, empty: 2 });   // 79% -> 8 cells
-        assert.deepStrictEqual(cells(mk(14, 15)[1]), { full: 1, empty: 9 });
-        assert.deepStrictEqual(cells(mk(14, 15)[2]), { full: 2, empty: 8 });  // 1.5 rounds up
-        const zero = mk(0, 0)[1];
+        assert.deepStrictEqual(cells(mk(14, 15)[1][1]), { full: 1, empty: 9 });
+        assert.deepStrictEqual(cells(mk(14, 15)[2][1]), { full: 2, empty: 8 });  // 1.5 rounds up
+        const zero = mk(0, 0)[1].join('');
         assert.deepStrictEqual(cells(zero), { full: 0, empty: 10 });
         assert.ok(!zero.includes('#3794ff') && zero.includes('0%'), zero);
         const unk = mk(null, 30);
-        assert.ok(!/[█░]/.test(unk[1]) && unk[1].includes('–'), unk[1]);
-        assert.ok(/[█░]/.test(unk[2]));
+        assert.ok(!/[█░]/.test(unk[1].join('')) && unk[1][2] === '–', unk[1].join('|'));
+        assert.ok(/[█░]/.test(unk[2].join('')));
     });
 
     await check('statusTooltip: auto-switch on / off / no candidate, with the toggle link', () => {
@@ -112,10 +116,10 @@ run(async () => {
     await check('statusTooltip says the truth about the active account\'s data (fresh, stale, re-login, none) and has no active case', () => {
         const a = [acct('work', 100, 40, now - 60), acct('old', 5, 5, now - 7200)];
         assert.ok(!e.statusTooltip(sb(a, 'work'), a, false).value.includes('data '), 'fresh active: no age claim');
-        assert.ok(e.statusTooltip(sb(a, 'old'), a, false).value.split('\n\n')[1].endsWith(' · data 2h old'));
-        assert.ok(e.statusTooltip(sb(a, 'work', ['work']), a, false).value.split('\n\n')[1].endsWith(' · re-login'));
-        const ghost = e.statusTooltip(sb(a, 'ghost'), a, false).value.split('\n\n');  // active, unsaved, in no list
-        assert.ok(ghost[1].endsWith('– · no data') && ghost[2] === 'Weekly&nbsp;&nbsp;–', ghost.join('|'));
+        assert.ok(parts(e.statusTooltip(sb(a, 'old'), a, false).value)[1][3].endsWith(' · data 2h old'));
+        assert.ok(parts(e.statusTooltip(sb(a, 'work', ['work']), a, false).value)[1][3].endsWith(' · re-login'));
+        const ghost = parts(e.statusTooltip(sb(a, 'ghost'), a, false).value);  // active, unsaved, in no list
+        assert.ok(ghost[1].join('|') === '5h||–| · no data' && ghost[2].join('|') === 'Weekly||–|', ghost.join('/'));
         const none = e.statusTooltip(sb(a, null), a, true).value.split('\n\n');
         assert.strictEqual(none.length, 2);
         assert.ok(none[0].startsWith('No active account&nbsp;&nbsp;[$(refresh)](command:claudeUsage.refresh') && none[1].startsWith('$(sync) Auto-switch on → none'), none.join('|'));
