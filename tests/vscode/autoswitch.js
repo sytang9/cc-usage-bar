@@ -32,7 +32,7 @@ run(async () => {
     });
 
     await check('G7 the dialog states the effect', () => {
-        for (const re of [/every new Claude Code session/, /without asking/, /100%/, /restart/i, /this machine/]) assert.match(e.AUTO_DETAIL, re);
+        for (const re of [/every Claude Code session/, /without asking/, /100%/, /next message/, /this machine/]) assert.match(e.AUTO_DETAIL, re);
     });
 
     await check('autoSwitch setting is machine-scoped and its description says what it does', () => {

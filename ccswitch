@@ -12,7 +12,7 @@
 # Bumped by hand. ccswitch is copied into ~/.claude by install.sh, so an
 # installed copy cannot be traced back to the checkout it came from -- this is
 # the only way to ask one what it is.
-CCSWITCH_VERSION="1.3.0"
+CCSWITCH_VERSION="1.3.1"
 
 set -uo pipefail
 
@@ -763,7 +763,7 @@ cmd_switch() {
     fi
   fi
 
-  echo "Switched to $label. Restart Claude Code to apply."
+  echo "Switched to $label. Open Claude Code sessions use it from their next message."
 
   if [[ "$relaunch" == "--relaunch" ]]; then
     # exec replaces this process, so the EXIT trap never runs.
@@ -2177,8 +2177,8 @@ COMMANDS
                                 an API-billing login with no usage data)
                                (opts go to `claude auth login`, e.g. --email, --sso)
   ccswitch save <label>        snapshot the CURRENTLY active account as <label>
-  ccswitch <label>             switch to a saved account (then restart Claude Code)
-  ccswitch <label> --relaunch  switch, then exec the claude CLI right away
+  ccswitch <label>             switch to a saved account (open sessions follow on their next message)
+  ccswitch <label> --relaunch  optional: switch, then start the claude CLI right away
   ccswitch delete <label>      remove a saved account (asks to confirm)
   ccswitch usage               show 5h/week usage for every saved account,
                                then optionally prompt which one to switch to
@@ -2207,13 +2207,13 @@ GETTING STARTED (enroll each account once)
   2. Again for the next account:   ccswitch add personal
      (or, if already logged in:    ccswitch save work)
   3. From then on:  ccswitch            (see them + who is active)
-                    ccswitch personal   (switch; restart Claude Code to apply)
+                    ccswitch personal   (switch; open sessions follow on their next message)
                     ccswitch usage       (compare headroom, pick where to go)
 
 NOTES
-  Switching swaps stored credentials, so a running Claude Code must be
-  restarted to pick up the change (--relaunch / the `ccw` shell function do
-  this for you). Tip: `ccw <label>` = switch + relaunch in one step.
+  Switching swaps the stored credentials. Running Claude Code sessions re-read
+  them before each request, so they move to the new account on their next
+  message; no restart is needed. Optional: `ccw <label>` = switch + start claude.
   Tokens never leave your machine; saved accounts live under ~/.claude/accounts/.
 EOF
 }
