@@ -166,7 +166,7 @@ touch "$ROOT/cron.denied"
 OUT="$(cc schedule on 2>&1)"; RC=$?
 OUT2="$(cc schedule off 2>&1)"; RC2=$?
 rm -f "$ROOT/cron.denied"
-if [[ $RC -eq 2 && $RC2 -eq 2 && "$OUT" == *"cannot read your crontab"* && "$OUT" == *"permission denied"* ]] && cmp -s "$CRON" "$ROOT/before3"; then
+if [[ $RC -eq 2 && $RC2 -eq 2 && "$OUT" == *"cannot read your crontab"* && "$OUT" == *"permission denied"* && "$OUT2" == *"cannot read your crontab"* ]] && cmp -s "$CRON" "$ROOT/before3"; then
   pass "crontab -l fails (not 'no crontab'): exit 2, the crontab is left alone"
 else fail "unreadable crontab (rc=$RC/$RC2): $OUT / $(cat "$CRON")"; fi
 
