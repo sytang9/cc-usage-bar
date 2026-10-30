@@ -12,7 +12,7 @@
 # Bumped by hand. ccswitch is copied into ~/.claude by install.sh, so an
 # installed copy cannot be traced back to the checkout it came from -- this is
 # the only way to ask one what it is.
-CCSWITCH_VERSION="1.2.0"
+CCSWITCH_VERSION="1.3.0"
 
 set -uo pipefail
 
@@ -155,7 +155,7 @@ SNAPSHOT_LOCK_WAIT_SECONDS="${CCSWITCH_SNAPSHOT_LOCK_WAIT_SECONDS:-60}"
 # future caller that reaches fetch_row_usage without going through cmd_usage.
 USAGE_BYPASS_CACHE=0
 
-RESERVED_WORDS=(save add delete list usage help version refresh-pause refresh-resume)
+RESERVED_WORDS=(save add delete list usage help version refresh-pause refresh-resume schedule)
 # Whitelist charset for labels. Deliberately strict: this is what stands
 # between a label and a raw filesystem path ($ACCOUNTS_DIR/$label), so it
 # must reject '/' and '.' outright rather than trying to blocklist "..".
@@ -2002,6 +2002,169 @@ cmd_usage() {
   cmd_switch "$choice" "$relaunch"
 }
 
+# --- schedule: opt-in cron sampling -------------------------------------------
+# The VS Code extension samples usage (and so appends history) only while VS Code
+# is open. `ccswitch schedule on` adds ONE crontab line that samples in the
+# background too. The line is marked, so on/off/status find it and touch nothing
+# else in the crontab.
+#
+# Exit codes: 0 ok (status exits 0 for both on and off); 1 bad arguments;
+# 2 no `crontab` binary, or crontab refused the write.
+SCHEDULE_MARK="# ccswitch-schedule"
+SCHEDULE_LOG="$CLAUDE_DIR/ccswitch-schedule.log"
+SCHEDULE_LOG_KEEP_LINES=200
+
+# schedule_need_crontab: exits 2 with a clear message if there is no crontab.
+schedule_need_crontab() {
+  command -v crontab >/dev/null 2>&1 && return 0
+  echo "Error: no 'crontab' command found; 'ccswitch schedule' needs cron." >&2
+  exit 2
+}
+
+# schedule_read_crontab <file>: the current crontab into <file>. `crontab -l`
+# exits 1 with "no crontab for <user>" when the user has no crontab yet; that is
+# an empty crontab. Any other failure exits 2: going on would replace the user's
+# crontab with a file that holds only our line.
+schedule_read_crontab() {
+  local err
+  err="$(crontab -l 2>&1 >"$1")" && return 0
+  if [[ "$err" == *"no crontab"* ]]; then : >"$1"; return 0; fi
+  echo "Error: cannot read your crontab: $err" >&2
+  exit 2
+}
+
+# schedule_write_crontab <file>: install <file> as the crontab.
+schedule_write_crontab() {
+  if ! crontab - <"$1"; then
+    echo "Error: crontab refused the new crontab." >&2
+    exit 2
+  fi
+}
+
+# schedule_current_line <file> -> our marked line from a crontab file (or nothing).
+schedule_current_line() {
+  grep -E "${SCHEDULE_MARK}[[:space:]]*\$" "$1" 2>/dev/null | head -n 1
+}
+
+# schedule_path_dirs -> PATH for the cron line: the dirs of the tools ccswitch
+# calls (jq, curl, node), then the standard ones. Cron's own PATH is only /usr/bin:/bin.
+schedule_path_dirs() {
+  local out="" tool p d
+  for tool in jq curl node; do
+    p="$(command -v "$tool" 2>/dev/null)" || continue
+    [[ "$p" == /* ]] || continue
+    d="$(dirname "$p")"
+    # '%' is special in a crontab line; a single quote would break the quoting.
+    case "$d" in *"'"* | *%* | *$'\n'*) continue ;; esac
+    case ":$out:" in *":$d:"*) ;; *) out="${out:+$out:}$d" ;; esac
+  done
+  for d in /usr/local/bin /usr/bin /bin; do
+    case ":$out:" in *":$d:"*) ;; *) out="${out:+$out:}$d" ;; esac
+  done
+  echo "$out"
+}
+
+# cmd_schedule_tick <every>: what the cron line runs. One sample, unless the cache
+# is newer than every*60-60 s (a VS Code fetch just wrote one): the cache TTL is
+# shortened to that, so a cron run a second early still fetches and a run right
+# after a VS Code fetch does not. Stdout dropped, stderr appended to the log, log trimmed.
+cmd_schedule_tick() {
+  local rc keep every="${1:-10}"
+  [[ "$every" =~ ^[0-9]{1,3}$ ]] || every=10
+  mkdir -p "$CLAUDE_DIR"
+  ( USAGE_CACHE_TTL_SECONDS=$(( 10#$every * 60 - 60 )); cmd_usage --json >/dev/null ) 2>>"$SCHEDULE_LOG"
+  rc=$?
+  [[ "$rc" -eq 0 ]] || echo "$(date '+%Y-%m-%d %H:%M:%S') usage exited $rc" >>"$SCHEDULE_LOG"
+  if [[ "$(wc -l <"$SCHEDULE_LOG" 2>/dev/null || echo 0)" -gt "$SCHEDULE_LOG_KEEP_LINES" ]]; then
+    keep="$(tail -n "$SCHEDULE_LOG_KEEP_LINES" "$SCHEDULE_LOG")"
+    printf '%s\n' "$keep" >"$SCHEDULE_LOG"
+  fi
+  return 0
+}
+
+cmd_schedule() {
+  local sub="${1:-status}"
+  [[ $# -gt 0 ]] && shift
+  local every=10 json=0 arg
+  case "$sub" in
+    tick) cmd_schedule_tick "${1:-10}"; return 0 ;;
+    on)
+      while [[ $# -gt 0 ]]; do
+        case "$1" in
+          --every)
+            every="${2:-}"
+            # 10#: a leading zero is not octal ("08" would fail, "010" would be 8).
+            if ! [[ "$every" =~ ^[0-9]{1,3}$ ]] || (( (every = 10#$every) < 5 || every > 60 )); then
+              echo "Error: --every needs a whole number of minutes from 5 to 60." >&2
+              exit 1
+            fi
+            shift 2 ;;
+          *) echo "Error: unknown option '$1' for 'schedule on'." >&2; exit 1 ;;
+        esac
+      done ;;
+    off)
+      if [[ $# -gt 0 ]]; then echo "Error: 'schedule off' takes no options." >&2; exit 1; fi ;;
+    status)
+      for arg in "$@"; do
+        case "$arg" in
+          --json) json=1 ;;
+          *) echo "Error: unknown option '$arg' for 'schedule status'." >&2; exit 1 ;;
+        esac
+      done ;;
+    *) echo "Error: unknown schedule command '$sub' (use on, off or status)." >&2; exit 1 ;;
+  esac
+  schedule_need_crontab
+
+  local cur="$CCSWITCH_TMPDIR/crontab.cur" new="$CCSWITCH_TMPDIR/crontab.new" line
+  schedule_read_crontab "$cur"
+  line="$(schedule_current_line "$cur")"
+
+  case "$sub" in
+    status)
+      local n=""
+      if [[ -n "$line" ]]; then
+        if [[ "$line" =~ ^\*/([0-9]+)\ \*\ \*\ \*\ \* ]]; then n="${BASH_REMATCH[1]}"
+        elif [[ "$line" =~ ^0\ \*\ \*\ \*\ \* ]]; then n=60; fi
+      fi
+      if [[ "$json" == "1" ]]; then
+        if [[ -n "$line" && -n "$n" ]]; then echo "{\"on\":true,\"every\":$n}"
+        elif [[ -n "$line" ]]; then echo '{"on":true,"every":null}'
+        else echo '{"on":false,"every":null}'; fi
+        return 0
+      fi
+      if [[ -z "$line" ]]; then echo "schedule: off"; return 0; fi
+      echo "schedule: on"
+      echo "every: ${n:-?} min"
+      echo "line: $line"
+      echo "log: $(tail -n 1 "$SCHEDULE_LOG" 2>/dev/null)"
+      ;;
+    off)
+      if [[ -z "$line" ]]; then echo "schedule: already off"; return 0; fi
+      grep -vE "${SCHEDULE_MARK}[[:space:]]*\$" "$cur" >"$new" || true
+      schedule_write_crontab "$new"
+      echo "schedule: off"
+      ;;
+    on)
+      local self dir spec
+      dir="$(cd "$(dirname "$0")" 2>/dev/null && pwd -P)" || dir=""
+      self="$dir/$(basename "$0")"
+      if [[ -z "$dir" || ! -f "$self" ]]; then
+        echo "Error: cannot resolve the path of this ccswitch." >&2
+        exit 1
+      fi
+      # '%' is special in a crontab line; a single quote would break the quoting.
+      case "$self" in
+        *"'"* | *%* | *$'\n'*) echo "Error: the ccswitch path contains a quote, '%' or newline; cron cannot run it." >&2; exit 1 ;;
+      esac
+      if (( every == 60 )); then spec="0 * * * *"; else spec="*/$every * * * *"; fi
+      grep -vE "${SCHEDULE_MARK}[[:space:]]*\$" "$cur" >"$new" || true
+      printf "%s PATH='%s' '%s' schedule tick %s %s\n" "$spec" "$(schedule_path_dirs)" "$self" "$every" "$SCHEDULE_MARK" >>"$new"
+      schedule_write_crontab "$new"
+      echo "schedule: on, every $every min (log: $SCHEDULE_LOG)"
+      ;;
+  esac
+}
+
 usage_text() {
   cat <<'EOF'
 ccswitch - save, list, switch between, and monitor Claude Code accounts.
@@ -2022,6 +2185,11 @@ COMMANDS
   ccswitch refresh-pause       stop refreshing tokens (usage still readable);
                                use when the refresh endpoint is rate-limiting
   ccswitch refresh-resume      re-enable token refresh
+  ccswitch schedule on [--every <min>]
+                               sample usage from cron while VS Code is closed
+                               (5..60 min, default 10); one marked crontab line
+  ccswitch schedule off        remove that line (only that line)
+  ccswitch schedule status [--json]  on or off, interval, last log line
   ccswitch help                show this help (also -h, --help)
   ccswitch version             print the version (also --version, -V)
 
@@ -2079,6 +2247,10 @@ main() {
       echo "Refresh paused. 'ccswitch usage' still reads usage but will not"
       echo "refresh tokens (expired accounts show 'rate-limited'). Resume with:"
       echo "  ccswitch refresh-resume"
+      ;;
+    schedule)
+      shift
+      cmd_schedule "$@"
       ;;
     refresh-resume)
       rm -f "$NO_REFRESH_FLAG"

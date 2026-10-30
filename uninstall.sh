@@ -66,6 +66,18 @@ confirm() {
   esac
 }
 
+# remove_schedule: `ccswitch schedule on` leaves one marked crontab line that runs the script below; take it out
+# before the script goes. Only when the line is there (so only a ccswitch that has `schedule` runs), and only that line.
+remove_schedule() {
+  command -v crontab >/dev/null 2>&1 || return 0
+  crontab -l 2>/dev/null | grep -qE '# ccswitch-schedule[[:space:]]*$' || return 0
+  if [[ -x "$CLAUDE_DIR/ccswitch" ]] && "$CLAUDE_DIR/ccswitch" schedule off >/dev/null 2>&1; then
+    echo "Removed the background-history cron line (ccswitch schedule off)."
+  else
+    echo "Warning: could not remove the '# ccswitch-schedule' crontab line; run: crontab -e" >&2
+  fi
+}
+
 remove_scripts() {
   local f
   for f in "${INSTALLED_SCRIPTS[@]}"; do
@@ -192,6 +204,7 @@ main() {
     echo "Would remove:"
     printf '  %s\n' "${INSTALLED_SCRIPTS[@]}"
     echo "  $BIN_DIR/ccswitch (only if it symlinks to the above)"
+    echo "  the crontab line marked '# ccswitch-schedule' (ccswitch schedule off; no other crontab line)"
     echo "  the .statusLine key in $SETTINGS_FILE (only if it points at cc-usage-bar)"
     echo "  the .subagentStatusLine key in $SETTINGS_FILE (only if it points at cc-usage-bar)"
     echo "  the VS Code sidebar $VSCODE_EXTENSION_ID (only if the 'code' CLI lists it)"
@@ -206,6 +219,7 @@ main() {
 
   check_jq
 
+  remove_schedule
   remove_scripts
   remove_symlink
   remove_statusline statusLine "$OUR_STATUSLINE_COMMAND"

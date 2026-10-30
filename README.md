@@ -97,6 +97,7 @@ To wire up the statusLine by hand instead, merge this into
 Removes the two scripts from `~/.claude`, the `~/.local/bin/ccswitch` symlink,
 and the `statusLine` entry from `settings.json` — each only if it is still
 ours, so a `statusLine` you have since repointed at your own script survives.
+If you turned on `ccswitch schedule`, it also removes that one crontab line (no other line).
 Your saved accounts under `~/.claude/accounts/` are **kept**: they are live
 OAuth credentials that exist nowhere else. Add `--purge-accounts` to delete
 them too (it asks first). `--print-only` shows what it would do.
@@ -185,6 +186,31 @@ ccswitch help                show the full command guide (also -h, --help)
 Switching **requires restarting Claude Code** — see Caveats below. If you
 accepted the `ccw` shell function during install, `ccw <label>` is shorthand
 for `ccswitch <label> --relaunch`.
+
+### Keep history when VS Code is closed (opt-in)
+
+The VS Code extension fetches usage only while VS Code is open, so the usage
+history has holes whenever it is closed. `ccswitch schedule on` fills them: it adds
+**one** crontab line, marked `# ccswitch-schedule`, that takes one live sample
+every `--every <min>` minutes (5 to 60, default 10). It is off until you turn it
+on, and it is not a daemon.
+
+```
+*/10 * * * * PATH='<dirs of jq, curl, node>:/usr/local/bin:/usr/bin:/bin' '<abs path>/ccswitch' schedule tick 10 # ccswitch-schedule
+```
+
+- `on` replaces an existing marked line; `off` removes only that line. Every
+  other line of your crontab stays as it was.
+- `schedule tick <min>` is the cron job: one `usage --json` run with stdout
+  dropped and stderr appended to `~/.claude/ccswitch-schedule.log` (kept to the last
+  200 lines). It fetches only when the cache is older than `<min>*60-60` seconds, so it
+  does not double a fetch VS Code made a minute ago, and a run a second early is not lost.
+- Cron has a minimal `PATH`, so `on` writes the directories of `jq`, `curl` and
+  `node` as found when you run it. Run `on` again after moving them.
+- Exit codes: 0 ok (`status` exits 0 whether on or off); 1 bad arguments;
+  2 no `crontab` command, `crontab -l` failed (your crontab is left alone), or crontab refused the write.
+- `status --json` prints `{"on":true,"every":10}`; the VS Code Automation section
+  uses it for the "Keep history when VS Code is closed" toggle, which asks once in a dialog each time you turn it on.
 
 ## Usage — the monitor
 
