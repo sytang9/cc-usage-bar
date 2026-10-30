@@ -220,33 +220,45 @@ function autoTarget(cap) {
 // Status bar: `● <you> <5h>%/<wk>% · ⇄ <next-best>`. ◷ marks data that is not fresh; $(sync) marks auto-switch on.
 // Only the best qualifying account is named, so a stale or dead account is never counted as available.
 const pctOr = (v) => (v == null ? '–' : Math.round(v) + '%');
-function statusText(cap, accounts, auto) {
-    const lead = auto ? '$(sync) ' : '';
+function statusText(cap, accounts, auto, busy = false) {
+    const lead = busy ? '$(sync~spin) ' : auto ? '$(sync) ' : '';
     if (!cap.you) return lead + '● none';
     const me = accounts.find((a) => isClaude(a) && a.label === cap.you) || {};
     return `${lead}● ${cap.you} ${pctOr(me.five_pct)}/${pctOr(me.week_pct)}${cap.activeFresh ? '' : ' ◷'} · ⇄ ${cap.best ? cap.best.label : 'none'}`;
 }
 
-// Tooltip (a MarkdownString, shown on hover): the active account (a blue pill when auto-switch is on), its 5h and weekly
-// percent with reset times, and the next-best account only when one qualifies. Stale data keeps its age ('data 45m old').
-// A label in a tooltip: a saved or team label passes isLabel; the fallback (an email's local part) is escaped, so no
-// markdown, html or $(icon) comes out of it.
+// Tooltip (a MarkdownString, shown on hover): the active account with a refresh link, its 5h and weekly bars with percent
+// and reset times, and one auto-switch line with a toggle link. Stale data keeps its age ('data 45m old').
+// The tooltip is trusted for two commands, so every label from data must stay inert. A saved or team label passes
+// isLabel; the fallback (an email's local part) is escaped: no html, no $(icon), no markdown link, bracket or backtick.
 const mdSafe = (l) => (isLabel(l) ? l : String(l).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/[\\`*_{}\[\]()#+\-.!|~$]/g, '\\$&'));
-// VS Code allows only color and background-color in a span, hence the inline style.
-const PILL = '<span style="color:#fff;background-color:#0e639c;">&nbsp;$(sync) Auto-switch ON&nbsp;</span>';
+const HIGH = 80;  // the panel's threshold: orange from here up
+const BAR_CELLS = 10;
+// VS Code allows only color and background-color in a span, hence the inline style. Blue and orange read on dark and light.
+const bar = (pct) => {
+    const n = Math.max(0, Math.min(BAR_CELLS, Math.round(pct / 100 * BAR_CELLS)));
+    const col = pct >= HIGH ? '#e8590c' : '#3794ff';
+    return (n ? `<span style="color:${col};">${'█'.repeat(n)}</span>` : '') + (n < BAR_CELLS ? `<span style="color:#8a8a8a;">${'░'.repeat(BAR_CELLS - n)}</span>` : '');
+};
+const NB = '&nbsp;';
+const REFRESH = '[$(refresh)](command:claudeUsage.refresh "Refresh usage now")';
 function statusTooltip(cap, accounts, auto, now = Date.now() / 1000) {
     const me = cap.you && accounts.find((a) => isClaude(a) && a.label === cap.you);
-    const lines = [cap.you ? `**${mdSafe(cap.you)}** · active` + (auto ? ' ' + PILL : '') : 'No active account' + (auto ? ' ' + PILL : '')];
+    const lines = [(cap.you ? `**${mdSafe(cap.you)}**` : 'No active account') + NB + NB + REFRESH];
     if (cap.you) {
         const age = me && !isFresh(me, now) ? ageText(me.fetched_at, now) || me.state : me ? null : 'no data';
         const live = (epoch) => epoch && epoch > now - 60;
-        const line = (name, pct, epoch) => name + ' ' + pctOr(pct) + (live(epoch) ? ' · resets ' + resetText(epoch) : '');
+        const row = (name, pct, epoch) => name + NB.repeat(name === '5h' ? 6 : 2) + (pct == null ? '–' : bar(pct) + NB + NB + pctOr(pct)) + (live(epoch) ? NB + '· resets ' + resetText(epoch) : '');
         const mark = (new Set(cap.relogin || [])).has(cap.you) ? ' · re-login' : age === 'no data' ? ' · no data' : age ? ` · data ${age}` : '';
-        lines.push(line('5h', me && me.five_pct, me && me.five_reset_epoch) + mark, line('Weekly', me && me.week_pct, me && me.week_reset_epoch));
+        lines.push(row('5h', me && me.five_pct, me && me.five_reset_epoch) + mark, row('Weekly', me && me.week_pct, me && me.week_reset_epoch));
     }
-    if (cap.best) lines.push(`Next: ${mdSafe(cap.best.label)} (5h ${pctOr(cap.best.five)}, weekly ${pctOr(cap.best.week)})`);
+    const next = cap.best ? mdSafe(cap.best.label) : null;
+    lines.push(auto
+        ? `$(sync) Auto-switch on → ${next || 'none'}${NB}${NB}[$(debug-pause)](command:claudeUsage.toggleAutoSwitch "Turn auto-switch off")`
+        : `$(circle-slash) Auto-switch off${next ? ' · next ' + next : ''}${NB}${NB}[$(play)](command:claudeUsage.toggleAutoSwitch "Turn auto-switch on")`);
     const md = new vscode.MarkdownString(lines.join('\n\n'), true);
     md.supportHtml = true;
+    md.isTrusted = { enabledCommands: ['claudeUsage.refresh', 'claudeUsage.toggleAutoSwitch'] };
     return md;
 }
 
@@ -691,9 +703,10 @@ function activate(context) {
     const autoOn = () => vscode.workspace.getConfiguration('claudeUsage').get('autoSwitch');
     const toggleAuto = () => changeAutoSwitch(!autoOn(), context.globalState);
 
+    let busy = false;  // a fetch runs: the status bar icon spins, as the panel's reload icon does
     const poll = () => {
         try { ({ accounts, cap } = readAccounts()); cap.auto = autoOn(); } catch (err) { status.text = '$(warning) Claude usage unreadable'; status.tooltip = String(err); return; }
-        status.text = statusText(cap, accounts, cap.auto);
+        status.text = statusText(cap, accounts, cap.auto, busy);
         status.tooltip = statusTooltip(cap, accounts, cap.auto);
         push();
         autoSwitch(cap, context.globalState, poll);
@@ -701,7 +714,7 @@ function activate(context) {
 
     // The fetch (timed, from the button or the command). The panel spins from start to end; a request while one runs is dropped.
     const post = (m) => view && view.webview.postMessage(m);
-    onBusy = (on) => post({ kind: 'busy', on });
+    onBusy = (on) => { busy = on; if (cap) status.text = statusText(cap, accounts, cap.auto, busy); post({ kind: 'busy', on }); };
     const health = (manual) => { if (!inflight) fetchLogins(manual === true).then(poll); };
     const manualHealth = () => health(true);
     // An Add account terminal closed: say so when ccswitch saved a new snapshot, show the row now, then fetch its
