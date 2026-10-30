@@ -74,6 +74,8 @@ const vscode = {
     workspace: { getConfiguration: () => ({ get: (k) => cfg[k], update: async (k, v, t) => { updates.push([k, v, t]); } }) },
     ConfigurationTarget: { Global: 1 },
     commands: {},
+    // As VS Code's: new MarkdownString(value, supportThemeIcons); supportHtml is set after.
+    MarkdownString: class { constructor(value = '', supportThemeIcons = false) { this.value = value; this.supportThemeIcons = supportThemeIcons; this.supportHtml = false; } },
     Uri: { file: (p) => ({ fsPath: p, toString: () => 'file://' + p }), parse: (u) => ({ toString: () => u }) },
 };
 // A stand-in for the view's webview: the extension asks it for the CSP source and the resource URI of codicon.css.

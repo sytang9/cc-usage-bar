@@ -48,26 +48,48 @@ run(async () => {
         assert.strictEqual(t, '● ghost –/– ◷ · ⇄ personal');
     });
 
-    await check('statusTooltip lists every account', () => {
+    await check('statusTooltip: a short markdown tip: the active account, 5h and weekly with resets, Next only when one qualifies', () => {
         const a = [...sbAcc(), acct('old', 5, 5, now - 7200), acct('dead', 5, 5, now - 13 * 86400)];
         const tip = e.statusTooltip(sb(a, 'work', ['dead']), a, false);
-        const lines = tip.split('\n');
-        assert.strictEqual(lines.length, a.length + 1);
-        assert.strictEqual(lines[0], 'Auto-switch: off');
-        assert.strictEqual(lines[1], 'work: 5h 100%, wk 40% · active');
-        assert.strictEqual(lines[2], 'personal: 5h 10%, wk 5%');
-        assert.strictEqual(lines[3], 'old: 5h 5%, wk 5% · data 2h old');
-        assert.strictEqual(lines[4], 'dead: 5h 5%, wk 5% · re-login · data 13d old');
-        assert.strictEqual(e.statusTooltip(sb(a, 'work'), a, true).split('\n')[0], 'Auto-switch: ON');
+        assert.ok(tip instanceof vscode.MarkdownString && tip.supportThemeIcons && tip.supportHtml, 'a MarkdownString with theme icons and html');
+        const lines = tip.value.split('\n\n');
+        assert.deepStrictEqual(lines, ['**work** · active', '5h 100% · resets ' + e.resetText(now + 3600), 'Weekly 40% · resets ' + e.resetText(now + 86400),
+            'Next: personal (5h 10%, weekly 5%)']);
+        assert.ok(!tip.value.includes('dead') && !tip.value.includes('old'), 'no other account is listed');
+        assert.ok(!tip.value.includes('Auto-switch'), 'no pill while auto-switch is off');
     });
 
-    await check('statusTooltip says the truth about the active account\'s data (fresh, stale, none)', () => {
+    await check('statusTooltip: a label is escaped (no html, no $(icon)), and the tip is not trusted (no command links)', () => {
+        const bad = '<img src=x onerror=1>$(sync)*b*';
+        const a = [acct(bad, 100, 40, now - 60), acct('personal', 10, 5, now - 30)];
+        const tip = e.statusTooltip(sb(a, bad), a, false);
+        assert.ok(!tip.isTrusted, 'isTrusted is not set');
+        assert.ok(!tip.value.includes('<img') && !tip.value.includes('$(') && !tip.value.includes('*b*'), tip.value);
+        assert.ok(tip.value.startsWith('**&lt;img src=x onerror=1&gt;\\$\\(sync\\)\\*b\\*** \u00b7 active'), tip.value);
+        const nx = e.statusTooltip({ ...sb(a, 'personal'), best: { label: '<b>x', five: 1, week: 2 } }, a, false).value;
+        assert.ok(nx.includes('Next: &lt;b&gt;x ('), nx);
+        assert.ok(!e.statusTooltip(sb(sbAcc(), 'work'), sbAcc(), true).isTrusted);
+    });
+
+    await check('statusTooltip: the Auto-switch ON pill only when on; no Next when nothing qualifies', () => {
         const a = [acct('work', 100, 40, now - 60), acct('old', 5, 5, now - 7200)];
-        assert.strictEqual(e.statusTooltip(sb(a, 'work'), a, false).split('\n')[1], 'work: 5h 100%, wk 40% · active', 'fresh active: no age claim');
-        assert.ok(e.statusTooltip(sb(a, 'old'), a, false).includes('old: 5h 5%, wk 5% · data 2h old · active'));
-        const ghost = e.statusTooltip(sb(a, 'ghost'), a, false);  // active, unsaved, in no list
-        assert.strictEqual(ghost.split('\n').length, a.length + 2);
-        assert.ok(ghost.includes('ghost: 5h –, wk – · no data · active'), ghost);
+        const on = e.statusTooltip(sb(a, 'work'), a, true).value.split('\n\n');
+        assert.strictEqual(on[0], '**work** · active <span style="color:#fff;background-color:#0e639c;">&nbsp;$(sync) Auto-switch ON&nbsp;</span>');
+        assert.ok(!on.some((l) => l.startsWith('Next')), 'the only other account is stale');
+        assert.ok(!e.statusTooltip(sb(a, 'work'), a, false).value.includes('<span'));
+    });
+
+    await check('statusTooltip says the truth about the active account\'s data (fresh, stale, re-login, none) and has no active case', () => {
+        const a = [acct('work', 100, 40, now - 60), acct('old', 5, 5, now - 7200)];
+        assert.ok(!e.statusTooltip(sb(a, 'work'), a, false).value.includes('data '), 'fresh active: no age claim');
+        assert.ok(e.statusTooltip(sb(a, 'old'), a, false).value.split('\n\n')[1].endsWith(' · data 2h old'));
+        assert.ok(e.statusTooltip(sb(a, 'work', ['work']), a, false).value.split('\n\n')[1].endsWith(' · re-login'));
+        const ghost = e.statusTooltip(sb(a, 'ghost'), a, false).value.split('\n\n');  // active, unsaved, in no list
+        assert.deepStrictEqual(ghost.slice(0, 3), ['**ghost** · active', '5h – · no data', 'Weekly –']);
+        const pill = '<span style="color:#fff;background-color:#0e639c;">&nbsp;$(sync) Auto-switch ON&nbsp;</span>';
+        assert.deepStrictEqual(e.statusTooltip(sb(a, null), a, true).value.split('\n\n'), ['No active account ' + pill], 'no active, nothing qualifies');
+        const b2 = sbAcc();
+        assert.deepStrictEqual(e.statusTooltip(sb(b2, null), b2, false).value.split('\n\n'), ['No active account', 'Next: personal (5h 10%, weekly 5%)']);
         assert.ok(!/over 30 min/.test(fs.readFileSync(file, 'utf8')), 'the old unconditional claim is gone');
     });
 

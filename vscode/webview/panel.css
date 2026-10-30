@@ -122,6 +122,7 @@ button { font: inherit; cursor: pointer; }
 .ch.hov .tip { display: block; }
 .ch .ln { fill: none; stroke: var(--vscode-progressBar-background); stroke-width: 1.5; vector-effect: non-scaling-stroke; }
 .ch.hi .ln { stroke: var(--vscode-charts-orange); }
+.ch .ln.gap { stroke-dasharray: 3 3; opacity: .5; }  /* a hole: no sample was taken */
 .ch .g80, .ch .rz, .ch .base { stroke: var(--vscode-descriptionForeground); vector-effect: non-scaling-stroke; }
 .ch .g80 { stroke-dasharray: 3 3; opacity: .45; }
 .ch .rz { opacity: .3; }

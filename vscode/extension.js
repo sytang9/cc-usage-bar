@@ -110,22 +110,42 @@ function withHistory(accounts, want, now) {
     return accounts.map((a) => (isClaude(a) && want(a.label) && saved(a.label) ? { ...a, history: readHistory(a.label, now) } : a));
 }
 
-// "At this pace": the rise of one limit since its window started (the points that share the latest reset time),
-// extended in a straight line. Needs 20 min of points, a rise, and a last point under 30 min old. Returns { full: epoch }
-// when the limit would reach 100% before it resets, { lasts: true } when it would not, null when there is nothing to judge.
-// Reset times within a minute are one window (the API's reset time can move across a second boundary).
+// "At this pace": one limit's rise, extended in a straight line from the last point. The rate is the recent slope:
+// a least-squares line over the points of the current window (the latest reset time) in the recent span (5h limit: the
+// last 60 min, weekly: the last 24 h), when that span has 3+ points covering 20 min (weekly: 6 h); the API gives whole
+// percents, so a first-to-last slope jumps. A flat recent slope means { lasts: true }. Else the window average: needs
+// 20 min of points since the window's first sample and a rise. The last point must be under 30 min old.
+// Returns { full: epoch } when the limit would reach 100% before it resets, { lasts: true } when it would not,
+// null when there is nothing to judge. Reset times within a minute are one window (the API's reset time can move
+// across a second boundary).
 const PACE_MIN_SECS = 1200;
+const PACE_RECENT = { p5: [3600, 1200], p7: [86400, 21600] };  // [span, least covered] in seconds
 const sameWindow = (a, b) => a != null && b != null && Math.abs(a - b) <= 60;
 // Points that are not finite numbers (a hand-edited file) give null; it never throws.
 const usable = (x, p, r) => !!x && fin(x.t) && fin(x[p]) && fin(x[r]);
+// Least-squares slope of percent per second.
+function slope(pts, p) {
+    const n = pts.length, mt = pts.reduce((s, x) => s + x.t, 0) / n, mp = pts.reduce((s, x) => s + x[p], 0) / n;
+    const den = pts.reduce((s, x) => s + (x.t - mt) ** 2, 0);
+    return den ? pts.reduce((s, x) => s + (x.t - mt) * (x[p] - mp), 0) / den : 0;
+}
 function forecast(points, p, r, now) {
     const last = points[points.length - 1];
     if (!usable(last, p, r) || last[r] <= now || now - last.t > FRESH_SECS) return null;
     if (last[p] >= 100) return null;  // already full: the bar says so
-    const first = points.find((x) => usable(x, p, r) && sameWindow(x[r], last[r]));
-    const span = last.t - first.t, rise = last[p] - first[p];
-    if (span < PACE_MIN_SECS || rise <= 0) return null;
-    const full = last.t + (100 - last[p]) * span / rise;
+    const win = points.filter((x) => usable(x, p, r) && sameWindow(x[r], last[r]));
+    const [span, cover] = PACE_RECENT[p] || PACE_RECENT.p5;
+    const recent = win.filter((x) => x.t >= last.t - span);
+    let rate;  // percent per second
+    if (recent.length >= 3 && last.t - recent[0].t >= cover) {
+        rate = slope(recent, p);
+        if (!(rate > 0)) return { lasts: true };  // not rising at the recent pace
+    } else {
+        const first = win[0], secs = last.t - first.t, rise = last[p] - first[p];
+        if (secs < PACE_MIN_SECS || rise <= 0) return null;
+        rate = rise / secs;
+    }
+    const full = last.t + (100 - last[p]) / rate;
     if (!fin(full) || full <= now) return null;  // the line says it is full already, but no fetch saw it
     return full < last[r] ? { full } : { lasts: true };
 }
@@ -207,17 +227,27 @@ function statusText(cap, accounts, auto) {
     return `${lead}● ${cap.you} ${pctOr(me.five_pct)}/${pctOr(me.week_pct)}${cap.activeFresh ? '' : ' ◷'} · ⇄ ${cap.best ? cap.best.label : 'none'}`;
 }
 
-// Tooltip: the auto-switch state, then one line per account (an active account with no row gets one too).
+// Tooltip (a MarkdownString, shown on hover): the active account (a blue pill when auto-switch is on), its 5h and weekly
+// percent with reset times, and the next-best account only when one qualifies. Stale data keeps its age ('data 45m old').
+// A label in a tooltip: a saved or team label passes isLabel; the fallback (an email's local part) is escaped, so no
+// markdown, html or $(icon) comes out of it.
+const mdSafe = (l) => (isLabel(l) ? l : String(l).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/[\\`*_{}\[\]()#+\-.!|~$]/g, '\\$&'));
+// VS Code allows only color and background-color in a span, hence the inline style.
+const PILL = '<span style="color:#fff;background-color:#0e639c;">&nbsp;$(sync) Auto-switch ON&nbsp;</span>';
 function statusTooltip(cap, accounts, auto, now = Date.now() / 1000) {
-    const list = cap.you && !accounts.some((a) => isClaude(a) && a.label === cap.you) ? [...accounts, { label: cap.you, fetched_at: null, state: 'no data yet' }] : accounts;
-    const dead = new Set(cap.relogin || []);
-    const lines = list.map((a) => {
-        const age = isFresh(a, now) ? null : ageText(a.fetched_at, now), claude = isClaude(a);
-        return `${a.label}: 5h ${pctOr(a.five_pct)}, wk ${pctOr(a.week_pct)}` + (claude && dead.has(a.label) ? ' · re-login' : '')
-            + (age === 'no data' ? ' · no data' : age ? ` · data ${age}` : !isFresh(a, now) ? ` · ${a.state}` : '')
-            + (!claude ? ' · ' + TIPS.readonly : a.label === cap.you ? ' · active' : '');
-    });
-    return [`Auto-switch: ${auto ? 'ON' : 'off'}`, ...lines].join('\n');
+    const me = cap.you && accounts.find((a) => isClaude(a) && a.label === cap.you);
+    const lines = [cap.you ? `**${mdSafe(cap.you)}** · active` + (auto ? ' ' + PILL : '') : 'No active account' + (auto ? ' ' + PILL : '')];
+    if (cap.you) {
+        const age = me && !isFresh(me, now) ? ageText(me.fetched_at, now) || me.state : me ? null : 'no data';
+        const live = (epoch) => epoch && epoch > now - 60;
+        const line = (name, pct, epoch) => name + ' ' + pctOr(pct) + (live(epoch) ? ' · resets ' + resetText(epoch) : '');
+        const mark = (new Set(cap.relogin || [])).has(cap.you) ? ' · re-login' : age === 'no data' ? ' · no data' : age ? ` · data ${age}` : '';
+        lines.push(line('5h', me && me.five_pct, me && me.five_reset_epoch) + mark, line('Weekly', me && me.week_pct, me && me.week_reset_epoch));
+    }
+    if (cap.best) lines.push(`Next: ${mdSafe(cap.best.label)} (5h ${pctOr(cap.best.five)}, weekly ${pctOr(cap.best.week)})`);
+    const md = new vscode.MarkdownString(lines.join('\n\n'), true);
+    md.supportHtml = true;
+    return md;
 }
 
 // Data age as shown on a row: null while fresh by time, 'no data' when there never was any, 'in the future' past the

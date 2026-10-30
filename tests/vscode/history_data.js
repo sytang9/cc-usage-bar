@@ -115,6 +115,25 @@ run(async () => {
         assert.strictEqual(Math.round(e.forecast(jitter, 'p5', 'r5', now).full - now), 140 * 60, 'a 1 s reset jitter is the same window');
     });
 
+    await check('forecast: the recent slope sees a burst after idle, a flat recent span lasts, too few recent points fall back to the average', () => {
+        const R = now + 12 * 3600, h = (dt, p5) => pt(dt, p5, 50, R);
+        // Idle 10% for 2 h, then a burst: the window average (20% in 3 h) is slow, the last 50 min are fast.
+        const burst = [h(10800, 10), h(3000, 10), h(1500, 12), h(600, 20), h(0, 30)];
+        const fast = e.forecast(burst, 'p5', 'r5', now).full, avg = now + 70 * 10800 / 20;
+        assert.ok(fast < avg - 3600 && fast > now, 'burst full ' + (fast - now) + ' s, average would say ' + (avg - now) + ' s');
+        // Flat for the last 40 min after an early rise: the average still rises, the recent slope does not.
+        assert.deepStrictEqual(e.forecast([h(10800, 10), h(2400, 40), h(1200, 40), h(0, 40)], 'p5', 'r5', now), { lasts: true }, 'flat recent');
+        // Only 2 points in the last 60 min: the window average (rise 20 in 3 h).
+        assert.strictEqual(Math.round(e.forecast([h(10800, 10), h(1500, 20), h(0, 30)], 'p5', 'r5', now).full - now), 70 * 10800 / 20, 'fallback');
+        // 3 recent points under 20 min of cover: the window average too.
+        assert.strictEqual(Math.round(e.forecast([h(10800, 10), h(600, 20), h(300, 25), h(0, 30)], 'p5', 'r5', now).full - now), 70 * 10800 / 20, 'short cover');
+        // Weekly uses the last 24 h: a burst there beats the 6-day average.
+        const wk = (dt, p7) => pt(dt, 5, p7, now + 3600, now + 5 * 86400);
+        const wpts = [wk(6 * 86400, 10), wk(20 * 3600, 12), wk(10 * 3600, 20), wk(0, 30)];
+        const wfull = e.forecast(wpts, 'p7', 'r7', now).full;
+        assert.ok(wfull < now + 5 * 86400 && wfull > now, 'weekly burst reaches 100% before the reset');
+    });
+
     await check('readHistory skips a line with a missing or non-numeric t, percent or reset (review finding)', () => {
         const f = path.join(ACC, 'personal', '.usage-history.jsonl');
         try {
