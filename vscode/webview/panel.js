@@ -88,9 +88,10 @@ function chartKey(cid) { const s = CHARTS[+cid]; return s ? s.label + '|' + s.ki
 const newWindow = (a, b) => a !== b && !(a != null && b != null && Math.abs(a - b) <= 60);  // reset times a second apart: one window
 // A hole: a segment between two samples longer than 3x the median spacing (no sample was taken, e.g. VS Code was closed).
 // The chart draws it dashed and hoverAt averages over it, so both use this one limit (seconds; Infinity under 2 points).
+// The lower median, so with few points one long hole is not the median itself.
 function holeGap(pts) {
     const dts = pts.slice(1).map((q, i) => q[0] - pts[i][0]).sort((a, b) => a - b);
-    return dts.length ? 3 * dts[Math.floor(dts.length / 2)] : Infinity;
+    return dts.length ? 3 * dts[(dts.length - 1) >> 1] : Infinity;
 }
 function chart(title, pts, from, to, ago, pace, now, kind, label) {
     const x = (t) => ((t - from) / (to - from) * CW).toFixed(1);

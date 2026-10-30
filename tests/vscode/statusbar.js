@@ -59,6 +59,18 @@ run(async () => {
         assert.ok(!tip.value.includes('Auto-switch'), 'no pill while auto-switch is off');
     });
 
+    await check('statusTooltip: a label is escaped (no html, no $(icon)), and the tip is not trusted (no command links)', () => {
+        const bad = '<img src=x onerror=1>$(sync)*b*';
+        const a = [acct(bad, 100, 40, now - 60), acct('personal', 10, 5, now - 30)];
+        const tip = e.statusTooltip(sb(a, bad), a, false);
+        assert.ok(!tip.isTrusted, 'isTrusted is not set');
+        assert.ok(!tip.value.includes('<img') && !tip.value.includes('$(') && !tip.value.includes('*b*'), tip.value);
+        assert.ok(tip.value.startsWith('**&lt;img src=x onerror=1&gt;\\$\\(sync\\)\\*b\\*** \u00b7 active'), tip.value);
+        const nx = e.statusTooltip({ ...sb(a, 'personal'), best: { label: '<b>x', five: 1, week: 2 } }, a, false).value;
+        assert.ok(nx.includes('Next: &lt;b&gt;x ('), nx);
+        assert.ok(!e.statusTooltip(sb(sbAcc(), 'work'), sbAcc(), true).isTrusted);
+    });
+
     await check('statusTooltip: the Auto-switch ON pill only when on; no Next when nothing qualifies', () => {
         const a = [acct('work', 100, 40, now - 60), acct('old', 5, 5, now - 7200)];
         const on = e.statusTooltip(sb(a, 'work'), a, true).value.split('\n\n');

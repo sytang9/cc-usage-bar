@@ -229,11 +229,14 @@ function statusText(cap, accounts, auto) {
 
 // Tooltip (a MarkdownString, shown on hover): the active account (a blue pill when auto-switch is on), its 5h and weekly
 // percent with reset times, and the next-best account only when one qualifies. Stale data keeps its age ('data 45m old').
+// A label in a tooltip: a saved or team label passes isLabel; the fallback (an email's local part) is escaped, so no
+// markdown, html or $(icon) comes out of it.
+const mdSafe = (l) => (isLabel(l) ? l : String(l).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/[\\`*_{}\[\]()#+\-.!|~$]/g, '\\$&'));
 // VS Code allows only color and background-color in a span, hence the inline style.
 const PILL = '<span style="color:#fff;background-color:#0e639c;">&nbsp;$(sync) Auto-switch ON&nbsp;</span>';
 function statusTooltip(cap, accounts, auto, now = Date.now() / 1000) {
     const me = cap.you && accounts.find((a) => isClaude(a) && a.label === cap.you);
-    const lines = [cap.you ? `**${cap.you}** · active` + (auto ? ' ' + PILL : '') : 'No active account' + (auto ? ' ' + PILL : '')];
+    const lines = [cap.you ? `**${mdSafe(cap.you)}** · active` + (auto ? ' ' + PILL : '') : 'No active account' + (auto ? ' ' + PILL : '')];
     if (cap.you) {
         const age = me && !isFresh(me, now) ? ageText(me.fetched_at, now) || me.state : me ? null : 'no data';
         const live = (epoch) => epoch && epoch > now - 60;
@@ -241,7 +244,7 @@ function statusTooltip(cap, accounts, auto, now = Date.now() / 1000) {
         const mark = (new Set(cap.relogin || [])).has(cap.you) ? ' · re-login' : age === 'no data' ? ' · no data' : age ? ` · data ${age}` : '';
         lines.push(line('5h', me && me.five_pct, me && me.five_reset_epoch) + mark, line('Weekly', me && me.week_pct, me && me.week_reset_epoch));
     }
-    if (cap.best) lines.push(`Next: ${cap.best.label} (5h ${pctOr(cap.best.five)}, weekly ${pctOr(cap.best.week)})`);
+    if (cap.best) lines.push(`Next: ${mdSafe(cap.best.label)} (5h ${pctOr(cap.best.five)}, weekly ${pctOr(cap.best.week)})`);
     const md = new vscode.MarkdownString(lines.join('\n\n'), true);
     md.supportHtml = true;
     return md;

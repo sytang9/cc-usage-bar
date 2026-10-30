@@ -98,6 +98,28 @@ run(async () => {
         assert.strictEqual(p.hoverAt({ kind: 'five', from: now - d, to: now, pts: [[t0, 10, R], [t0 + 600, 11, R], [t0 + 1200, 12, R], [t0 + 1200 + 2700, 15, R]] }, t0 + 2500).rate, 'avg +4.0%/h over 45m (no samples)', 'minutes');
     });
 
+    await check('holes: few points still find the hole (lower median), and a downsampled 7d / 30d range dashes only holes over 3 columns', () => {
+        const p = panel(), R = now + 3600, hole = (n) => n * 3600;
+        // 3 samples: 10 min, then a 14 h hole. The upper median would be the hole itself.
+        const t0 = now - 20 * 3600, three = [[t0, 10, R], [t0 + 600, 11, R], [t0 + 600 + hole(14), 18, R]];
+        assert.strictEqual(p.chart('x', three, now - 86400, now, '', null, 18, 'five', 'a').split('<polyline class="ln gap"').length - 1, 1, 'dashed');
+        assert.strictEqual(p.hoverAt({ kind: 'five', from: now - 86400, to: now, pts: three }, t0 + hole(7)).rate, 'avg +0.5%/h over 14h (no samples)');
+        // A series of 10-min samples with a hole in the middle, more points than the 300 columns, so it is downsampled.
+        const series = (days, holeH) => {
+            const a = now - days * 86400, n = Math.floor((days * 86400 - hole(holeH)) / 1200) - 1, pts = [];
+            let v = 0;
+            for (let i = 0; i < n; i++) pts.push([a + i * 600, (v += 0.01), R]);
+            const b = a + (n - 1) * 600 + hole(holeH);
+            for (let i = 0; i < n; i++) pts.push([b + i * 600, (v += 0.01), R]);
+            return pts;
+        };
+        const dashes = (days, holeH) => p.chart('x', series(days, holeH), now - days * 86400, now, '', null, 10, 'week', 'a').split('<polyline class="ln gap"').length - 1;
+        assert.strictEqual(dashes(7, 12), 1, '7d: a column is 34 min, a 12 h hole is dashed');
+        assert.strictEqual(dashes(7, 1), 0, '7d: a 1 h gap is under 3 columns');
+        assert.strictEqual(dashes(30, 10), 1, '30d: a column is 2.4 h, a 10 h hole (over 7.2 h) is dashed');
+        assert.strictEqual(dashes(30, 5), 0, '30d: a 5 h hole is under 3 columns, not dashed');
+    });
+
     await check('hover: the rate is taken over a trailing window (1 h on 5h, 24 h on weekly), so whole-number steps do not swing it (review finding)', () => {
         const p = panel(), t0 = now - 3 * 3600, R = now + 3600;
         const steps = [10, 10, 11, 11, 11, 12, 12, 13, 13, 13, 14, 14, 15];
