@@ -48,6 +48,18 @@ echo "\$*" >>"$CODE_LOG"
 exit 0
 STUB
 chmod +x "$CODE_STUB_DIR/code"
+# A stub `crontab` too (backed by a file): uninstall.sh removes the ccswitch schedule line, and the real crontab
+# must never be read or written by a test.
+CRON_FILE="$CODE_STUB_DIR/crontab.txt"
+cat >"$CODE_STUB_DIR/crontab" <<STUB
+#!/usr/bin/env bash
+case "\$1" in
+  -l) [[ -f "$CRON_FILE" ]] || { echo "no crontab for test" >&2; exit 1; }; cat "$CRON_FILE" ;;
+  -) cat >"$CRON_FILE" ;;
+  *) exit 64 ;;
+esac
+STUB
+chmod +x "$CODE_STUB_DIR/crontab"
 export PATH="$CODE_STUB_DIR:$PATH"
 
 main() {
@@ -330,6 +342,25 @@ main() {
   fi
 
   rm -rf "$home11"
+
+  # --- Case 11e: uninstall takes out the ccswitch schedule line and only that line ---
+  local home11c
+  home11c="$(make_sandbox)"
+  mkdir -p "$home11c/.claude"
+  run_install "$home11c" "y"
+  printf '%s\n' '0 3 * * * /usr/bin/backup' >"$CRON_FILE"
+  HOME="$home11c" bash "$home11c/.claude/ccswitch" schedule on >/dev/null 2>&1
+  printf '%s\n' 'MAILTO=""' >>"$CRON_FILE"
+  OUT="$(HOME="$home11c" SHELL=/bin/bash bash "$REPO_DIR/uninstall.sh" <<<"" 2>&1)"
+  EXIT_CODE=$?
+  if [[ "$EXIT_CODE" -eq 0 ]] && ! grep -q '# ccswitch-schedule' "$CRON_FILE" \
+    && [[ "$(cat "$CRON_FILE")" == $'0 3 * * * /usr/bin/backup\nMAILTO=""' ]] && [[ ! -e "$home11c/.claude/ccswitch" ]]; then
+    pass "case11e uninstall removes the schedule line, keeps the other crontab lines"
+  else
+    fail "case11e uninstall left the schedule line or changed others (exit=$EXIT_CODE): $(cat "$CRON_FILE") / $OUT"
+  fi
+  rm -f "$CRON_FILE"
+  rm -rf "$home11c"
 
   # --- Case 12: --purge-accounts alone is NOT enough -- only an affirmative
   # y/yes answer may delete accounts/. This pins the two properties that

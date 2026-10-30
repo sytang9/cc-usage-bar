@@ -97,6 +97,7 @@ To wire up the statusLine by hand instead, merge this into
 Removes the two scripts from `~/.claude`, the `~/.local/bin/ccswitch` symlink,
 and the `statusLine` entry from `settings.json` — each only if it is still
 ours, so a `statusLine` you have since repointed at your own script survives.
+If you turned on `ccswitch schedule`, it also removes that one crontab line (no other line).
 Your saved accounts under `~/.claude/accounts/` are **kept**: they are live
 OAuth credentials that exist nowhere else. Add `--purge-accounts` to delete
 them too (it asks first). `--print-only` shows what it would do.
