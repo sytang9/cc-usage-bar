@@ -336,9 +336,9 @@ function panelData(accounts, cap, { now, installed, auto, team = false, histRang
 
 // Turning auto-switch ON switches accounts with nobody watching, so it asks in a modal and records the yes in
 // globalState (state); auto-switch never acts without it. OFF needs no dialog. Returns true when the setting changed.
-const AUTO_DETAIL = 'Auto-switch changes the Claude Code account for every new Claude Code session on this machine, without asking, '
+const AUTO_DETAIL = 'Auto-switch changes the Claude Code account for every Claude Code session on this machine, without asking, '
     + 'when the active account reaches 100% (5h or weekly). If it is already at 100%, it switches right away. '
-    + 'Open Claude Code tabs keep the old account until you restart them.';
+    + 'Open Claude Code tabs use the new account from their next message.';
 const CONSENT = 'claudeUsage.autoSwitchConsent';
 async function askAutoConsent(state) {
     const ok = await vscode.window.showWarningMessage('Turn on auto-switch?', { modal: true, detail: AUTO_DETAIL }, 'Turn on') === 'Turn on';
@@ -392,13 +392,13 @@ async function switchSeat(label, onDone) {
     if (relogin.has(label) || !saved(label)) return enroll(label, relogin.has(label));
 
     const ok = await vscode.window.showWarningMessage(`Switch Claude Code to ${label}?`,
-        { modal: true, detail: 'Instant, using your saved login (ccswitch). New Claude Code sessions use it; restart open Claude Code tabs to move them over.' },
+        { modal: true, detail: 'Instant, using your saved login (ccswitch). Open and new Claude Code sessions use it from their next message.' },
         'Switch');
     if (ok !== 'Switch') return;
     const r = await ccswitch([label]);
     if (!r.ok) { vscode.window.showErrorMessage('ccswitch failed: ' + r.msg); return; }
     onDone();
-    vscode.window.showInformationMessage(`Switched Claude Code to ${label}. Restart open Claude Code tabs to use it.`);
+    vscode.window.showInformationMessage(`Switched Claude Code to ${label}. Open Claude Code tabs use it from their next message.`);
 }
 
 // ccswitch's reserved words (RESERVED_WORDS in the ccswitch script): a label may not be one of them.
@@ -612,7 +612,7 @@ async function autoSwitch(cap, state, onDone) {
     if (!res.r) return res;
     if (!res.r.ok) { vscode.window.showErrorMessage(`Auto-switch to ${res.to} failed: ` + res.r.msg); return res; }
     onDone();
-    const next = await vscode.window.showWarningMessage(`Auto-switched Claude Code: ${res.from} is full, now on ${res.to} (most headroom). Restart open Claude Code tabs to use it.`, 'Turn auto-switch off');
+    const next = await vscode.window.showWarningMessage(`Auto-switched Claude Code: ${res.from} is full, now on ${res.to} (most headroom). Open Claude Code tabs use it from their next message.`, 'Turn auto-switch off');
     if (next === 'Turn auto-switch off') changeAutoSwitch(false);
     return res;
 }

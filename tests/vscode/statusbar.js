@@ -105,10 +105,18 @@ run(async () => {
         assert.ok(!/type \/login/.test(src), 'enroll no longer asks for /login');
     });
 
-    await check('switch texts agree with ccswitch: open Claude Code tabs need a restart', () => {
+    await check('switch texts agree with ccswitch: open Claude Code tabs follow on their next message', () => {
         const src = fs.readFileSync(file, 'utf8');
-        assert.ok(!/carry on as the new seat/.test(src), 'no hot-swap claim');
-        assert.match(src, /restart open Claude Code tabs/i);
+        assert.match(src, /from their next message/i);
+    });
+
+    await check('no shipped string says a restart is needed', () => {
+        const root = require('path').join(__dirname, '..', '..');
+        for (const f of ['README.md', 'ccswitch', 'vscode/extension.js', 'vscode/webview/panel.js', 'vscode/package.json']) {
+            const t = fs.readFileSync(require('path').join(root, f), 'utf8');
+            assert.ok(!/restart open Claude Code/i.test(t), f + ' still says "restart open Claude Code"');
+            assert.ok(!/requires restarting Claude Code|restart Claude Code to apply/i.test(t), f + ' still claims a restart is needed');
+        }
     });
 
     await check('a failed settings write shows an error message instead of vanishing', async () => {

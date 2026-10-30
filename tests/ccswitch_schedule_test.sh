@@ -122,7 +122,7 @@ if [[ $RC -ne 0 && "$OUT" == *"'schedule' is a reserved word"* ]]; then pass "'s
 
 # 11. unknown subcommand, version
 cc schedule bogus >/dev/null 2>&1; RC=$?
-if [[ $RC -eq 1 && "$(cc version)" == "ccswitch 1.3.0" ]]; then pass "unknown schedule command exits 1; version 1.3.0"; else fail "bogus rc=$RC"; fi
+if [[ $RC -eq 1 && "$(cc version)" == "ccswitch 1.3.1" ]]; then pass "unknown schedule command exits 1; version 1.3.1"; else fail "bogus rc=$RC"; fi
 
 # 12. the generated line really runs: cron's minimal env, stub curl, one saved account
 ACC="$HOME_DIR/.claude/accounts/work"

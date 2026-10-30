@@ -74,7 +74,7 @@ function automation(d, ui) {
     return section('automation', 'Automation', open, '<span class="r">' + (d.auto ? 'On' : 'Off') + '</span>')
         + (open ? '<div class="kv"><span>Auto-switch at 100%</span>'
             + '<button class="tg' + (d.auto ? ' on' : '') + '" data-a="auto" role="switch" aria-checked="' + !!d.auto + '" aria-label="Auto-switch at 100%"'
-            + ' title="When the active account reaches 100%, switch to the next-best account (fresh data, working login, at most once per 10 min), without asking. Restart open Claude Code tabs to use it."></button></div>'
+            + ' title="When the active account reaches 100%, switch to the next-best account (fresh data, working login, at most once per 10 min), without asking. Open Claude Code tabs use it from their next message."></button></div>'
             + '<div class="note">Moves every new Claude Code session on this machine to the account in "If you run out". Asks once when you turn it on.</div>'
             + (d.schedule ? '<div class="kv"><span>Keep history when VS Code is closed</span>'
                 + '<button class="tg' + (d.schedule.on ? ' on' : '') + '" data-a="sched" role="switch" aria-checked="' + !!d.schedule.on + '" aria-label="Keep history when VS Code is closed"'
