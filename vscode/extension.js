@@ -110,22 +110,42 @@ function withHistory(accounts, want, now) {
     return accounts.map((a) => (isClaude(a) && want(a.label) && saved(a.label) ? { ...a, history: readHistory(a.label, now) } : a));
 }
 
-// "At this pace": the rise of one limit since its window started (the points that share the latest reset time),
-// extended in a straight line. Needs 20 min of points, a rise, and a last point under 30 min old. Returns { full: epoch }
-// when the limit would reach 100% before it resets, { lasts: true } when it would not, null when there is nothing to judge.
-// Reset times within a minute are one window (the API's reset time can move across a second boundary).
+// "At this pace": one limit's rise, extended in a straight line from the last point. The rate is the recent slope:
+// a least-squares line over the points of the current window (the latest reset time) in the recent span (5h limit: the
+// last 60 min, weekly: the last 24 h), when that span has 3+ points covering 20 min (weekly: 6 h); the API gives whole
+// percents, so a first-to-last slope jumps. A flat recent slope means { lasts: true }. Else the window average: needs
+// 20 min of points since the window's first sample and a rise. The last point must be under 30 min old.
+// Returns { full: epoch } when the limit would reach 100% before it resets, { lasts: true } when it would not,
+// null when there is nothing to judge. Reset times within a minute are one window (the API's reset time can move
+// across a second boundary).
 const PACE_MIN_SECS = 1200;
+const PACE_RECENT = { p5: [3600, 1200], p7: [86400, 21600] };  // [span, least covered] in seconds
 const sameWindow = (a, b) => a != null && b != null && Math.abs(a - b) <= 60;
 // Points that are not finite numbers (a hand-edited file) give null; it never throws.
 const usable = (x, p, r) => !!x && fin(x.t) && fin(x[p]) && fin(x[r]);
+// Least-squares slope of percent per second.
+function slope(pts, p) {
+    const n = pts.length, mt = pts.reduce((s, x) => s + x.t, 0) / n, mp = pts.reduce((s, x) => s + x[p], 0) / n;
+    const den = pts.reduce((s, x) => s + (x.t - mt) ** 2, 0);
+    return den ? pts.reduce((s, x) => s + (x.t - mt) * (x[p] - mp), 0) / den : 0;
+}
 function forecast(points, p, r, now) {
     const last = points[points.length - 1];
     if (!usable(last, p, r) || last[r] <= now || now - last.t > FRESH_SECS) return null;
     if (last[p] >= 100) return null;  // already full: the bar says so
-    const first = points.find((x) => usable(x, p, r) && sameWindow(x[r], last[r]));
-    const span = last.t - first.t, rise = last[p] - first[p];
-    if (span < PACE_MIN_SECS || rise <= 0) return null;
-    const full = last.t + (100 - last[p]) * span / rise;
+    const win = points.filter((x) => usable(x, p, r) && sameWindow(x[r], last[r]));
+    const [span, cover] = PACE_RECENT[p] || PACE_RECENT.p5;
+    const recent = win.filter((x) => x.t >= last.t - span);
+    let rate;  // percent per second
+    if (recent.length >= 3 && last.t - recent[0].t >= cover) {
+        rate = slope(recent, p);
+        if (!(rate > 0)) return { lasts: true };  // not rising at the recent pace
+    } else {
+        const first = win[0], secs = last.t - first.t, rise = last[p] - first[p];
+        if (secs < PACE_MIN_SECS || rise <= 0) return null;
+        rate = rise / secs;
+    }
+    const full = last.t + (100 - last[p]) / rate;
     if (!fin(full) || full <= now) return null;  // the line says it is full already, but no fetch saw it
     return full < last[r] ? { full } : { lasts: true };
 }
