@@ -643,10 +643,32 @@ function removeOldHelper() {
     }
 }
 
+// "Keep history when VS Code is closed": `ccswitch schedule` (1.3.0+) keeps one cron line that samples usage while VS Code is
+// closed. State comes from `schedule status --json`: null = hide the toggle (team file, no ccswitch, no crontab on this machine),
+// { old: true } = ccswitch too old (the toggle shows; a click offers the update, like Add account), else { on, every }.
+async function ccswitchHasSchedule() {
+    const r = await run(CCSWITCH, ['version']);
+    const m = /(\d+)\.(\d+)\.(\d+)/.exec(r.out);
+    return r.ok && !!m && (+m[1] > 1 || (+m[1] === 1 && +m[2] >= 3));
+}
+async function scheduleRead() {
+    if (usageFile() || !fs.existsSync(CCSWITCH)) return null;
+    if (!(await ccswitchHasSchedule())) return { old: true, on: false, every: null };
+    const r = await run(CCSWITCH, ['schedule', 'status', '--json']);
+    if (!r.ok) return null;
+    try { const j = JSON.parse(r.out); return { on: j.on === true, every: Number.isInteger(j.every) ? j.every : null }; } catch { return null; }
+}
+async function scheduleChange(on) {
+    if (!(await ccswitchHasSchedule())) return installCcswitch('Keeping history while VS Code is closed needs ccswitch 1.3.0 or newer (`ccswitch schedule`). The installed one is older, and this installer updates it.');
+    const r = await run(CCSWITCH, ['schedule', on ? 'on' : 'off']);
+    if (!r.ok) vscode.window.showErrorMessage('Could not turn background history ' + (on ? 'on' : 'off') + ': ' + (r.err.trim() || r.msg));
+}
+
 function activate(context) {
     removeOldHelper();
     let view = null;
     let accounts = [], cap = null;
+    let schedule = null;  // scheduleRead(): what the Automation toggle "Keep history when VS Code is closed" shows
     const status = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
     status.command = 'workbench.view.extension.claudeUsage';
     status.text = '$(pulse) Claude …';
@@ -658,9 +680,11 @@ function activate(context) {
     const push = () => {
         if (!view || !cap) return;
         const now = Date.now() / 1000, want = (l) => historyOn || l === cap.you;
-        view.webview.postMessage(panelData(view.visible ? withHistory(accounts, want, now) : accounts, cap,
-            { now, installed: fs.existsSync(CCSWITCH), auto: !!cap.auto, team: !!usageFile(), histRange, historyOn }));
+        view.webview.postMessage({ ...panelData(view.visible ? withHistory(accounts, want, now) : accounts, cap,
+            { now, installed: fs.existsSync(CCSWITCH), auto: !!cap.auto, team: !!usageFile(), histRange, historyOn }), schedule });
     };
+    const readSchedule = () => scheduleRead().then((s) => { schedule = s; push(); });
+    const toggleSchedule = () => scheduleChange(!(schedule && schedule.on)).then(readSchedule);
     const autoOn = () => vscode.workspace.getConfiguration('claudeUsage').get('autoSwitch');
     const toggleAuto = () => changeAutoSwitch(!autoOn(), context.globalState);
 
@@ -706,13 +730,14 @@ function activate(context) {
                 v.webview.html = webviewHtml(v.webview);
                 v.webview.onDidReceiveMessage((m) => {
                     if (!m) return;
-                    if (m === 'ready') { push(); if (inflight) post({ kind: 'busy', on: true }); }
+                    if (m === 'ready') { push(); readSchedule(); if (inflight) post({ kind: 'busy', on: true }); }
                     else if (m.refresh) manualHealth();
                     else if (m.seat) switchSeat(m.seat, poll);
                     else if (m.add) addAccount();
                     else if (m.save) saveSeat(m.save, poll);
                     else if (m.del) deleteSeat(m.del, poll);
                     else if (m.toggleAuto) toggleAuto();
+                    else if (m.toggleSchedule) toggleSchedule();
                     else if (m.installCc) installCcswitch();
                     else if (m.wantStats) { if (v.visible) wantStats(); }  // a hidden, retained Stats tab never rebuilds
                     else if (m.wantHistory !== undefined || m.histRange !== undefined) {
@@ -754,4 +779,4 @@ ${esc.toString()}
 ${read('panel.js')}</script></body></html>`;
 }
 
-module.exports = { activate };
+module.exports = { activate, scheduleRead, scheduleChange };

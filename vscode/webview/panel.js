@@ -75,7 +75,12 @@ function automation(d, ui) {
         + (open ? '<div class="kv"><span>Auto-switch at 100%</span>'
             + '<button class="tg' + (d.auto ? ' on' : '') + '" data-a="auto" role="switch" aria-checked="' + !!d.auto + '" aria-label="Auto-switch at 100%"'
             + ' title="When the active account reaches 100%, switch to the next-best account (fresh data, working login, at most once per 10 min), without asking. Restart open Claude Code tabs to use it."></button></div>'
-            + '<div class="note">Moves every new Claude Code session on this machine to the account in "If you run out". Asks once when you turn it on.</div>' : '');
+            + '<div class="note">Moves every new Claude Code session on this machine to the account in "If you run out". Asks once when you turn it on.</div>'
+            + (d.schedule ? '<div class="kv"><span>Keep history when VS Code is closed</span>'
+                + '<button class="tg' + (d.schedule.on ? ' on' : '') + '" data-a="sched" role="switch" aria-checked="' + !!d.schedule.on + '" aria-label="Keep history when VS Code is closed"'
+                + ' title="Adds one line to your crontab that reads usage every ' + (d.schedule.every || 10) + ' minutes while VS Code is closed (ccswitch schedule). Turn it off to remove the line."></button></div>'
+                + '<div class="note">' + (d.schedule.on ? 'On: a cron job samples usage every ' + (d.schedule.every || '?') + ' min, so the History charts have no gaps while VS Code is closed.'
+                    : 'Off: History has gaps while VS Code is closed. Turning this on adds one line to your crontab.') + '</div>' : '') : '');
 }
 
 // One limit over time: an SVG line from `from` to `to` (epoch s), 0-100%, with a dashed 80% guide. A new window (the
@@ -358,6 +363,7 @@ if (typeof acquireVsCodeApi === 'function') {
         else if (a === 'save') return vsc.postMessage({ save: l });
         else if (a === 'delete') return vsc.postMessage({ del: l });
         else if (a === 'auto') return vsc.postMessage({ toggleAuto: 1 });
+        else if (a === 'sched') return vsc.postMessage({ toggleSchedule: 1 });
         else if (a === 'install') return vsc.postMessage({ installCc: 1 });
         vsc.setState(ui);
         paint();
