@@ -126,7 +126,11 @@ function chart(title, pts, from, to, ago, pace, now, kind, label) {
     return '<div class="ch' + (now >= HIGH ? ' hi' : '') + '"><div class="top"><span>' + title + '</span><span class="p">' + pctText(now) + '</span></div>'
         + '<svg viewBox="0 0 ' + CW + ' ' + CH + '" data-cid="' + cid + '" preserveAspectRatio="none" role="img" aria-label="' + title + ', ' + pts.length + ' points">'
         + '<line class="g80" x1="0" x2="' + CW + '" y1="' + y(HIGH) + '" y2="' + y(HIGH) + '"/>'
-        + '<line class="base" x1="0" x2="' + CW + '" y1="' + CH + '" y2="' + CH + '"/>' + svg
+        + '<line class="base" x1="0" x2="' + CW + '" y1="' + CH + '" y2="' + CH + '"/>'
+        // Colour by value: the lines are drawn once in blue, then again in orange clipped to the band above the 80% guide,
+        // so only the part of a line at 80% or more is orange. The copy holds only the lines (no reset ticks); its pieces carry .up as well.
+        + '<clipPath id="hu' + cid + '"><rect x="0" y="0" width="' + CW + '" height="' + y(HIGH) + '"/></clipPath>'
+        + '<g class="lns">' + svg + '</g><g class="lns up" clip-path="url(#hu' + cid + ')">' + svg.replace(/<line class="rz"[^>]*\/>/g, '').replace(/class="ln/g, 'class="up ln') + '</g>'
         + '<line class="gl" x1="0" x2="0" y1="0" y2="' + CH + '"/></svg><div class="tip" role="presentation"></div>'
         + '<div class="ax"><span>' + ago + '</span><span>now</span></div>'
         + (pace ? '<div class="rs">' + esc(pace) + '</div>' : '') + '</div>';
