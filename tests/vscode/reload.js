@@ -19,7 +19,8 @@ run(async () => {
         const posted = [], timers = [], ctx = { subscriptions: [], globalStorageUri: { fsPath: path.join(HOME, 'gs') }, globalState: memento(false) };
         let provider, onMsg;
         const keep = { win: { ...vscode.window }, commands: vscode.commands, ws: vscode.workspace.onDidChangeConfiguration, st: global.setTimeout, si: global.setInterval };
-        Object.assign(vscode.window, { createStatusBarItem: () => ({ show() {}, dispose() {} }), registerWebviewViewProvider: (id, pr) => { provider = pr; return { dispose() {} }; } });
+        const sbi = { show() {}, dispose() {} };
+        Object.assign(vscode.window, { createStatusBarItem: () => sbi, registerWebviewViewProvider: (id, pr) => { provider = pr; return { dispose() {} }; } });
         vscode.StatusBarAlignment = { Right: 2 };
         vscode.commands = { registerCommand: () => ({ dispose() {} }), executeCommand: async () => {} };
         vscode.extensions = { getExtension: () => undefined };
@@ -43,8 +44,10 @@ run(async () => {
             const n0 = fetches();
             onMsg({ refresh: 1 }); onMsg({ refresh: 1 });  // a second click while the first fetch runs
             assert.deepStrictEqual(busyOf(), [true], 'a click sets the spin at once');
+            assert.ok(sbi.text.startsWith('$(refresh~spin) ●'), 'the status bar icon spins while the fetch runs (auto-switch off): ' + sbi.text);
             await idle();
             assert.deepStrictEqual(busyOf(), [true, false], 'success clears the spin');
+            assert.ok(sbi.text.startsWith('●') && !sbi.text.includes('spin'), 'the status bar icon stops: ' + sbi.text);
             assert.strictEqual(fetches() - n0, 1, 'the second click ran no second fetch');
             posted.length = 0;
             timed[1](); assert.deepStrictEqual(busyOf(), [true], 'the 10 min fetch spins');
@@ -55,7 +58,9 @@ run(async () => {
             posted.length = 0;
             usageReply('not json', 1);  // a failed fetch
             onMsg({ refresh: 1 }); assert.deepStrictEqual(busyOf(), [true]);
+            assert.ok(sbi.text.includes('refresh~spin'));
             await idle(); assert.deepStrictEqual(busyOf(), [true, false], 'failure clears the spin');
+            assert.ok(!sbi.text.includes('spin'), 'a failed fetch stops the status bar spin');
             onMsg({ refresh: 1 }); await idle();
             assert.strictEqual(fetches() - n0, 5, 'after the fetch ends, a click fetches again');
         } finally {

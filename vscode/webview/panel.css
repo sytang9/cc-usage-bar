@@ -120,8 +120,9 @@ button { font: inherit; cursor: pointer; }
     border: 1px solid var(--vscode-editorHoverWidget-border, var(--vscode-contrastBorder, var(--vscode-panel-border)));
 }
 .ch.hov .tip { display: block; }
-.ch .ln { fill: none; stroke: var(--vscode-progressBar-background); stroke-width: 1.5; vector-effect: non-scaling-stroke; }
-.ch.hi .ln { stroke: var(--vscode-charts-orange); }
+.ch .ln { fill: none; stroke-width: 1.5; vector-effect: non-scaling-stroke; }  /* stroke comes from the group */
+.ch g.lns { stroke: var(--vscode-progressBar-background); }
+.ch g.lns.up { stroke: var(--vscode-charts-orange); }  /* the copy above the 80% guide: orange there only */
 .ch .ln.gap { stroke-dasharray: 3 3; opacity: .5; }  /* a hole: no sample was taken */
 .ch .g80, .ch .rz, .ch .base { stroke: var(--vscode-descriptionForeground); vector-effect: non-scaling-stroke; }
 .ch .g80 { stroke-dasharray: 3 3; opacity: .45; }

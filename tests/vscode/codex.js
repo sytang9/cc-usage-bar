@@ -84,7 +84,7 @@ run(async () => {
         assert.strictEqual(d.counts.relogin, 0, 'the active Claude "codex" is not re-login-marked twice, the Codex row never');
         assert.strictEqual(d.active.five, 23, 'the hero is the Claude account');
         const tip = e.statusTooltip({ ...capOf(a, 'codex', ['codex']) }, a, false).value;
-        assert.ok(!tip.includes('Codex') && tip.startsWith('**codex** · active'), 'the tip is about the active Claude account only: ' + tip);
+        assert.ok(!tip.includes('Codex') && tip.startsWith('**codex**&nbsp;&nbsp;[$(refresh)]') && tip.includes('23%') && !tip.includes('77%'), 'the tip is about the active Claude account only: ' + tip);
     });
 
     await check('codex: never the status-bar headroom, even when every Claude account is full', () => {
