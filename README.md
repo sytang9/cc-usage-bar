@@ -195,18 +195,19 @@ every `--every <min>` minutes (5 to 60, default 10). It is off until you turn it
 on, and it is not a daemon.
 
 ```
-*/10 * * * * PATH='<dirs of jq, curl, node>:/usr/local/bin:/usr/bin:/bin' '<abs path>/ccswitch' schedule tick # ccswitch-schedule
+*/10 * * * * PATH='<dirs of jq, curl, node>:/usr/local/bin:/usr/bin:/bin' '<abs path>/ccswitch' schedule tick 10 # ccswitch-schedule
 ```
 
 - `on` replaces an existing marked line; `off` removes only that line. Every
   other line of your crontab stays as it was.
-- `schedule tick` is the cron job: one `usage --json --refresh` run with stdout
+- `schedule tick <min>` is the cron job: one `usage --json` run with stdout
   dropped and stderr appended to `~/.claude/ccswitch-schedule.log` (kept to the last
-  200 lines). It uses `--refresh` so the 10-minute usage cache cannot swallow a sample.
+  200 lines). It fetches only when the cache is older than `<min>*60-60` seconds, so it
+  does not double a fetch VS Code made a minute ago, and a run a second early is not lost.
 - Cron has a minimal `PATH`, so `on` writes the directories of `jq`, `curl` and
   `node` as found when you run it. Run `on` again after moving them.
 - Exit codes: 0 ok (`status` exits 0 whether on or off); 1 bad arguments;
-  2 no `crontab` command, or crontab refused the write.
+  2 no `crontab` command, `crontab -l` failed (your crontab is left alone), or crontab refused the write.
 - `status --json` prints `{"on":true,"every":10}`; the VS Code Automation section
   uses it for the "Keep history when VS Code is closed" toggle.
 

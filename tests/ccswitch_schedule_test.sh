@@ -24,7 +24,7 @@ mkdir -p "$HOME_DIR/.claude" "$BIN"
 cat >"$BIN/crontab" <<STUB
 #!/usr/bin/env bash
 case "\$1" in
-  -l) [[ -f "$CRON" ]] || { echo "no crontab for test" >&2; exit 1; }; cat "$CRON" ;;
+  -l) [[ -e "$ROOT/cron.denied" ]] && { echo "crontab: permission denied" >&2; exit 1; }; [[ -f "$CRON" ]] || { echo "no crontab for test" >&2; exit 1; }; cat "$CRON" ;;
   -) cat >"$CRON" ;;
   *) exit 64 ;;
 esac
@@ -47,13 +47,12 @@ rm -f "$CRON"
 # 1. on adds exactly one marked line and reports it
 OUT="$(cc schedule on 2>&1)"; RC=$?
 LINE="$(grep '# ccswitch-schedule$' "$CRON")"
-if [[ $RC -eq 0 && "$(marked)" == 1 && "$LINE" == "*/10 * * * * PATH='"*"' '$TARGET' schedule tick # ccswitch-schedule" ]]; then
+if [[ $RC -eq 0 && "$(marked)" == 1 && "$LINE" == "*/10 * * * * PATH='"*"' '$TARGET' schedule tick 10 # ccswitch-schedule" ]]; then
   pass "on adds one marked line (every 10)"
 else fail "on (rc=$RC): $OUT / $LINE"; fi
 
-# 2. the PATH in the line holds the dirs of jq and curl
-JQDIR="$(dirname "$(PATH="$BIN:$PATH" command -v jq)")"
-if [[ "$LINE" == *"PATH='$BIN:"* && "$LINE" == *"$JQDIR"* && "$LINE" == *":/bin' "* ]]; then
+# 2. the PATH in the line starts with the stub dir (jq and curl are found there) and ends with the standard dirs
+if [[ "$LINE" == *"PATH='$BIN:"* && "$LINE" == *":/usr/local/bin"* && "$LINE" == *":/bin' "* ]]; then
   pass "line PATH has the dirs of curl and jq"
 else fail "PATH in line: $LINE"; fi
 
@@ -119,7 +118,7 @@ if [[ $RC -eq 2 ]]; then pass "status --json without crontab exits 2"; else fail
 
 # 10. reserved word
 OUT="$(cc save schedule 2>&1)"; RC=$?
-if [[ $RC -ne 0 && "$OUT" == *"reserved"* ]] || [[ $RC -ne 0 && "$OUT" == *"schedule"* ]]; then pass "'schedule' is a reserved label"; else fail "reserved (rc=$RC): $OUT"; fi
+if [[ $RC -ne 0 && "$OUT" == *"'schedule' is a reserved word"* ]]; then pass "'schedule' is a reserved label"; else fail "reserved (rc=$RC): $OUT"; fi
 
 # 11. unknown subcommand, version
 cc schedule bogus >/dev/null 2>&1; RC=$?
@@ -139,16 +138,62 @@ if [[ $RC -eq 0 && -s "$HIST" && "$(tail -n 1 "$HIST" | jq -r '.p5')" == 12 ]]; 
   pass "the cron command runs under env -i and appends a history sample"
 else fail "cron command (rc=$RC): $CMD / $(cat "$HIST" 2>/dev/null)"; fi
 
-# 13. a run inside the cache TTL still samples (--refresh), so a cron run one second early is not lost
+# 13. the tick skips when the cache is newer than every*60-60 s (VS Code just fetched), and samples past that,
+# so a cron run a few seconds early is not lost
 N0="$(wc -l <"$HIST")"
 env -i HOME="$HOME_DIR" sh -c "$CMD"
-if [[ "$(wc -l <"$HIST")" -gt "$N0" ]]; then pass "a second run inside the 10-minute cache still appends a sample"; else fail "cache skipped the sample"; fi
+N1="$(wc -l <"$HIST")"
+CACHE="$ACC/.usage-cache"
+jq --argjson t "$(( $(date +%s) - 530 ))" '.fetched_at = $t' "$CACHE" >"$CACHE.t" && mv "$CACHE.t" "$CACHE"
+env -i HOME="$HOME_DIR" sh -c "$CMD"
+N2="$(wc -l <"$HIST")"
+jq --argjson t "$(( $(date +%s) - 545 ))" '.fetched_at = $t' "$CACHE" >"$CACHE.t" && mv "$CACHE.t" "$CACHE"
+env -i HOME="$HOME_DIR" sh -c "$CMD"
+N3="$(wc -l <"$HIST")"
+if [[ "$N1" == "$N0" && "$N2" == "$N0" && "$N3" -gt "$N0" ]]; then
+  pass "tick skips a cache under every*60-60 s old (530 s), fetches one over it (545 s)"
+else fail "tick cache rule: $N0 $N1 $N2 $N3"; fi
 
 # 14. the log is bounded
 LOG="$HOME_DIR/.claude/ccswitch-schedule.log"
 seq 1 500 >"$LOG"
 env -i HOME="$HOME_DIR" sh -c "$CMD"
 if [[ "$(wc -l <"$LOG")" -le 200 && "$(tail -n 1 "$LOG")" == 500 ]]; then pass "log trimmed to the last 200 lines"; else fail "log lines: $(wc -l <"$LOG")"; fi
+
+# 15. S-1: a crontab that cannot be read is never replaced
+printf '%s\n' '0 3 * * * /usr/bin/backup' >"$CRON"; cp "$CRON" "$ROOT/before3"
+touch "$ROOT/cron.denied"
+OUT="$(cc schedule on 2>&1)"; RC=$?
+OUT2="$(cc schedule off 2>&1)"; RC2=$?
+rm -f "$ROOT/cron.denied"
+if [[ $RC -eq 2 && $RC2 -eq 2 && "$OUT" == *"cannot read your crontab"* && "$OUT" == *"permission denied"* ]] && cmp -s "$CRON" "$ROOT/before3"; then
+  pass "crontab -l fails (not 'no crontab'): exit 2, the crontab is left alone"
+else fail "unreadable crontab (rc=$RC/$RC2): $OUT / $(cat "$CRON")"; fi
+
+# 16. S-2: a PATH dir with ' or % is left out of the line (it would break cron's quoting)
+WEIRD="$ROOT/we%ird'dir"; mkdir -p "$WEIRD"
+ln -s "$(command -v node || command -v jq)" "$WEIRD/node"
+rm -f "$CRON"
+OUT="$(HOME="$HOME_DIR" PATH="$WEIRD:$BIN:$PATH" bash "$TARGET" schedule on 2>&1)"; RC=$?
+LINE="$(grep '# ccswitch-schedule$' "$CRON")"
+PATHPART="${LINE#*PATH=\'}"; PATHPART="${PATHPART%%\' *}"
+if [[ $RC -eq 0 && "$PATHPART" != *%* && "$PATHPART" != *"'"* && "$PATHPART" == "$BIN:"* ]]; then
+  pass "a PATH dir with a quote or percent is skipped"
+else fail "weird PATH dir (rc=$RC): $LINE"; fi
+
+# 17. S-3: --every with a leading zero is read as decimal; the line and status --json stay valid
+for v in 08 010 015; do
+  cc schedule on --every "$v" >/dev/null 2>&1; RC=$?
+  want=$((10#$v)); J="$(cc schedule status --json)"
+  if [[ $RC -eq 0 && "$J" == "{\"on\":true,\"every\":$want}" ]] && grep -q "^\*/$want \* \* \* \* PATH=.* schedule tick $want # ccswitch" "$CRON" && jq -e . <<<"$J" >/dev/null; then
+    pass "--every $v is $want min (valid JSON)"
+  else fail "--every $v (rc=$RC): $J / $(cat "$CRON")"; fi
+done
+
+# 18. a ccswitch path with ' or % is refused (cron cannot run it)
+BADDIR="$ROOT/bad%dir"; mkdir -p "$BADDIR"; cp "$TARGET" "$BADDIR/ccswitch"
+OUT="$(HOME="$HOME_DIR" PATH="$BIN:$PATH" bash "$BADDIR/ccswitch" schedule on 2>&1)"; RC=$?
+if [[ $RC -eq 1 && "$OUT" == *"cannot run it"* ]]; then pass "a ccswitch path with '%' is refused"; else fail "bad path (rc=$RC): $OUT"; fi
 
 echo
 echo "schedule tests: $PASS_COUNT passed, $FAIL_COUNT failed"
