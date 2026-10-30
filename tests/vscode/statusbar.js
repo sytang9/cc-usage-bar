@@ -50,9 +50,8 @@ run(async () => {
 
     const cells = (md) => ({ full: (md.match(/█/g) || []).length, empty: (md.match(/░/g) || []).length });
     const AUTO_TOGGLE = ['claudeUsage.refresh', 'claudeUsage.toggleAutoSwitch'];
-    // The tooltip's paragraphs; the bar table becomes one row per limit, each row its cells [name, bar, pct, reset+mark].
-    const parts = (v) => v.split('\n\n').flatMap((p) => (!p.startsWith('<table>') ? [p]
-        : p.slice(7, -8).split('</tr>').filter(Boolean).map((r) => r.replace(/^<tr>/, '').split('</td>').filter(Boolean).map((c) => c.replace(/^<td>/, '')))));
+    // The tooltip's paragraphs; a bar row (bar first, then "<name> <pct>" and the rest) becomes [name, bar, pct, rest].
+    const parts = (v) => v.split('\n\n').map((p) => { const m = p.match(/^((?:<span[^>]*>[█░]+<\/span>)+)&nbsp;&nbsp;(5h|Weekly) (\S+)(.*)$/); return m ? [m[2], m[1], m[3], m[4]] : p; });
 
     await check('statusTooltip: label + refresh link, 5h and Weekly bars with percent and reset, auto-switch line; trusted for exactly two commands', () => {
         const a = [...sbAcc(), acct('old', 5, 5, now - 7200), acct('dead', 5, 5, now - 13 * 86400)];
@@ -61,10 +60,10 @@ run(async () => {
         assert.deepStrictEqual(tip.isTrusted, { enabledCommands: AUTO_TOGGLE }, 'trusted for exactly the two commands');
         const lines = parts(tip.value);
         const nb = '&nbsp;';
-        assert.ok(/^<table><tr><td>5h<\/td>/.test(tip.value.split('\n\n')[1]), 'both bars sit in one table, so they start at the same x');
+        assert.ok(tip.value.split('\n\n').slice(1, 3).every((r) => r.startsWith('<span style="color:')), 'each bar row starts with its bar, so both bars start at the left edge');
         assert.strictEqual(lines[0], '**work**' + nb + nb + '[$(refresh)](command:claudeUsage.refresh "Refresh usage now")');
-        assert.deepStrictEqual([lines[1][0], lines[1][2], lines[1][3]], ['5h', '100%', '· resets ' + e.resetText(now + 3600)]);
-        assert.deepStrictEqual([lines[2][0], lines[2][2], lines[2][3]], ['Weekly', '40%', '· resets ' + e.resetText(now + 86400)]);
+        assert.deepStrictEqual([lines[1][0], lines[1][2], lines[1][3]], ['5h', '100%', ' · resets ' + e.resetText(now + 3600)]);
+        assert.deepStrictEqual([lines[2][0], lines[2][2], lines[2][3]], ['Weekly', '40%', ' · resets ' + e.resetText(now + 86400)]);
         assert.deepStrictEqual(cells(lines[1][1]), { full: 10, empty: 0 });
         assert.deepStrictEqual(cells(lines[2][1]), { full: 4, empty: 6 });
         assert.strictEqual(lines[3], '$(circle-slash) Auto-switch off · next personal' + nb + nb + '[$(play)](command:claudeUsage.toggleAutoSwitch "Turn auto-switch on")');
@@ -83,7 +82,7 @@ run(async () => {
         assert.deepStrictEqual(cells(zero), { full: 0, empty: 10 });
         assert.ok(!zero.includes('#3794ff') && zero.includes('0%'), zero);
         const unk = mk(null, 30);
-        assert.ok(!/[█░]/.test(unk[1].join('')) && unk[1][2] === '–', unk[1].join('|'));
+        assert.ok(!unk[1][1].includes('█') && cells(unk[1][1]).empty === 10 && unk[1][2] === '–', unk[1].join('|'));  // empty bar keeps the left edge
         assert.ok(/[█░]/.test(unk[2].join('')));
     });
 
@@ -119,7 +118,7 @@ run(async () => {
         assert.ok(parts(e.statusTooltip(sb(a, 'old'), a, false).value)[1][3].endsWith(' · data 2h old'));
         assert.ok(parts(e.statusTooltip(sb(a, 'work', ['work']), a, false).value)[1][3].endsWith(' · re-login'));
         const ghost = parts(e.statusTooltip(sb(a, 'ghost'), a, false).value);  // active, unsaved, in no list
-        assert.ok(ghost[1].join('|') === '5h||–| · no data' && ghost[2].join('|') === 'Weekly||–|', ghost.join('/'));
+        assert.ok(ghost[1][0] === '5h' && ghost[1][2] === '–' && ghost[1][3] === ' · no data' && ghost[2][0] === 'Weekly' && ghost[2][2] === '–' && ghost[2][3] === '', ghost.join('/'));
         const none = e.statusTooltip(sb(a, null), a, true).value.split('\n\n');
         assert.strictEqual(none.length, 2);
         assert.ok(none[0].startsWith('No active account&nbsp;&nbsp;[$(refresh)](command:claudeUsage.refresh') && none[1].startsWith('$(sync) Auto-switch on → none'), none.join('|'));
@@ -128,11 +127,11 @@ run(async () => {
         assert.ok(!/over 30 min/.test(fs.readFileSync(file, 'utf8')), 'the old unconditional claim is gone');
     });
 
-    await check('statusText: a running fetch shows $(sync~spin) with auto-switch on or off; the rest is unchanged; the pill code is gone', () => {
+    await check('statusText: a running fetch shows $(refresh~spin) with auto-switch on or off; the rest is unchanged; the pill code is gone', () => {
         const a = sbAcc();
-        assert.strictEqual(e.statusText(sb(a, 'work'), a, false, true), '$(sync~spin) ● work 100%/40% · ⇄ personal');
-        assert.strictEqual(e.statusText(sb(a, 'work'), a, true, true), '$(sync~spin) ● work 100%/40% · ⇄ personal');
-        assert.strictEqual(e.statusText(sb(a, null), a, false, true), '$(sync~spin) ● none');
+        assert.strictEqual(e.statusText(sb(a, 'work'), a, false, true), '$(refresh~spin) ● work 100%/40% · ⇄ personal');
+        assert.strictEqual(e.statusText(sb(a, 'work'), a, true, true), '$(refresh~spin) ● work 100%/40% · ⇄ personal');
+        assert.strictEqual(e.statusText(sb(a, null), a, false, true), '$(refresh~spin) ● none');
         assert.strictEqual(e.statusText(sb(a, 'work'), a, true), '$(sync) ● work 100%/40% · ⇄ personal');
         assert.ok(!/PILL|Auto-switch ON/.test(fs.readFileSync(file, 'utf8')), 'no pill');
     });

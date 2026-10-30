@@ -217,11 +217,11 @@ function autoTarget(cap) {
     return isLabel(cap.best.label) ? cap.best.label : null;
 }
 
-// Status bar: `● <you> <5h>%/<wk>% · ⇄ <next-best>`. ◷ marks data that is not fresh; $(sync) marks auto-switch on.
+// Status bar: `● <you> <5h>%/<wk>% · ⇄ <next-best>`. ◷ marks data that is not fresh; $(sync) marks auto-switch on; $(refresh~spin), the reload button's icon, marks a fetch running.
 // Only the best qualifying account is named, so a stale or dead account is never counted as available.
 const pctOr = (v) => (v == null ? '–' : Math.round(v) + '%');
 function statusText(cap, accounts, auto, busy = false) {
-    const lead = busy ? '$(sync~spin) ' : auto ? '$(sync) ' : '';
+    const lead = busy ? '$(refresh~spin) ' : auto ? '$(sync) ' : '';
     if (!cap.you) return lead + '● none';
     const me = accounts.find((a) => isClaude(a) && a.label === cap.you) || {};
     return `${lead}● ${cap.you} ${pctOr(me.five_pct)}/${pctOr(me.week_pct)}${cap.activeFresh ? '' : ' ◷'} · ⇄ ${cap.best ? cap.best.label : 'none'}`;
@@ -248,11 +248,12 @@ function statusTooltip(cap, accounts, auto, now = Date.now() / 1000) {
     if (cap.you) {
         const age = me && !isFresh(me, now) ? ageText(me.fetched_at, now) || me.state : me ? null : 'no data';
         const live = (epoch) => epoch && epoch > now - 60;
-        // One table, so both bars start at the same x: the hover font is proportional, so padding with spaces cannot align them.
-        const row = (name, pct, epoch, extra) => `<tr><td>${name}</td><td>${pct == null ? '' : bar(pct)}</td><td>${pctOr(pct)}</td>`
-            + `<td>${(live(epoch) ? '· resets ' + resetText(epoch) : '') + extra}</td></tr>`;
+        // The bar comes first on each row, so both bars start at the left edge: the hover font is proportional, so a
+        // label before the bar would push it to a different x. An unknown percent gets an empty bar and a dash.
+        const row = (name, pct, epoch, extra) => bar(pct == null ? 0 : pct) + NB + NB + `${name} ${pctOr(pct)}`
+            + (live(epoch) ? ' · resets ' + resetText(epoch) : '') + extra;
         const mark = (new Set(cap.relogin || [])).has(cap.you) ? ' · re-login' : age === 'no data' ? ' · no data' : age ? ` · data ${age}` : '';
-        lines.push('<table>' + row('5h', me && me.five_pct, me && me.five_reset_epoch, mark) + row('Weekly', me && me.week_pct, me && me.week_reset_epoch, '') + '</table>');
+        lines.push(row('5h', me && me.five_pct, me && me.five_reset_epoch, mark), row('Weekly', me && me.week_pct, me && me.week_reset_epoch, ''));
     }
     const next = cap.best ? mdSafe(cap.best.label) : null;
     lines.push(auto

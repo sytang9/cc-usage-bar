@@ -44,7 +44,7 @@ run(async () => {
             const n0 = fetches();
             onMsg({ refresh: 1 }); onMsg({ refresh: 1 });  // a second click while the first fetch runs
             assert.deepStrictEqual(busyOf(), [true], 'a click sets the spin at once');
-            assert.ok(sbi.text.startsWith('$(sync~spin) ●'), 'the status bar icon spins while the fetch runs (auto-switch off): ' + sbi.text);
+            assert.ok(sbi.text.startsWith('$(refresh~spin) ●'), 'the status bar icon spins while the fetch runs (auto-switch off): ' + sbi.text);
             await idle();
             assert.deepStrictEqual(busyOf(), [true, false], 'success clears the spin');
             assert.ok(sbi.text.startsWith('●') && !sbi.text.includes('spin'), 'the status bar icon stops: ' + sbi.text);
@@ -58,7 +58,7 @@ run(async () => {
             posted.length = 0;
             usageReply('not json', 1);  // a failed fetch
             onMsg({ refresh: 1 }); assert.deepStrictEqual(busyOf(), [true]);
-            assert.ok(sbi.text.includes('sync~spin'));
+            assert.ok(sbi.text.includes('refresh~spin'));
             await idle(); assert.deepStrictEqual(busyOf(), [true, false], 'failure clears the spin');
             assert.ok(!sbi.text.includes('spin'), 'a failed fetch stops the status bar spin');
             onMsg({ refresh: 1 }); await idle();
