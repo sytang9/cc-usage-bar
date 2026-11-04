@@ -59,7 +59,7 @@ const terminals = [], inputOpts = [];
 const vscode = {
     window: {
         showWarningMessage: async (m, o, ...b) => { said.push(m); saidOpts.push(o); return stub.answer; },
-        showInformationMessage: async (m, o, ...b) => { said.push(m); return typeof o === 'object' ? stub.answer : undefined; },
+        showInformationMessage: async (m, o, ...b) => { said.push(m); return o !== undefined ? stub.answer : undefined; },  // answers only a dialog with buttons
         showErrorMessage: (m) => said.push('ERROR ' + m),
         createTerminal: (name) => { const t = { name, show() {}, sendText(x) { said.push('TERMINAL ' + x); } }; terminals.push(t); return t; },
         onDidCloseTerminal: (f) => { stub.closeTerminal = f; return { dispose() {} }; },
@@ -84,7 +84,7 @@ const file = path.join(__dirname, '..', '..', 'vscode', 'extension.js');
 // Each load is one fresh extension instance, as in one VS Code window.
 function load() {
     const m = new Module(file); m.filename = file; m.paths = Module._nodeModulePaths(path.dirname(file));
-    m._compile(fs.readFileSync(file, 'utf8') + '\n;Object.assign(module.exports, { isLabel, autoBlock, autoSwitch, deleteSeat, CONSENT, readSnapshot, isFresh, qualifies, capacity, parseUsageJson, mergeLogins, readAccounts, activeLabel, autoTarget, checkLogins, relogin, switchSeat, saveSeat, addAccount, runAdd, labelProblem, ccswitchHasAdd, esc, webviewHtml, panelData, ageText, setAutoSwitch, changeAutoSwitch, AUTO_DETAIL, statusText, statusTooltip, resetText, CODICONS, rolled, readHistory, forecast, statsFeed, STATS_EVERY_MS, STATS_RETRY_MS, withHistory, HISTORY_READ_BYTES });', file);
+    m._compile(fs.readFileSync(file, 'utf8') + '\n;Object.assign(module.exports, { isLabel, autoBlock, autoSwitch, deleteSeat, CONSENT, readSnapshot, isFresh, qualifies, capacity, parseUsageJson, mergeLogins, readAccounts, activeLabel, autoTarget, checkLogins, relogin, switchSeat, saveSeat, addAccount, runAdd, labelProblem, ccswitchHasAdd, esc, webviewHtml, panelData, ageText, setAutoSwitch, changeAutoSwitch, AUTO_DETAIL, statusText, statusTooltip, resetText, CODICONS, rolled, readHistory, forecast, statsFeed, STATS_EVERY_MS, STATS_RETRY_MS, withHistory, HISTORY_READ_BYTES, checkUpdate, newer, SNOOZE_KEY });', file);
     return m.exports;
 }
 const e = load();
