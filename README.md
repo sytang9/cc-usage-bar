@@ -448,7 +448,10 @@ it. A row whose label breaks ccswitch's label rule (letters, digits, `_` and
 read-only Codex row.
 
 If `ccswitch` is missing, the sidebar offers to install it (it runs this repo's
-`install.sh` in a visible terminal). `./uninstall.sh` removes the sidebar too.
+`install.sh` in a visible terminal).
+Once a day it also checks the version on GitHub `main`; when it is newer it asks
+**Update now** / **Later** (Later asks again a day on). Update now runs `install.sh --vscode` the same way
+(updating `ccswitch` and the sidebar), then **Developer: Reload Window**. `./uninstall.sh` removes the sidebar too.
 Layout first based on Jens Duttke's usage-monitor-for-claude (MIT).
 
 To change it: edit `vscode/`, bump `version` in `vscode/package.json`, run

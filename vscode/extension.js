@@ -433,10 +433,41 @@ async function installCcswitch(why = 'Seat switching needs ccswitch from github.
             + 'links ccswitch into ~/.local/bin and sets the Claude Code status line (your settings.json is backed up first). It runs in a terminal you can watch.' },
         'Install');
     if (ok !== 'Install') return;
+    runInstaller('Install ccswitch', '');
+}
+
+// Pull (or clone) this repo into ~/.local/share/cc-usage-bar and run its install.sh in a terminal the user watches.
+function runInstaller(name, flags) {
     const dir = '$HOME/.local/share/cc-usage-bar';
-    const t = vscode.window.createTerminal('Install ccswitch');
+    const t = vscode.window.createTerminal(name);
     t.show();
-    t.sendText(`(git -C "${dir}" pull -q 2>/dev/null || git clone -q https://github.com/sytang9/cc-usage-bar.git "${dir}") && bash "${dir}/install.sh"`);
+    t.sendText(`(git -C "${dir}" pull -q 2>/dev/null || git clone -q https://github.com/sytang9/cc-usage-bar.git "${dir}") && bash "${dir}/install.sh"${flags}`);
+}
+
+// Update check: the vsix is installed by hand, so VS Code never updates it. Read the version on GitHub main and,
+// when it is newer, offer (or, after Later, offer again a day on) the same installer with --vscode (it updates ccswitch and this sidebar together).
+const LATEST_URL = 'https://raw.githubusercontent.com/sytang9/cc-usage-bar/main/vscode/package.json';
+const UPDATE_EVERY_MS = 24 * 3600 * 1000;
+const SNOOZE_KEY = 'claudeUsage.updateSnoozedAt';  // when Later was picked; quiet for a day after
+const isVersion = (v) => typeof v === 'string' && /^\d+\.\d+\.\d+$/.test(v);
+const newer = (a, b) => { const x = a.split('.').map(Number), y = b.split('.').map(Number); const i = x.findIndex((n, k) => n !== y[k]); return i >= 0 && x[i] > y[i]; };
+// The version string on main, or null on any failure (offline, timeout, not JSON): never an error to the user.
+const latestVersion = () => new Promise((done) => {
+    const req = require('https').get(LATEST_URL, { timeout: 10000 }, (res) => {
+        let body = '';
+        res.on('data', (c) => { if (body.length < 65536) body += c; });
+        res.on('end', () => { try { done(res.statusCode === 200 ? JSON.parse(body).version : null); } catch { done(null); } });
+    });
+    req.on('timeout', () => req.destroy());
+    req.on('error', () => done(null));
+});
+async function checkUpdate(state, latest = latestVersion, now = Date.now()) {
+    if (now - (state.get(SNOOZE_KEY) || 0) < UPDATE_EVERY_MS) return;
+    const current = require('./package.json').version, v = await latest();
+    if (!isVersion(v) || !newer(v, current)) return;
+    const pick = await vscode.window.showInformationMessage(`Claude Usage ${v} is available (you have ${current}).`, 'Update now', 'Later');
+    if (pick === 'Later') state.update(SNOOZE_KEY, now);
+    else if (pick === 'Update now') runInstaller('Update cc-usage-bar', ' --vscode');
 }
 
 // Keep-alive + health check, all decided by ccswitch itself: `ccswitch usage --json` refreshes every saved
@@ -699,6 +730,9 @@ function activate(context) {
     poll();
     const timer = setInterval(poll, POLL_MS);
     const firstCheck = setTimeout(health, 30 * 1000);
+    const update = () => checkUpdate(context.globalState);
+    const firstUpdate = setTimeout(update, 15 * 1000), updateTimer = setInterval(update, UPDATE_EVERY_MS);
+    context.subscriptions.push({ dispose: () => { clearTimeout(firstUpdate); clearInterval(updateTimer); } });
     // ccswitch's own cache: refresh at its 10-min TTL; with a team file, hourly is enough to keep tokens alive
     const healthTimer = setInterval(health, (usageFile() ? 60 : 10) * 60 * 1000);
     context.subscriptions.push({ dispose: () => { clearTimeout(firstCheck); clearInterval(healthTimer); } });
