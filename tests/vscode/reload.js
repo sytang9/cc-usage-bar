@@ -139,6 +139,8 @@ run(async () => {
         const busyOf = () => posted.filter((m) => m.kind === 'busy').map((m) => m.on);
         const idle = async () => { for (let i = 0; i < 200 && busyOf().length % 2; i++) await new Promise((r) => keep.st(r, 25)); };
         const lastFetch = () => calls().filter((c) => c.startsWith('usage')).pop();
+        const keepWatch = fs.watchFile, watches = {};
+        fs.watchFile = (f, o, cb) => { watches[f] = cb; };
         try {
             usageReply(usageDoc({ work: 'ok' }));
             load().activate(ctx);
@@ -157,7 +159,19 @@ run(async () => {
             assert.strictEqual(lastFetch(), 'usage --json', 'the 10-min timer never bypasses the cache');
             cmds['claudeUsage.refresh'](); await idle();
             assert.strictEqual(lastFetch(), 'usage --json --refresh', 'after 60 s a manual refresh is live again');
+            // limit-hook.sh marks a rate-limited turn: the window takes the mark and fetches live at once.
+            Date.now = () => keep.now() + 122 * 1000;
+            assert.ok(watches[e.LIMIT_HIT], 'the sidebar watches the limit mark');
+            fs.writeFileSync(e.LIMIT_HIT, JSON.stringify({ t: Math.floor(Date.now() / 1000) }));
+            const before = calls().length;
+            watches[e.LIMIT_HIT](); await idle();
+            assert.strictEqual(lastFetch(), 'usage --json --refresh', 'a limit hit fetches live numbers');
+            assert.ok(!fs.existsSync(e.LIMIT_HIT), 'the mark is taken');
+            watches[e.LIMIT_HIT](); await idle();
+            assert.strictEqual(calls().filter((c) => c.startsWith('usage')).length - calls().slice(0, before).filter((c) => c.startsWith('usage')).length, 1,
+                'no mark, no second fetch');
         } finally {
+            fs.watchFile = keepWatch;
             Date.now = keep.now;
             global.setTimeout = keep.st; global.setInterval = keep.si;
             Object.assign(vscode.window, keep.win); vscode.commands = keep.commands; vscode.workspace.onDidChangeConfiguration = keep.ws;

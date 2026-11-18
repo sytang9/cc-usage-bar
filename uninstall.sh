@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# uninstall.sh -- reverse install.sh: remove the three installed scripts, the
-# ~/.local/bin symlink, and the statusLine and subagentStatusLine entries it
-# added to settings.json.
+# uninstall.sh -- reverse install.sh: remove the installed scripts, the
+# ~/.local/bin symlink, and the statusLine and subagentStatusLine entries and
+# the StopFailure limit hook it added to settings.json.
 #
 # What this deliberately does NOT do: touch $HOME/.claude/accounts/. That
 # directory holds live OAuth credentials for every account you enrolled, and
@@ -18,7 +18,7 @@ BIN_DIR="$HOME/.local/bin"
 ACCOUNTS_DIR="$CLAUDE_DIR/accounts"
 # What install.sh copies into $CLAUDE_DIR: the remove path and --print-only
 # both read this one list.
-INSTALLED_SCRIPTS=("$CLAUDE_DIR/statusline-usage.sh" "$CLAUDE_DIR/subagent-statusline.sh" "$CLAUDE_DIR/ccswitch")
+INSTALLED_SCRIPTS=("$CLAUDE_DIR/statusline-usage.sh" "$CLAUDE_DIR/subagent-statusline.sh" "$CLAUDE_DIR/ccswitch" "$CLAUDE_DIR/limit-hook.sh")
 
 # Literal value that Claude Code expands at statusline-run time. Must match
 # the literal tilde that install.sh wrote to settings.json; using $HOME would
@@ -27,6 +27,8 @@ INSTALLED_SCRIPTS=("$CLAUDE_DIR/statusline-usage.sh" "$CLAUDE_DIR/subagent-statu
 OUR_STATUSLINE_COMMAND="~/.claude/statusline-usage.sh"
 # shellcheck disable=SC2088
 OUR_SUBAGENT_STATUSLINE_COMMAND="~/.claude/subagent-statusline.sh"
+# shellcheck disable=SC2088
+OUR_LIMIT_HOOK_COMMAND="~/.claude/limit-hook.sh"
 CCW_FUNCTION='ccw() { ~/.claude/ccswitch "$@" --relaunch; }'
 
 PURGE_ACCOUNTS=0
@@ -149,6 +151,38 @@ remove_statusline() {
   fi
 }
 
+# remove_limit_hook: take our command out of .hooks.StopFailure. Only a group
+# that held our command and is now empty goes, then an empty StopFailure, then
+# an empty hooks object. Every other group stays exactly as it was, whatever its
+# shape. Never fatal: a file jq cannot rewrite gets a warning, and the rest of
+# the uninstall still runs.
+remove_limit_hook() {
+  [[ -f "$SETTINGS_FILE" ]] || return 0
+  jq -e . "$SETTINGS_FILE" >/dev/null 2>&1 || return 0  # remove_statusline already warned
+  if ! jq -e --arg cmd "$OUR_LIMIT_HOOK_COMMAND" \
+    'try ([.hooks.StopFailure[]? | objects | .hooks | arrays | .[] | objects | .command] | index($cmd) != null) catch false' "$SETTINGS_FILE" >/dev/null 2>&1; then
+    echo "No StopFailure limit hook to remove."
+    return 0
+  fi
+  local tmp
+  tmp="$(mktemp "$CLAUDE_DIR/.cc-usage-bar-uninstall.XXXXXX")"
+  if jq --arg cmd "$OUR_LIMIT_HOOK_COMMAND" '
+      def ours: type == "object" and .command == $cmd;
+      .hooks.StopFailure |= map(
+        if type == "object" and (.hooks | type) == "array" and any(.hooks[]; ours)
+        then .hooks |= map(select(ours | not)) | if (.hooks | length) == 0 then empty else . end
+        else . end)
+      | if (.hooks.StopFailure | length) == 0 then del(.hooks.StopFailure) else . end
+      | if (.hooks | length) == 0 then del(.hooks) else . end' \
+    "$SETTINGS_FILE" >"$tmp" 2>/dev/null && [[ -s "$tmp" ]]; then
+    mv "$tmp" "$SETTINGS_FILE"
+    echo "Removed the StopFailure limit hook from $SETTINGS_FILE (other hooks untouched)"
+  else
+    rm -f "$tmp"
+    echo "Warning: could not remove the StopFailure limit hook from $SETTINGS_FILE; it is unchanged. Remove the '$OUR_LIMIT_HOOK_COMMAND' entry by hand." >&2
+  fi
+}
+
 report_ccw_function() {
   local rc_file
   case "${SHELL:-}" in
@@ -207,6 +241,7 @@ main() {
     echo "  the crontab line marked '# ccswitch-schedule' (ccswitch schedule off; no other crontab line)"
     echo "  the .statusLine key in $SETTINGS_FILE (only if it points at cc-usage-bar)"
     echo "  the .subagentStatusLine key in $SETTINGS_FILE (only if it points at cc-usage-bar)"
+    echo "  our limit hook in the .hooks key in $SETTINGS_FILE (one .hooks.StopFailure entry; no other hook)"
     echo "  the VS Code sidebar $VSCODE_EXTENSION_ID (only if the 'code' CLI lists it)"
     if [[ "$PURGE_ACCOUNTS" == "1" ]]; then
       echo "Would DELETE (after interactive confirmation): $ACCOUNTS_DIR"
@@ -224,6 +259,7 @@ main() {
   remove_symlink
   remove_statusline statusLine "$OUR_STATUSLINE_COMMAND"
   remove_statusline subagentStatusLine "$OUR_SUBAGENT_STATUSLINE_COMMAND"
+  remove_limit_hook
   remove_vscode_extension
   handle_accounts
   report_ccw_function

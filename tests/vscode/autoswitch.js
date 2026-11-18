@@ -233,4 +233,21 @@ run(async () => {
             }
         });
     } finally { delete cfg.autoSwitch; autoReset(); }
+
+    // --- limit hit: limit-hook.sh (StopFailure) writes ~/.claude/accounts/.limit-hit; one window takes it ----------
+    await check('takeLimitHit: a fresh mark is taken once; old, future, broken or missing marks are not', () => {
+        const now = Math.floor(Date.now() / 1000), mark = (t) => fs.writeFileSync(e.LIMIT_HIT, JSON.stringify({ t }));
+        assert.strictEqual(e.LIMIT_HIT, path.join(ACC, '.limit-hit'), 'the path limit-hook.sh writes');
+        mark(now - 5);
+        const other = load();  // a second VS Code window
+        assert.strictEqual(e.takeLimitHit(now), true);
+        assert.strictEqual(other.takeLimitHit(now), false, 'the second window finds it taken');
+        assert.ok(!fs.existsSync(e.LIMIT_HIT));
+        mark(now - 121); assert.strictEqual(e.takeLimitHit(now), false, 'over 2 min old: VS Code was closed');
+        assert.ok(!fs.existsSync(e.LIMIT_HIT), 'an old mark is cleared too');
+        mark(now + 3600); assert.strictEqual(e.takeLimitHit(now), false, 'a mark from the future');
+        fs.writeFileSync(e.LIMIT_HIT, 'not json'); assert.strictEqual(e.takeLimitHit(now), false);
+        assert.strictEqual(e.takeLimitHit(now), false, 'no mark');
+        assert.deepStrictEqual(fs.readdirSync(ACC).filter((f) => f.startsWith('.limit-hit')), [], 'no taken file is left');
+    });
 });

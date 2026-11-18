@@ -672,6 +672,21 @@ async function autoSwitchOnce(cap, state) {
     } finally { fs.rmSync(AUTO_LOCK, { recursive: true, force: true }); }
 }
 
+// --- Limit hit: the Claude Code StopFailure hook (limit-hook.sh, matcher rate_limit) writes this file when a turn
+// fails on a rate limit. One window takes it with an atomic rename, so many windows make one live fetch, and the poll
+// after that fetch can auto-switch at once instead of at the next 5-min fetch. The fetch is the proof: a rate_limit
+// can also be a capacity cut, and then the usage numbers stay under the percent and nothing switches.
+const LIMIT_HIT = path.join(ACCOUNTS, '.limit-hit');  // { t: <epoch secs> }
+const LIMIT_HIT_MAX_AGE_SECS = 120;  // an older mark (VS Code was closed) says nothing about now
+// True when this window took a fresh mark. The file is gone afterwards, taken or not.
+function takeLimitHit(now = Date.now() / 1000) {
+    const mine = `${LIMIT_HIT}.${process.pid}.taken`;
+    try { fs.renameSync(LIMIT_HIT, mine); } catch { return false; }  // none, or another window took it
+    const t = Number((readJson(mine) || {}).t);
+    fs.rmSync(mine, { force: true });
+    return fin(t) && now - t < LIMIT_HIT_MAX_AGE_SECS && t - now <= CLOCK_SLACK_SECS;
+}
+
 // Polls call this without waiting, so an error (an unreadable file, a stamp it cannot write) is shown here.
 async function autoSwitch(cap, state, onDone) {
     let res;
@@ -838,7 +853,10 @@ function activate(context) {
     let watched = usageFile() || ACCOUNTS;
     fs.watchFile(watched, { interval: 5000 }, poll);  // refresh as soon as new numbers land
     fs.watchFile(path.join(HOME, '.claude.json'), { interval: 5000 }, poll);  // "you" follows ccswitch run in a terminal
-    context.subscriptions.push({ dispose: () => { clearInterval(timer); fs.unwatchFile(watched); fs.unwatchFile(path.join(HOME, '.claude.json')); } });
+    // A turn hit a rate limit: fetch live now (after a fetch already running, which may have read the cache).
+    const limitHit = () => { if (takeLimitHit()) (inflight || Promise.resolve()).then(() => fetchLogins(true)).then(poll); };
+    fs.watchFile(LIMIT_HIT, { interval: 2000 }, limitHit);
+    context.subscriptions.push({ dispose: () => { clearInterval(timer); fs.unwatchFile(watched); fs.unwatchFile(path.join(HOME, '.claude.json')); fs.unwatchFile(LIMIT_HIT); } });
 }
 
 // One native panel: panel.css + esc + panel.js inlined; the vendored codicon font is the only file it loads.

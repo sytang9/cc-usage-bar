@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # install.sh — installs cc-usage-bar (statusline-usage.sh, subagent-statusline.sh,
-# ccswitch) into $HOME/.claude, wires up the statusLine and subagentStatusLine
-# entries in $HOME/.claude/settings.json,
+# limit-hook.sh, ccswitch) into $HOME/.claude, wires up the statusLine and
+# subagentStatusLine entries and the StopFailure limit hook in
+# $HOME/.claude/settings.json,
 # and optionally adds a `ccw` shell shortcut. With --vscode it also installs the
 # VS Code sidebar (vscode/claude-usage.vsix) through the `code` CLI.
 #
@@ -22,8 +23,14 @@ BIN_DIR="$HOME/.local/bin"
 STATUSLINE_JSON='{"type":"command","command":"~/.claude/statusline-usage.sh","refreshInterval":5}'
 SUBAGENT_STATUSLINE_JSON='{"type":"command","command":"~/.claude/subagent-statusline.sh"}'
 SETTINGS_SNIPPET='{"statusLine": '"$STATUSLINE_JSON"', "subagentStatusLine": '"$SUBAGENT_STATUSLINE_JSON"'}'
+# The StopFailure hook: when a turn fails on a rate limit, limit-hook.sh tells
+# the VS Code sidebar to fetch live usage now (and auto-switch if it is on).
+# shellcheck disable=SC2088
+LIMIT_HOOK_COMMAND='~/.claude/limit-hook.sh'
+LIMIT_HOOK_JSON='{"matcher":"rate_limit","hooks":[{"type":"command","command":"'"$LIMIT_HOOK_COMMAND"'"}]}'
 
 CCW_FUNCTION='ccw() { ~/.claude/ccswitch "$@" --relaunch; }'
+SETTINGS_EXISTED=0  # set by main: settings.json was there before this run
 
 print_snippets() {
   echo "settings.json statusLine snippet (merged into \$HOME/.claude/settings.json):"
@@ -32,6 +39,9 @@ print_snippets() {
   else
     echo "$SETTINGS_SNIPPET"
   fi
+  echo
+  echo "StopFailure limit hook (appended to .hooks.StopFailure in the same file):"
+  echo "$LIMIT_HOOK_JSON"
   echo
   echo "ccw shell function (add to your shell rc, e.g. ~/.bashrc or ~/.zshrc):"
   echo "$CCW_FUNCTION"
@@ -66,9 +76,11 @@ install_scripts() {
   cp "$SCRIPT_DIR/statusline-usage.sh" "$CLAUDE_DIR/statusline-usage.sh"
   cp "$SCRIPT_DIR/subagent-statusline.sh" "$CLAUDE_DIR/subagent-statusline.sh"
   cp "$SCRIPT_DIR/ccswitch" "$CLAUDE_DIR/ccswitch"
-  chmod +x "$CLAUDE_DIR/statusline-usage.sh" "$CLAUDE_DIR/subagent-statusline.sh" "$CLAUDE_DIR/ccswitch"
+  cp "$SCRIPT_DIR/limit-hook.sh" "$CLAUDE_DIR/limit-hook.sh"
+  chmod +x "$CLAUDE_DIR/statusline-usage.sh" "$CLAUDE_DIR/subagent-statusline.sh" "$CLAUDE_DIR/ccswitch" "$CLAUDE_DIR/limit-hook.sh"
   echo "Installed: $CLAUDE_DIR/statusline-usage.sh"
   echo "Installed: $CLAUDE_DIR/subagent-statusline.sh"
+  echo "Installed: $CLAUDE_DIR/limit-hook.sh"
   echo "Installed: $CLAUDE_DIR/ccswitch"
 }
 
@@ -170,6 +182,35 @@ configure_settings() {
   fi
 }
 
+# configure_limit_hook: add our StopFailure entry to settings.json once, next
+# to any hooks the user has. Runs after configure_settings, so the file exists,
+# is valid JSON and is backed up. Never fatal: the status line works without it.
+configure_limit_hook() {
+  # Odd shapes (a string in the list, a group whose hooks is not a list) count as "not there", never as an error.
+  if jq -e --arg cmd "$LIMIT_HOOK_COMMAND" \
+    'try ([.hooks.StopFailure[]? | objects | .hooks | arrays | .[] | objects | .command] | index($cmd) != null) catch false' "$SETTINGS_FILE" >/dev/null 2>&1; then
+    echo "StopFailure limit hook already configured in $SETTINGS_FILE -- leaving it alone."
+    return 0
+  fi
+  # The backup holds the settings from before cc-usage-bar: only a file that was here before this run.
+  if [[ "$SETTINGS_EXISTED" == "1" && ! -e "$SETTINGS_FILE.bak" ]] && ! cp "$SETTINGS_FILE" "$SETTINGS_FILE.bak"; then
+    echo "Warning: could not back up $SETTINGS_FILE; the limit hook was not added." >&2
+    return 0
+  fi
+  local tmp
+  tmp="$(mktemp "$CLAUDE_DIR/.cc-usage-bar-settings.XXXXXX")"
+  # A .hooks or .hooks.StopFailure of the wrong type makes jq fail: the file stays as it was.
+  if jq --argjson entry "$LIMIT_HOOK_JSON" '.hooks.StopFailure = ((.hooks.StopFailure // []) + [$entry])' \
+    "$SETTINGS_FILE" >"$tmp" 2>/dev/null \
+    && [[ -s "$tmp" ]]; then
+    mv "$tmp" "$SETTINGS_FILE"
+    echo "Added the StopFailure limit hook to $SETTINGS_FILE (the sidebar fetches usage as soon as a turn hits a rate limit)"
+  else
+    rm -f "$tmp"
+    echo "Warning: could not add the StopFailure limit hook to $SETTINGS_FILE; it is unchanged." >&2
+  fi
+}
+
 # rc_file_for_shell: pick ~/.zshrc when the user's login shell is zsh,
 # otherwise default to ~/.bashrc.
 rc_file_for_shell() {
@@ -241,7 +282,9 @@ main() {
 
   install_scripts
   link_ccswitch_on_path
+  [[ -f "$SETTINGS_FILE" ]] && SETTINGS_EXISTED=1
   configure_settings
+  configure_limit_hook
 
   echo
   print_snippets

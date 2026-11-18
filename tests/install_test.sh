@@ -545,6 +545,96 @@ main() {
   fi
   rm -rf "$home19"
 
+  # --- case20: the StopFailure limit hook -------------------------------------
+  # Added once next to the user's own StopFailure hook; uninstall takes out ours only.
+  # shellcheck disable=SC2088  # the literal tilde install.sh writes into settings.json
+  local home20 s20 hookcmd='~/.claude/limit-hook.sh'
+  home20="$(make_sandbox)"
+  s20="$home20/.claude/settings.json"
+  mkdir -p "$home20/.claude"
+  echo '{"theme":"dark","hooks":{"StopFailure":[{"matcher":"","hooks":[{"type":"command","command":"my-own.sh"}]}],"Stop":[{"hooks":[{"type":"command","command":"x"}]}]}}' >"$s20"
+  run_install "$home20" "n"
+  run_install "$home20" "n"
+  if [[ "$EXIT_CODE" -eq 0 ]] && [[ -x "$home20/.claude/limit-hook.sh" ]] \
+    && [[ "$(jq --arg c "$hookcmd" '[.hooks.StopFailure[].hooks[] | select(.command == $c)] | length' "$s20")" == "1" ]] \
+    && [[ "$(jq -r --arg c "$hookcmd" '.hooks.StopFailure[] | select(.hooks[0].command == $c) | .matcher' "$s20")" == "rate_limit" ]] \
+    && [[ "$(jq -r '.hooks.StopFailure[0].hooks[0].command' "$s20")" == "my-own.sh" ]] \
+    && [[ "$(jq -r '.hooks.Stop[0].hooks[0].command' "$s20")" == "x" ]]; then
+    pass "case20 install adds the StopFailure limit hook once (matcher rate_limit), keeps the user's hooks"
+  else
+    fail "case20 limit hook wrong (exit=$EXIT_CODE): $(cat "$s20") $OUT"
+  fi
+  OUT="$(HOME="$home20" SHELL=/bin/bash bash "$REPO_DIR/uninstall.sh" <<<"" 2>&1)"
+  if [[ "$(jq '.hooks.StopFailure | length' "$s20")" == "1" ]] \
+    && [[ "$(jq -r '.hooks.StopFailure[0].hooks[0].command' "$s20")" == "my-own.sh" ]] \
+    && [[ "$(jq -r '.hooks.Stop[0].hooks[0].command' "$s20")" == "x" ]] \
+    && [[ ! -e "$home20/.claude/limit-hook.sh" ]]; then
+    pass "case20b uninstall removes only our StopFailure entry and the script"
+  else
+    fail "case20b uninstall limit hook wrong: $(cat "$s20") $OUT"
+  fi
+  rm -rf "$home20"
+
+  # --- case21: a fresh install with no settings.json: the hook is there, and no .bak of our own file
+  local home21
+  home21="$(make_sandbox)"
+  run_install "$home21" "n"
+  if [[ "$(jq -r '.hooks.StopFailure[0].hooks[0].command' "$home21/.claude/settings.json")" == "$hookcmd" ]] \
+    && [[ ! -e "$home21/.claude/settings.json.bak" ]]; then
+    pass "case21 fresh install adds the limit hook and makes no backup of its own file"
+  else
+    fail "case21 fresh install hook/backup wrong: $(ls -a "$home21/.claude") $OUT"
+  fi
+  OUT="$(HOME="$home21" SHELL=/bin/bash bash "$REPO_DIR/uninstall.sh" <<<"" 2>&1)"
+  if [[ "$(jq -r 'has("hooks")' "$home21/.claude/settings.json")" == "false" ]]; then
+    pass "case21b uninstall drops the hooks object it emptied"
+  else
+    fail "case21b empty hooks left: $(cat "$home21/.claude/settings.json")"
+  fi
+  rm -rf "$home21"
+
+  # --- case23: odd StopFailure shapes (review findings): a re-run adds no second copy, and uninstall keeps a
+  # group with no hooks key and a junk entry, removing only ours.
+  local home23 s23
+  home23="$(make_sandbox)"
+  s23="$home23/.claude/settings.json"
+  mkdir -p "$home23/.claude"
+  echo '{"hooks":{"StopFailure":["junk",{"matcher":"x"},{"hooks":{"odd":1}}]}}' >"$s23"
+  run_install "$home23" "n"
+  run_install "$home23" "n"
+  if [[ "$(jq --arg c "$hookcmd" '[.hooks.StopFailure[] | objects | .hooks | arrays | .[] | select(.command == $c)] | length' "$s23")" == "1" ]]; then
+    pass "case23 re-running install on odd StopFailure entries adds the hook once"
+  else
+    fail "case23 hook count wrong: $(cat "$s23")"
+  fi
+  OUT="$(HOME="$home23" SHELL=/bin/bash bash "$REPO_DIR/uninstall.sh" <<<"" 2>&1)"
+  if [[ "$(jq -c '.hooks.StopFailure' "$s23")" == '["junk",{"matcher":"x"},{"hooks":{"odd":1}}]' ]] \
+    && printf '%s' "$OUT" | grep -q 'Removed the StopFailure limit hook'; then
+    pass "case23b uninstall removes only ours and keeps every odd-shaped entry as it was"
+  else
+    fail "case23b uninstall changed user entries: $(cat "$s23") $OUT"
+  fi
+  rm -rf "$home23"
+
+  # --- case22: limit-hook.sh writes the mark only on rate_limit, only with an accounts dir, and always exits 0
+  local home22 hook22="$REPO_DIR/limit-hook.sh" mark22 t22 rc22
+  home22="$(make_sandbox)"
+  mark22="$home22/.claude/accounts/.limit-hit"
+  echo '{"error":"rate_limit"}' | HOME="$home22" bash "$hook22"; rc22=$?
+  if [[ "$rc22" -eq 0 && ! -e "$mark22" ]]; then pass "case22a no accounts dir: no mark, exit 0"; else fail "case22a rc=$rc22"; fi
+  mkdir -p "$home22/.claude/accounts"
+  echo '{"error":"server_error"}' | HOME="$home22" bash "$hook22"; rc22=$?
+  if [[ "$rc22" -eq 0 && ! -e "$mark22" ]]; then pass "case22b another error: no mark"; else fail "case22b rc=$rc22"; fi
+  echo '{"hook_event_name":"StopFailure","error":"rate_limit"}' | HOME="$home22" bash "$hook22"; rc22=$?
+  t22="$(jq -r '.t' "$mark22" 2>/dev/null)"
+  if [[ "$rc22" -eq 0 && "$t22" =~ ^[0-9]+$ ]] && (( $(date +%s) - t22 < 5 )) \
+    && [[ -z "$(find "$home22/.claude/accounts" -name '*.tmp')" ]]; then
+    pass "case22c rate_limit: writes {t: now} to accounts/.limit-hit, no temp file left"
+  else
+    fail "case22c mark wrong (rc=$rc22 t=$t22)"
+  fi
+  rm -rf "$home22"
+
   echo
   echo "----------------------------------------"
   echo "Passed: $PASS_COUNT  Failed: $FAIL_COUNT"
