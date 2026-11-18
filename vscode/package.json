@@ -2,7 +2,7 @@
   "name": "claude-usage",
   "displayName": "Claude Usage (ccswitch)",
   "description": "All your ccswitch accounts in the sidebar: 5h/weekly usage, most headroom, one-click switch, auto-switch",
-  "version": "1.12.0",
+  "version": "1.13.0",
   "publisher": "cc-usage-bar",
   "license": "MIT",
   "repository": "https://github.com/sytang9/cc-usage-bar",
@@ -52,7 +52,23 @@
           "type": "boolean",
           "default": false,
           "scope": "machine",
-          "markdownDescription": "When the active account reaches 100% (5h or weekly), switch Claude Code to the next-best account via ccswitch, **without asking**. It applies to every Claude Code session on this machine, open or new, from its next message. Turning it on asks once in a dialog; if you tick it here or edit settings.json, the sidebar shows that dialog once, and No turns it off. Machine-scoped, so Settings Sync never carries it to another machine."
+          "markdownDescription": "When the active account reaches 100% (5h or weekly), or the lower percents in `#claudeUsage.autoSwitchAtFiveHour#` / `#claudeUsage.autoSwitchAtWeekly#`, switch Claude Code to the next-best account via ccswitch, **without asking**. It applies to every Claude Code session on this machine, open or new, from its next message. Turning it on asks once in a dialog; if you tick it here or edit settings.json, the sidebar shows that dialog once, and No turns it off. Machine-scoped, so Settings Sync never carries it to another machine."
+        },
+        "claudeUsage.autoSwitchAtFiveHour": {
+          "type": "integer",
+          "default": 100,
+          "minimum": 50,
+          "maximum": 100,
+          "scope": "machine",
+          "markdownDescription": "Eager auto-switch: the percent of the 5-hour window at which `#claudeUsage.autoSwitch#` switches. 100 = only when that window is full. Set it lower, for example 95, to switch before the limit stops a running task; each account then keeps its last few percent of this window unused. Checked on its own, never mixed with the weekly percent. The target account must be under both percents."
+        },
+        "claudeUsage.autoSwitchAtWeekly": {
+          "type": "integer",
+          "default": 100,
+          "minimum": 50,
+          "maximum": 100,
+          "scope": "machine",
+          "markdownDescription": "Eager auto-switch: the percent of the weekly window at which `#claudeUsage.autoSwitch#` switches. 100 = only when that window is full. Set it lower, for example 95, to switch before the limit stops a running task; each account then keeps its last few percent of this window unused. Checked on its own, never mixed with the 5-hour percent. The target account must be under both percents."
         },
         "claudeUsage.usageFile": {
           "type": "string",

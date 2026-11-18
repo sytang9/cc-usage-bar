@@ -33,7 +33,7 @@ function activeLabel() {
 // Usage snapshot in one shape, from either source: { accounts: [{ label, state, fetched_at, five_pct, week_pct, ... }] }.
 // Every account carries its OWN fetched_at; there is no global age. ccswitch's cache: one file per saved account.
 // Team file: it has no per-account age, so an account's age is the file's generated_at (else its mtime).
-const FRESH_SECS = 1800;  // display: data younger than 30 min is shown as current (ccswitch's cache TTL is 10 min)
+const FRESH_SECS = 1800;  // display: data younger than 30 min is shown as current (the sidebar fetches every 5 min)
 const SWITCH_FRESH_SECS = 900;  // switching (a target, or the active account's 'full'): data younger than 15 min
 const CLOCK_SLACK_SECS = 60;  // a fetched_at further in the future than this is not fresh (clock skew, a bad file)
 function readSnapshot() {
@@ -52,7 +52,7 @@ function readSnapshot() {
     }), ...codexRows()] };
 }
 
-// The read-only Codex row: ccswitch's Codex cache, which `ccswitch usage --json` (the 10-min health check) refreshes.
+// The read-only Codex row: ccswitch's Codex cache, which `ccswitch usage --json` (the 5-min health check) refreshes.
 // Shown when that cache or a Codex login exists; auth.json is only checked for existence, never read.
 function codexRows() {
     const f = path.join(CODEX, '.usage-cache');
@@ -70,8 +70,8 @@ const HISTORY_SECS = 30 * 86400;
 // The History range selector: how far back the charts reach. 'auto' keeps the original look (5h chart 24h, weekly chart 7d).
 const HIST_RANGES = { '24h': 86400, '7d': 7 * 86400, '30d': 30 * 86400 };
 // minimize: a fixed tail, not a scan back to the 30-day cutoff. A line is about 70 bytes and ccswitch adds one per
-// live fetch (about every 10 min), so 512 KB holds about 52 days (30 days is about 300 KB). If fetches get much more frequent, scan back instead.
-const HISTORY_READ_BYTES = 512 * 1024;
+// live fetch (about every 5 min), so 1 MB holds about 52 days (30 days is about 600 KB). If fetches get much more frequent, scan back instead.
+const HISTORY_READ_BYTES = 1024 * 1024;
 const fin = Number.isFinite;
 // A usable line: a finite t, and each percent and reset a finite number or null (ccswitch writes null for no data).
 const isPoint = (o) => !!o && fin(o.t) && ['p5', 'p7', 'r5', 'r7'].every((k) => o[k] === null || fin(o[k]));
@@ -201,21 +201,43 @@ function resetText(epoch, short = false) {
 // Load = max(5h, weekly) (the CtrlA hub's rules); best = lowest load among qualifying accounts.
 function capacity(u, ctx) {
     const seats = u.accounts.filter((a) => (a.provider || 'claude') === 'claude' && (a.five_pct != null || a.week_pct != null));
-    const best = seats.filter((a) => qualifies(a, ctx)).sort((x, y) => loadOf(x) - loadOf(y))[0];
+    const ranked = seats.filter((a) => qualifies(a, ctx)).sort((x, y) => loadOf(x) - loadOf(y));
+    // Shown as next ('If you run out', ⇄): the account auto-switch would take (under both auto-switch percents, ctx.at),
+    // else the most headroom. With the default percents (100/100) both are ranked[0].
+    const auto = ranked.find((a) => !overAt({ five: a.five_pct, week: a.week_pct }, ctx.at || FULL)), best = auto || ranked[0];
     const fresh = Object.fromEntries(seats.map((a) => [a.label, isFresh(a, ctx.now)]));
     return { you: ctx.you,
         best: best ? { label: best.label, five: best.five_pct, week: best.week_pct } : null,
         loads: Object.fromEntries(seats.map((a) => [a.label, loadOf(a)])), fresh,
+        pcts: Object.fromEntries(seats.map((a) => [a.label, { five: a.five_pct, week: a.week_pct }])),
+        ranked: ranked.map((a) => a.label),  // every switch target, most headroom first
+        autoNext: auto ? auto.label : null,
         activeFresh: !!ctx.you && fresh[ctx.you] === true,
         activeSwitchFresh: !!ctx.you && seats.some((a) => a.label === ctx.you && isFresh(a, ctx.now, SWITCH_FRESH_SECS)) };
 }
 
-// Auto-switch target: the best qualifying account, but only when the active account is full (100% on 5h or weekly)
-// and its own data is under 15 min old. Returns a label (ccswitch's rule) or null.
-function autoTarget(cap) {
-    if (!cap.you || !cap.activeSwitchFresh || !(cap.loads[cap.you] >= 100) || !cap.best) return null;
-    return isLabel(cap.best.label) ? cap.best.label : null;
+// Auto-switch percents, one per window, never mixed: { five, week }. FULL (100/100) switches only when full.
+const FULL = { five: 100, week: 100 };
+// The window that reached its own percent ('five' or 'week'), or null. A window with no data never counts.
+const overAt = (p, at) => !p ? null : p.five != null && p.five >= at.five ? 'five' : p.week != null && p.week >= at.week ? 'week' : null;
+
+// Auto-switch target: when the active account's 5h or weekly window has reached its own percent and its data is under
+// 15 min old, the qualifying account with the most headroom that is under BOTH percents (else the next check would
+// switch straight back). Returns a label (ccswitch's rule) or null.
+function autoTarget(cap, at = FULL) {
+    if (!cap.you || !cap.activeSwitchFresh || !overAt(cap.pcts[cap.you], at)) return null;
+    const to = (cap.ranked || []).find((l) => !overAt(cap.pcts[l], at));
+    return to && isLabel(to) ? to : null;
 }
+
+// One auto-switch percent setting: a whole percent from 50 to 100; anything else is 100 (switch only when full).
+const autoPct = (v) => Number.isInteger(v) && v >= 50 && v <= 100 ? v : 100;
+function autoAt() {
+    const c = vscode.workspace.getConfiguration('claudeUsage');
+    return { five: autoPct(c.get('autoSwitchAtFiveHour')), week: autoPct(c.get('autoSwitchAtWeekly')) };
+}
+// The panel's label: 'Auto-switch at 100%', or 'Auto-switch at 5h 95% · weekly 100%' when the two differ.
+const autoLabel = (at) => 'Auto-switch at ' + (at.five === at.week ? at.five + '%' : `5h ${at.five}% · weekly ${at.week}%`);
 
 // Status bar: `● <you> <5h>%/<wk>% · ⇄ <next-best>`. ◷ marks data that is not fresh; $(sync) marks auto-switch on; $(refresh~spin), the reload button's icon, marks a fetch running.
 // Only the best qualifying account is named, so a stale or dead account is never counted as available.
@@ -255,9 +277,9 @@ function statusTooltip(cap, accounts, auto, now = Date.now() / 1000) {
         const mark = (new Set(cap.relogin || [])).has(cap.you) ? ' · re-login' : age === 'no data' ? ' · no data' : age ? ` · data ${age}` : '';
         lines.push(row('5h', me && me.five_pct, me && me.five_reset_epoch, mark), row('Weekly', me && me.week_pct, me && me.week_reset_epoch, ''));
     }
-    const next = cap.best ? mdSafe(cap.best.label) : null;
+    const next = cap.best ? mdSafe(cap.best.label) : null, autoNext = cap.autoNext ? mdSafe(cap.autoNext) : null;
     lines.push(auto
-        ? `$(sync) Auto-switch on → ${next || 'none'}${NB}${NB}[$(debug-pause)](command:claudeUsage.toggleAutoSwitch "Turn auto-switch off")`
+        ? `$(sync) Auto-switch on → ${autoNext || 'none'}${NB}${NB}[$(debug-pause)](command:claudeUsage.toggleAutoSwitch "Turn auto-switch off")`
         : `$(circle-slash) Auto-switch off${next ? ' · next ' + next : ''}${NB}${NB}[$(play)](command:claudeUsage.toggleAutoSwitch "Turn auto-switch on")`);
     const md = new vscode.MarkdownString(lines.join('\n\n'), true);
     md.supportHtml = true;
@@ -279,7 +301,7 @@ function readAccounts() {
     const now = Date.now() / 1000;
     const u = readSnapshot();
     u.accounts = u.accounts.map((a) => rolled(a, now));
-    const cap = capacity(u, { you: activeLabel(), isSaved: saved, relogin, now });
+    const cap = capacity(u, { you: activeLabel(), isSaved: saved, relogin, now, at: autoAt() });
     const accounts = u.accounts.map((a) => ({ ...a, email: isClaude(a) ? emailOf(a.label) : null }));
     cap.loginHealth = loginHealth;
     cap.saved = fs.existsSync(CCSWITCH) ? accounts.map((a) => a.label).filter(saved) : null;  // null = no ccswitch
@@ -292,7 +314,7 @@ function readAccounts() {
 // An active account with no row (not saved, no data) gets one. A Codex row is read-only: a lock (or 'full'), no actions.
 const TIPS = { active: 'Active account', relogin: 'Needs re-login', full: 'A limit is at 100%', switch: 'You can switch here',
     readonly: 'Codex (read-only)', '': '' };
-function panelData(accounts, cap, { now, installed, auto, team = false, histRange = 'auto', historyOn = false }) {
+function panelData(accounts, cap, { now, installed, auto, autoAt: at = FULL, team = false, histRange = 'auto', historyOn = false }) {
     const savedSet = new Set(cap.saved || []), dead = new Set(cap.relogin || []);
     const ctx = { you: cap.you, isSaved: (l) => savedSet.has(l), relogin: dead, now };
     const pct = (v) => (v == null ? null : Math.round(v));
@@ -338,7 +360,7 @@ function panelData(accounts, cap, { now, installed, auto, team = false, histRang
                 fivePace: pace(a.history, 'p5', 'r5'), weekPace: pace(a.history, 'p7', 'r7') };
         });
     return {
-        installed, auto, team, loginHealth: cap.loginHealth || 'unknown',
+        installed, auto, autoLabel: autoLabel(at), team, loginHealth: cap.loginHealth || 'unknown',
         active: mine ? { label: mine.label, email: mine.email || null, five: pct(mine.five_pct), week: pct(mine.week_pct),
             fiveReset: reset(mine.five_reset_epoch), weekReset: reset(mine.week_reset_epoch), age: age(mine),
             fivePace: activePace('p5', 'r5'), weekPace: activePace('p7', 'r7') } : null,
@@ -352,7 +374,7 @@ function panelData(accounts, cap, { now, installed, auto, team = false, histRang
 // Turning auto-switch ON switches accounts with nobody watching, so it asks in a modal and records the yes in
 // globalState (state); auto-switch never acts without it. OFF needs no dialog. Returns true when the setting changed.
 const AUTO_DETAIL = 'Auto-switch changes the Claude Code account for every Claude Code session on this machine, without asking, '
-    + 'when the active account reaches 100% (5h or weekly). If it is already at 100%, it switches right away. '
+    + 'when the active account reaches 100% (5h or weekly), or the lower percents set in Auto Switch At Five Hour / Weekly. If it is already there, it switches right away. '
     + 'Open Claude Code tabs use the new account from their next message.';
 const CONSENT = 'claudeUsage.autoSwitchConsent';
 async function askAutoConsent(state) {
@@ -543,7 +565,7 @@ function mergeLogins(prev, doc, isSaved) {
 
 // The one guarded fetch: every `ccswitch usage --json` run goes through here, so two never overlap. A caller that
 // arrives while one runs gets that run's promise. onBusy (set by activate) tells the panel to spin; it never rejects.
-// A manual fetch (the reload button, the Refresh command) adds --refresh, past ccswitch's 10-min usage cache, at most
+// A manual fetch (the reload button, the Refresh command) adds --refresh, past ccswitch's 4-min usage cache, at most
 // once per MANUAL_LIVE_MS; ccswitch still keeps its 429 backoff and its refresh lock. Timers always read the cache.
 const MANUAL_LIVE_MS = 60 * 1000;
 let inflight = null, onBusy = () => {}, lastLive = -Infinity;
@@ -606,7 +628,7 @@ function autoBlock(g) {
     if (!g.installed) return 'no ccswitch';
     if (!g.checked) return 'no login check yet';
     if (g.health !== 'known') return 'login health unknown';
-    return autoTarget(g.cap) ? null : 'no target';
+    return autoTarget(g.cap, g.at) ? null : 'no target';
 }
 
 function writeAutoStamp(secs) {
@@ -630,7 +652,8 @@ function takeAutoLock(now) {
 async function autoSwitchOnce(cap, state) {
     const on = !!vscode.workspace.getConfiguration('claudeUsage').get('autoSwitch');
     if (on && !state.get(CONSENT) && !(await confirmAutoOn(state))) return { skip: 'no consent' };
-    const why = autoBlock({ on, consented: !!state.get(CONSENT), installed: fs.existsSync(CCSWITCH), checked: loginChecked, health: loginHealth, cap });
+    const at = autoAt();
+    const why = autoBlock({ on, consented: !!state.get(CONSENT), installed: fs.existsSync(CCSWITCH), checked: loginChecked, health: loginHealth, cap, at });
     if (why) return { skip: why };
     const now = Date.now() / 1000;
     const cooling = () => {
@@ -641,10 +664,11 @@ async function autoSwitchOnce(cap, state) {
     if (!takeAutoLock(now)) return { skip: 'busy' };
     try {
         if (cooling()) return { skip: 'cooldown' };  // again under the lock: another window may have just switched
-        const live = readAccounts().cap, from = cap.you, to = autoTarget(live);  // the poll's cap may be a minute old
+        const live = readAccounts().cap, from = cap.you, to = autoTarget(live, at);  // the poll's cap may be a minute old
         if (live.you !== from || !to) return { skip: 'moved' };
         writeAutoStamp(now);
-        return { from, to, r: await ccswitch([to]) };
+        const p = live.pcts[from], w = overAt(p, at);
+        return { from, to, why: p.five >= 100 || p.week >= 100 ? 'full' : `at ${Math.round(p[w])}% (${w === 'five' ? '5h' : 'weekly'})`, r: await ccswitch([to]) };
     } finally { fs.rmSync(AUTO_LOCK, { recursive: true, force: true }); }
 }
 
@@ -658,7 +682,7 @@ async function autoSwitch(cap, state, onDone) {
     if (!res.r) return res;
     if (!res.r.ok) { vscode.window.showErrorMessage(`Auto-switch to ${res.to} failed: ` + res.r.msg); return res; }
     onDone();
-    const next = await vscode.window.showWarningMessage(`Auto-switched Claude Code: ${res.from} is full, now on ${res.to} (most headroom). Open Claude Code tabs use it from their next message.`, 'Turn auto-switch off');
+    const next = await vscode.window.showWarningMessage(`Auto-switched Claude Code: ${res.from} is ${res.why}, now on ${res.to} (most headroom). Open Claude Code tabs use it from their next message.`, 'Turn auto-switch off');
     if (next === 'Turn auto-switch off') changeAutoSwitch(false);
     return res;
 }
@@ -730,7 +754,8 @@ function activate(context) {
         if (!view || !cap) return;
         const now = Date.now() / 1000, want = (l) => historyOn || l === cap.you;
         view.webview.postMessage({ ...panelData(view.visible ? withHistory(accounts, want, now) : accounts, cap,
-            { now, installed: fs.existsSync(CCSWITCH), auto: !!cap.auto, team: !!usageFile(), histRange, historyOn }), schedule });
+            { now, installed: fs.existsSync(CCSWITCH), auto: !!cap.auto, autoAt: autoAt(),
+                team: !!usageFile(), histRange, historyOn }), schedule });
     };
     const readSchedule = () => scheduleRead().then((s) => { schedule = s; push(); });
     const toggleSchedule = () => scheduleChange(!(schedule && schedule.on)).then(readSchedule);
@@ -807,8 +832,8 @@ function activate(context) {
     const update = () => checkUpdate(context.globalState);
     const firstUpdate = setTimeout(update, 15 * 1000), updateTimer = setInterval(update, UPDATE_EVERY_MS);
     context.subscriptions.push({ dispose: () => { clearTimeout(firstUpdate); clearInterval(updateTimer); } });
-    // ccswitch's own cache: refresh at its 10-min TTL; with a team file, hourly is enough to keep tokens alive
-    const healthTimer = setInterval(health, (usageFile() ? 60 : 10) * 60 * 1000);
+    // ccswitch's own cache: every 5 min, 60 s past its 4-min TTL; with a team file, hourly is enough to keep tokens alive
+    const healthTimer = setInterval(health, (usageFile() ? 60 : 5) * 60 * 1000);
     context.subscriptions.push({ dispose: () => { clearTimeout(firstCheck); clearInterval(healthTimer); } });
     let watched = usageFile() || ACCOUNTS;
     fs.watchFile(watched, { interval: 5000 }, poll);  // refresh as soon as new numbers land
