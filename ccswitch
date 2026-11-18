@@ -118,7 +118,9 @@ OAUTH_CLIENT_ID="9d1c250a-e61b-44d9-88ed-5944d1962f5e"
 # a false re-login.
 REFRESH_BACKOFF_SECONDS=300
 
-USAGE_CACHE_TTL_SECONDS=600
+# The sidebar fetches every 5 min. The TTL sits 60 s under that, like the
+# schedule tick's, so a tick a second early still fetches instead of reusing.
+USAGE_CACHE_TTL_SECONDS=240
 USAGE_RATE_LIMIT_BACKOFF_SECONDS=120
 USAGE_METER_WIDTH=12
 
@@ -2195,7 +2197,7 @@ COMMANDS
 
 usage FLAGS
   --no-switch   just print the table, do not prompt to switch
-  --refresh     bypass the 10-minute usage cache and re-poll now
+  --refresh     bypass the 4-minute usage cache and re-poll now
   --json        print one JSON document (implies --no-switch)
   --relaunch    after switching from the prompt, exec the claude CLI
 

@@ -249,6 +249,10 @@ run(async () => {
         assert.strictEqual(open.split('role="switch"').length - 1, 1);
         assert.match(open, /role="switch"[^>]*aria-checked="false"/);
         assert.ok(open.includes('Auto-switch at 100%'));
+        assert.ok(p.render(pdFour(), ui({ automationOpen: true })).includes('aria-label="Auto-switch at 100%"'));
+        const eager = p.render({ ...pdFour(), autoLabel: 'Auto-switch at 5h 95% · weekly 100%' }, ui({ automationOpen: true }));
+        assert.ok(eager.includes('<span>Auto-switch at 5h 95% · weekly 100%</span>'), 'the label follows the two percent settings');
+        assert.ok(!p.render({ ...pdFour(), autoLabel: '<b>x</b>' }, ui({ automationOpen: true })).includes('<b>x'), 'the label is escaped');
         assert.ok(open.includes('Asks once when you turn it on.'), 'one visible line, not only a tooltip');
         assert.ok(!p.render({ ...pdFour(), installed: false }, ui({ automationOpen: true })).includes('role="switch"'), 'no ccswitch, no toggle');
     });

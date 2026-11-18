@@ -130,9 +130,47 @@ run(async () => {
     await check('autoTarget: never when the active account\'s data is stale or below 100%', () => {
         const cap = capNow();
         assert.strictEqual(e.autoTarget({ ...cap, activeFresh: false, activeSwitchFresh: false }), null);
-        assert.strictEqual(e.autoTarget({ ...cap, loads: { ...cap.loads, work: 99 } }), null);
-        assert.strictEqual(e.autoTarget({ ...cap, best: null }), null);
+        assert.strictEqual(e.autoTarget({ ...cap, pcts: { ...cap.pcts, work: { five: 99, week: 40 } } }), null);
+        assert.strictEqual(e.autoTarget({ ...cap, ranked: [] }), null);
         assert.strictEqual(e.autoTarget({ ...cap, you: null }), null);
+    });
+
+    await check('eager autoTarget: each window has its own percent, never mixed; the target is under both', () => {
+        const cap = capNow(), with_ = (pcts, ranked = cap.ranked) => ({ ...cap, ranked, pcts: { ...cap.pcts, ...pcts } });
+        const at = (five, week) => ({ five, week });
+        const P = (five, week) => ({ five, week });
+        assert.strictEqual(e.autoTarget(with_({ work: P(96, 10) }), at(95, 100)), 'personal', '5h past its percent');
+        assert.strictEqual(e.autoTarget(with_({ work: P(95, 10) }), at(95, 100)), 'personal', 'at the percent counts');
+        assert.strictEqual(e.autoTarget(with_({ work: P(94, 10) }), at(95, 100)), null);
+        assert.strictEqual(e.autoTarget(with_({ work: P(10, 96) }), at(100, 95)), 'personal', 'weekly past its percent');
+        assert.strictEqual(e.autoTarget(with_({ work: P(10, 96) }), at(95, 100)), null, 'the 5h percent never applies to the weekly window');
+        assert.strictEqual(e.autoTarget(with_({ work: P(96, 10) }), at(100, 95)), null, 'the weekly percent never applies to the 5h window');
+        assert.strictEqual(e.autoTarget(with_({ work: P(96, 10) })), null, 'the default is 100/100: only when full');
+        assert.strictEqual(e.autoTarget(with_({ work: P(97, 10), personal: P(95, 5) }, ['personal']), at(95, 100)), null, 'a target at the percent would switch straight back');
+        assert.strictEqual(e.autoTarget(with_({ work: P(97, 10), personal: P(95, 5), half: P(null, 30) }, ['personal', 'half']), at(95, 100)), 'half',
+            'skips a target over a percent and takes the next with room');
+        assert.strictEqual(e.autoTarget(with_({ work: P(100, 10), personal: P(99, 5) })), 'personal', '100/100 keeps the old rule: any target under 100');
+    });
+
+    await check('two percents: the panel\'s next is the account auto-switch would take (review finding)', () => {
+        const a = [acct('work', 100, 40, now - 60), acct('B', 50, 85, now - 60), acct('C', 90, 70, now - 60)];
+        const at = { five: 100, week: 80 }, cap = { ...capOf(a, 'work'), ...e.capacity({ accounts: a }, { you: 'work', isSaved: () => true, relogin: new Set(), now, at }) };
+        assert.deepStrictEqual(cap.ranked, ['B', 'C'], 'B has the most headroom');
+        assert.strictEqual(cap.best.label, 'C', 'B is over the weekly percent, so C is shown');
+        assert.strictEqual(cap.autoNext, 'C');
+        assert.strictEqual(e.autoTarget(cap, at), 'C');
+        const none = e.capacity({ accounts: a }, { you: 'work', isSaved: () => true, relogin: new Set(), now, at: { five: 50, week: 50 } });
+        assert.strictEqual(none.autoNext, null, 'no account under both percents: auto-switch has none');
+        assert.strictEqual(none.best.label, 'B', 'manual switching still shows the most headroom');
+        assert.strictEqual(capOf(a, 'work').best.label, 'B', 'default percents: most headroom, as before');
+    });
+
+    await check('autoPct and autoLabel: a whole percent from 50 to 100, else 100; one label when the two match', () => {
+        for (const [v, want] of [[95, 95], [50, 50], [100, 100], [49, 100], [101, 100], [95.5, 100], ['95', 100], [undefined, 100], [null, 100]])
+            assert.strictEqual(e.autoPct(v), want, String(v));
+        assert.strictEqual(e.autoLabel(e.FULL), 'Auto-switch at 100%');
+        assert.strictEqual(e.autoLabel({ five: 90, week: 90 }), 'Auto-switch at 90%');
+        assert.strictEqual(e.autoLabel({ five: 95, week: 100 }), 'Auto-switch at 5h 95% · weekly 100%');
     });
 
     await check('switching needs data under 15 min; display keeps 30 min', () => {

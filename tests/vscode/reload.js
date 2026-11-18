@@ -25,7 +25,7 @@ run(async () => {
         vscode.commands = { registerCommand: () => ({ dispose() {} }), executeCommand: async () => {} };
         vscode.extensions = { getExtension: () => undefined };
         vscode.workspace.onDidChangeConfiguration = () => ({ dispose() {} });
-        global.setTimeout = (f, ms, ...a) => (ms === 30000 || ms === 600000 ? (timers.push([ms, f]), 0) : keep.st(f, ms, ...a));  // capture the app's timers, keep the rest real
+        global.setTimeout = (f, ms, ...a) => (ms === 30000 || ms === 300000 ? (timers.push([ms, f]), 0) : keep.st(f, ms, ...a));  // capture the app's timers, keep the rest real
         global.setInterval = (f, ms) => { timers.push([ms, f]); return 0; };
         const fetches = () => (fs.existsSync(LOG) ? fs.readFileSync(LOG, 'utf8') : '').split('\n').filter((l) => l.startsWith('usage --json')).length;
         const busyOf = () => posted.filter((m) => m.kind === 'busy').map((m) => m.on);
@@ -37,8 +37,8 @@ run(async () => {
             const v = { visible: true, onDidChangeVisibility: () => {}, onDidDispose: () => {},
                 webview: { ...fakeWebview, postMessage: async (m) => { posted.push(m); }, onDidReceiveMessage: (f) => { onMsg = f; } } };
             provider.resolveWebviewView(v);
-            const poll = timers.find(([ms]) => ms === 60000)[1], timed = timers.filter(([ms]) => ms === 600000 || ms === 30000).map(([, f]) => f);
-            assert.strictEqual(timed.length, 2, 'the 30 s first check and the 10 min check');
+            const poll = timers.find(([ms]) => ms === 60000)[1], timed = timers.filter(([ms]) => ms === 300000 || ms === 30000).map(([, f]) => f);
+            assert.strictEqual(timed.length, 2, 'the 30 s first check and the 5 min check');
             poll(); await idle();
             assert.deepStrictEqual(busyOf(), [], 'the 60 s cache re-read never spins');
             const n0 = fetches();
@@ -50,7 +50,7 @@ run(async () => {
             assert.ok(sbi.text.startsWith('●') && !sbi.text.includes('spin'), 'the status bar icon stops: ' + sbi.text);
             assert.strictEqual(fetches() - n0, 1, 'the second click ran no second fetch');
             posted.length = 0;
-            timed[1](); assert.deepStrictEqual(busyOf(), [true], 'the 10 min fetch spins');
+            timed[1](); assert.deepStrictEqual(busyOf(), [true], 'the 5 min fetch spins');
             await idle(); assert.deepStrictEqual(busyOf(), [true, false]);
             posted.length = 0;
             timed[0](); assert.deepStrictEqual(busyOf(), [true], 'the 30 s first check spins');
@@ -134,7 +134,7 @@ run(async () => {
         vscode.commands = { registerCommand: (id, f) => { cmds[id] = f; return { dispose() {} }; }, executeCommand: async () => {} };
         vscode.extensions = { getExtension: () => undefined };
         vscode.workspace.onDidChangeConfiguration = () => ({ dispose() {} });
-        global.setTimeout = (f, ms, ...a) => (ms === 30000 || ms === 600000 ? (timers.push([ms, f]), 0) : keep.st(f, ms, ...a));
+        global.setTimeout = (f, ms, ...a) => (ms === 30000 || ms === 300000 ? (timers.push([ms, f]), 0) : keep.st(f, ms, ...a));
         global.setInterval = (f, ms) => { timers.push([ms, f]); return 0; };
         const busyOf = () => posted.filter((m) => m.kind === 'busy').map((m) => m.on);
         const idle = async () => { for (let i = 0; i < 200 && busyOf().length % 2; i++) await new Promise((r) => keep.st(r, 25)); };
@@ -145,7 +145,7 @@ run(async () => {
             global.setTimeout = keep.st; global.setInterval = keep.si;
             provider.resolveWebviewView({ visible: true, onDidChangeVisibility: () => {}, onDidDispose: () => {},
                 webview: { ...fakeWebview, postMessage: async (m) => { posted.push(m); }, onDidReceiveMessage: (f) => { onMsg = f; } } });
-            const timed = timers.filter(([ms]) => ms === 600000).map(([, f]) => f)[0];
+            const timed = timers.filter(([ms]) => ms === 300000).map(([, f]) => f)[0];
             onMsg({ refresh: 1 }); await idle();
             assert.strictEqual(lastFetch(), 'usage --json --refresh', 'a click asks ccswitch for live numbers');
             onMsg({ refresh: 1 }); await idle();

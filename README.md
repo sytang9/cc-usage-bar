@@ -94,7 +94,7 @@ To wire up the statusLine by hand instead, merge this into
 ./uninstall.sh
 ```
 
-Removes the two scripts from `~/.claude`, the `~/.local/bin/ccswitch` symlink,
+Removes the installed scripts from `~/.claude`, the `~/.local/bin/ccswitch` symlink,
 and the `statusLine` entry from `settings.json` — each only if it is still
 ours, so a `statusLine` you have since repointed at your own script survives.
 If you turned on `ccswitch schedule`, it also removes that one crontab line (no other line).
@@ -250,7 +250,7 @@ window's reset countdown, so you can decide where to switch before you do it:
 Flags:
 
 - `--no-switch` — print the table and exit; skip the switch prompt.
-- `--refresh` — bypass the 10-minute usage cache and poll live.
+- `--refresh` — bypass the 4-minute usage cache and poll live.
 - `--relaunch` — if you do switch from the prompt, exec `claude` afterward
   (optional; same behavior as `ccswitch <label> --relaunch`).
 
@@ -275,7 +275,7 @@ after the Claude accounts:
   never offered as a switch target or flagged as most headroom.
 - Windows the plan does not report show `—` (some plans report only the
   weekly window). Results are cached in `${CODEX_HOME:-~/.codex}/.usage-cache`
-  (mode `600`, no token or account id) under the same 10-minute cache and
+  (mode `600`, no token or account id) under the same 4-minute cache and
   429 backoff as the Claude rows.
 - No Codex login, or an API-key login, means no row and no other change.
 - The row needs at least one saved Claude account: with none, `ccswitch usage`
@@ -392,7 +392,13 @@ bottom:
 - **Automation** — collapsed by default; the header says **On** or **Off**.
   **Auto-switch at 100%** (off by default): when
   the active account reaches 100% (5h or weekly), switch to the account in **If
-  you run out**, without asking. Turning it on opens one confirmation dialog
+  you run out**, without asking. To switch before the limit stops a running
+  task, set a lower percent per window: `claudeUsage.autoSwitchAt5h` and
+  `claudeUsage.autoSwitchAtWeekly` (whole numbers from 50 to 100; default 100).
+  Each is checked against its own window only, never mixed: with 5h at 95 and
+  weekly at 100, a 96% weekly window does not switch. The label then reads, for
+  example, **Auto-switch at 5h 95% · weekly 100%**. The target must be under
+  both percents, so it never switches straight back. Turning it on opens one confirmation dialog
   that says so, and VS Code records your answer on this machine. Auto-switch
   never acts without that answer: if the setting is on from Settings,
   settings.json or an older version, the sidebar shows the same dialog once, and
@@ -401,15 +407,15 @@ bottom:
   machine-scoped, so Settings Sync never carries it to another machine). It acts only after a login check since VS Code started that could
   judge dead logins (`login_health` `known`), and never when the active
   account's own data is over 15 minutes old. Right before it runs `ccswitch`, it
-  reads the live account again and stops unless that account is still the full
-  one. At most once every 10 minutes on this machine, across all VS Code windows:
+  reads the live account again and stops unless that account is still the one at
+  or over the percent. At most once every 10 minutes on this machine, across all VS Code windows:
   the last switch time is in `~/.claude/accounts/.autoswitch.json`, and a lock
   (`.autoswitch.lock`) lets one window at a time decide and switch.
 
 **History** draws each account's usage over time from
 `~/.claude/accounts/<label>/.usage-history.jsonl`, which ccswitch appends to on
-every live fetch (30 days kept; the sidebar asks ccswitch every 10 minutes, and
-ccswitch reuses numbers under 10 minutes old, so a point every 10-20 minutes
+every live fetch (30 days kept; the sidebar asks ccswitch every 5 minutes, and
+ccswitch reuses numbers under 4 minutes old, so a point about every 5 minutes
 while VS Code is open). The
 active account is open first; click a row to open another. Each has two lines:
 **Session (5hr) · last 24h** and **Weekly (7 day) · last 7d**, with a dashed
@@ -450,8 +456,8 @@ by Microsoft (font CC BY 4.0, CSS MIT), vendored with their licences in
 `vscode/webview/codicons/` from `@vscode/codicons` 0.0.46-24.
 
 Usage comes from `ccswitch`'s own cache
-(`~/.claude/accounts/<label>/.usage-cache`). Every 10 minutes (the cache TTL)
-the sidebar runs `ccswitch usage --json`, which refreshes it, keeps idle
+(`~/.claude/accounts/<label>/.usage-cache`). Every 5 minutes (60 s past the
+4-minute cache TTL, so no run finds the cache a second too young) the sidebar runs `ccswitch usage --json`, which refreshes it, keeps idle
 accounts' tokens alive and reports each login as `ok` or `re-login`. **How to
 re-login** opens a terminal with `claude` for a one-time `/login`, then you save
 the login. A failed check (timeout, an error) keeps the last known re-login
