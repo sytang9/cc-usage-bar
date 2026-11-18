@@ -27,6 +27,10 @@ block above is the plain-text equivalent.
   It replaces each subagent's row in the agent panel with its type, label,
   model, session size (`ctx`), tokens read with the cached share (`tok`),
   cache misses, running time or done, and worktree.
+- **`limit-hook.sh`** — a Claude Code `StopFailure` hook (matcher
+  `rate_limit`). When a turn fails on a rate limit, it writes the time to
+  `~/.claude/accounts/.limit-hit`, so the VS Code sidebar fetches live usage
+  at once and can auto-switch without waiting for its next 5-minute fetch.
 - **`ccswitch`** — log in to a Claude account and save it under a
   label (or save the current login), list saved accounts, switch between them, or delete one.
 - **`ccswitch usage`** — an all-account monitor: polls the 5h/weekly usage
@@ -70,6 +74,8 @@ cd cc-usage-bar
 - Merges the `statusLine` entry into `~/.claude/settings.json` — creating
   the file if it doesn't exist, or backing it up to `settings.json.bak` and
   merging in place (via `jq`) if it does, so no other keys are touched.
+- Appends one `StopFailure` hook entry (`limit-hook.sh`, matcher
+  `rate_limit`) to `hooks` in the same file, next to any hooks you have.
 - Offers to append a `ccw` shell function (switch-and-relaunch shorthand) to
   `~/.bashrc` (or `~/.zshrc` if your shell is zsh); only appends once.
 - Is safe to run more than once. Run `./install.sh --print-only` to see
@@ -97,6 +103,7 @@ To wire up the statusLine by hand instead, merge this into
 Removes the installed scripts from `~/.claude`, the `~/.local/bin/ccswitch` symlink,
 and the `statusLine` entry from `settings.json` — each only if it is still
 ours, so a `statusLine` you have since repointed at your own script survives.
+It takes our `StopFailure` hook entry out too, and leaves your own hooks.
 If you turned on `ccswitch schedule`, it also removes that one crontab line (no other line).
 Your saved accounts under `~/.claude/accounts/` are **kept**: they are live
 OAuth credentials that exist nowhere else. Add `--purge-accounts` to delete
@@ -411,6 +418,14 @@ bottom:
   or over the percent. At most once every 10 minutes on this machine, across all VS Code windows:
   the last switch time is in `~/.claude/accounts/.autoswitch.json`, and a lock
   (`.autoswitch.lock`) lets one window at a time decide and switch.
+  **When a turn hits a limit:** `limit-hook.sh` (installed by `install.sh`)
+  marks it in `~/.claude/accounts/.limit-hit`. Within about 2 seconds one
+  VS Code window takes the mark and fetches live usage (`usage --json
+  --refresh`, at most once per 60 s), and the check after it can switch at
+  once. The fetch is the proof: a `rate_limit` can also be a capacity cut, and
+  then the usage stays under the percent and nothing switches. A mark over
+  2 minutes old (VS Code was closed) is dropped. The failed turn still failed:
+  send it again after the switch, or set the percents lower to switch first.
 
 **History** draws each account's usage over time from
 `~/.claude/accounts/<label>/.usage-history.jsonl`, which ccswitch appends to on
@@ -540,7 +555,7 @@ every push and pull request.
 Lint every script (CI runs the same command):
 
 ```
-shellcheck --severity=warning --shell=bash ccswitch statusline-usage.sh install.sh uninstall.sh tests/*.sh vscode/build.sh
+shellcheck --severity=warning --shell=bash ccswitch statusline-usage.sh limit-hook.sh install.sh uninstall.sh tests/*.sh vscode/build.sh
 ```
 
 ## License
