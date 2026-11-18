@@ -393,7 +393,7 @@ bottom:
   **Auto-switch at 100%** (off by default): when
   the active account reaches 100% (5h or weekly), switch to the account in **If
   you run out**, without asking. To switch before the limit stops a running
-  task, set a lower percent per window: `claudeUsage.autoSwitchAt5h` and
+  task, set a lower percent per window: `claudeUsage.autoSwitchAtFiveHour` and
   `claudeUsage.autoSwitchAtWeekly` (whole numbers from 50 to 100; default 100).
   Each is checked against its own window only, never mixed: with 5h at 95 and
   weekly at 100, a 96% weekly window does not switch. The label then reads, for

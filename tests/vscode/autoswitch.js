@@ -208,7 +208,7 @@ run(async () => {
             assert.strictEqual(e.autoBlock({ ...g, cap: { ...cap, ranked: ['-h'] } }), 'no target', 'a target must pass the label rule');
         });
 
-        await check('eager auto-switch: 5h at 96% with autoSwitchAt5h 95 -> switches and names the window; the default and the weekly percent wait', async () => {
+        await check('eager auto-switch: 5h at 96% with autoSwitchAtFiveHour 95 -> switches and names the window; the default and the weekly percent wait', async () => {
             const cache = path.join(ACC, 'work', '.usage-cache'), was = fs.readFileSync(cache, 'utf8');
             try {
                 fs.writeFileSync(cache, JSON.stringify({ ...JSON.parse(was), five_hour_pct: 96 }));
@@ -218,16 +218,16 @@ run(async () => {
                 autoReset();
                 assert.strictEqual((await tryAuto(await win())).skip, 'no target', 'the weekly percent does not apply to the 5h window');
                 assert.deepStrictEqual(calls(), []);
-                delete cfg.autoSwitchAtWeekly; cfg.autoSwitchAt5h = 95;
+                delete cfg.autoSwitchAtWeekly; cfg.autoSwitchAtFiveHour = 95;
                 autoReset();
                 const res = await tryAuto(await win());
                 assert.deepStrictEqual(calls(), ['personal']);
                 assert.ok(said.some((t) => t.startsWith('Auto-switched Claude Code: work is at 96% (5h), now on personal')), said.join('|'));
-            } finally { delete cfg.autoSwitchAt5h; delete cfg.autoSwitchAtWeekly; fs.writeFileSync(cache, was); }
+            } finally { delete cfg.autoSwitchAtFiveHour; delete cfg.autoSwitchAtWeekly; fs.writeFileSync(cache, was); }
         });
 
-        await check('autoSwitchAt5h / autoSwitchAtWeekly settings: machine-scoped integers 50-100, default 100', () => {
-            for (const k of ['autoSwitchAt5h', 'autoSwitchAtWeekly']) {
+        await check('autoSwitchAtFiveHour / autoSwitchAtWeekly settings: machine-scoped integers 50-100, default 100', () => {
+            for (const k of ['autoSwitchAtFiveHour', 'autoSwitchAtWeekly']) {
                 const p = require('../../vscode/package.json').contributes.configuration.properties['claudeUsage.' + k];
                 assert.deepStrictEqual([p.type, p.default, p.minimum, p.maximum, p.scope], ['integer', 100, 50, 100, 'machine'], k);
             }

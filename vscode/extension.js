@@ -234,7 +234,7 @@ function autoTarget(cap, at = FULL) {
 const autoPct = (v) => Number.isInteger(v) && v >= 50 && v <= 100 ? v : 100;
 function autoAt() {
     const c = vscode.workspace.getConfiguration('claudeUsage');
-    return { five: autoPct(c.get('autoSwitchAt5h')), week: autoPct(c.get('autoSwitchAtWeekly')) };
+    return { five: autoPct(c.get('autoSwitchAtFiveHour')), week: autoPct(c.get('autoSwitchAtWeekly')) };
 }
 // The panel's label: 'Auto-switch at 100%', or 'Auto-switch at 5h 95% · weekly 100%' when the two differ.
 const autoLabel = (at) => 'Auto-switch at ' + (at.five === at.week ? at.five + '%' : `5h ${at.five}% · weekly ${at.week}%`);
@@ -374,7 +374,7 @@ function panelData(accounts, cap, { now, installed, auto, autoAt: at = FULL, tea
 // Turning auto-switch ON switches accounts with nobody watching, so it asks in a modal and records the yes in
 // globalState (state); auto-switch never acts without it. OFF needs no dialog. Returns true when the setting changed.
 const AUTO_DETAIL = 'Auto-switch changes the Claude Code account for every Claude Code session on this machine, without asking, '
-    + 'when the active account reaches 100% (5h or weekly), or the lower percents set in Auto Switch At 5h / Weekly. If it is already there, it switches right away. '
+    + 'when the active account reaches 100% (5h or weekly), or the lower percents set in Auto Switch At Five Hour / Weekly. If it is already there, it switches right away. '
     + 'Open Claude Code tabs use the new account from their next message.';
 const CONSENT = 'claudeUsage.autoSwitchConsent';
 async function askAutoConsent(state) {
